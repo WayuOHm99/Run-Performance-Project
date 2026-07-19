@@ -328,16 +328,63 @@ def write_context(day_dir: Path, athlete: str, day: str, blocks: list[dict]) -> 
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ---------------- เช็คสุขภาพระบบ ----------------
+
+def health_check(api: Api) -> None:
+    """ตอบคำถาม 'ระบบยังรับข้อมูลปกติไหม' ในคำสั่งเดียว — อ่านอย่างเดียว ไม่เขียนไม่ลบ"""
+    now = datetime.now(TH)
+    print("\n=== เช็คสุขภาพระบบรับข้อมูล ===\n")
+
+    q = urllib.parse.urlencode({"select": "sent_at", "order": "sent_at.desc", "limit": "1"})
+    rows = json.loads(api._req("GET", f"/rest/v1/line_messages?{q}"))
+    if rows:
+        last = parse_ts(rows[0]["sent_at"])
+        age_h = (now - last).total_seconds() / 3600
+        print(f"ของล่าสุดที่เข้าระบบ : {last:%Y-%m-%d %H:%M} ({age_h:.1f} ชม.ที่แล้ว)")
+        if age_h > 48:
+            print("  ! เกิน 48 ชม. ไม่มีอะไรเข้าเลย — ถ้าทีมยังส่งรูปกันอยู่ webhook อาจพัง")
+            print("    เช็คตามลำดับ: bot ยังอยู่ในกลุ่ม? / สวิตช์ Use webhook เปิดอยู่? / token หมดอายุ?")
+    else:
+        print("ยังไม่มีข้อความเข้าระบบเลยสักรายการ")
+
+    print(f"ค้างรอดึงลงเครื่อง   : {len(api.pending())} รายการ  (ดึงด้วย python sync_line.py)")
+
+    q = urllib.parse.urlencode({"select": "sent_at,error", "error": "not.is.null",
+                                "order": "sent_at.desc", "limit": "5"})
+    errs = json.loads(api._req("GET", f"/rest/v1/line_messages?{q}"))
+    if errs:
+        print("รายการที่เคยมีปัญหา  : (แสดงล่าสุดไม่เกิน 5)")
+        for e in errs:
+            print(f"    {parse_ts(e['sent_at']):%m-%d %H:%M}  {(e.get('error') or '')[:70]}")
+    else:
+        print("รายการที่เคยมีปัญหา  : ไม่มี")
+
+    q = urllib.parse.urlencode({"select": "display_name,folder_name"})
+    ath = json.loads(api._req("GET", f"/rest/v1/line_athletes?{q}"))
+    mapped = [a for a in ath if (a.get("folder_name") or "").strip()]
+    print(f"คนในระบบ             : {len(ath)} (จับคู่โฟลเดอร์แล้ว {len(mapped)})")
+    for a in ath:
+        if not (a.get("folder_name") or "").strip():
+            print(f"    ยังไม่จับคู่: {a.get('display_name') or '(ไม่รู้ชื่อ)'} — บอก Claude ให้จับคู่ได้")
+    print()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="ดึงรูป/ข้อความจากกลุ่มไลน์ลงเครื่อง")
     ap.add_argument("--dry-run", action="store_true",
                     help="แสดงว่าจะทำอะไร แต่ไม่เขียนไฟล์ ไม่ลบของบนคลาวด์")
     ap.add_argument("--keep-cloud", action="store_true",
                     help="ดึงลงเครื่องแล้วแต่ไม่ลบไฟล์บนคลาวด์")
+    ap.add_argument("--health", action="store_true",
+                    help="เช็คสุขภาพระบบ (webhook ยังรับของไหม มีอะไรค้าง/พังไหม) อ่านอย่างเดียว")
     args = ap.parse_args()
 
     base_url, key = load_config()
     api = Api(base_url, key)
+
+    if args.health:
+        health_check(api)
+        return
 
     if args.dry_run:
         print("\n*** โหมดทดลอง — ไม่มีการเขียนหรือลบอะไรทั้งสิ้น ***")
