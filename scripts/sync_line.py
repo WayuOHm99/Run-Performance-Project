@@ -30,6 +30,7 @@ sync_line.py — ดึงรูป/ข้อความจากกลุ่�
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import http.client
 import json
 import re
@@ -197,6 +198,25 @@ class Api:
     def download(self, storage_path: str) -> bytes:
         return self._req("GET", f"/storage/v1/object/{BUCKET}/{urllib.parse.quote(storage_path)}")
 
+    def download_isolated(self, storage_path: str) -> bytes:
+        """ดาวน์โหลด 1 รูปผ่าน connection ใหม่ของตัวเอง — thread-safe ใช้ตอนดึงขนาน
+        (http.client ใช้ connection ข้าม thread ไม่ได้ จึงห้ามแตะ self._conn ที่ใช้ร่วมกัน)"""
+        path = f"/storage/v1/object/{BUCKET}/{urllib.parse.quote(storage_path)}"
+        headers = {"apikey": self.key, "Authorization": f"Bearer {self.key}"}
+        conn = self._connect()
+        try:
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+        finally:
+            conn.close()
+        if 200 <= resp.status < 300:
+            return data
+        detail = data.decode("utf-8", "replace")[:400]
+        if resp.status in (400, 404) and "not_found" in detail:
+            raise NotFound(detail)
+        raise RuntimeError(f"HTTP {resp.status} download {storage_path}: {detail}")
+
     def delete_object(self, storage_path: str) -> None:
         self._req("DELETE", f"/storage/v1/object/{BUCKET}/{urllib.parse.quote(storage_path)}")
 
@@ -225,6 +245,26 @@ class Api:
         for i in range(0, len(storage_paths), 500):
             body = json.dumps({"prefixes": storage_paths[i:i + 500]}).encode("utf-8")
             self._req("DELETE", f"/storage/v1/object/{BUCKET}", body, hdr)
+
+
+def fetch_parallel(api: Api, rows: list[dict], workers: int = 5) -> dict[int, bytes | Exception]:
+    """ดาวน์โหลดหลายรูปพร้อมกัน คืน {row_id: bytes ถ้าสำเร็จ / Exception ถ้าพัง}
+    ไม่โยน error ออกมา — เก็บ error (รวม NotFound) ไว้ใน dict ให้ loop จัดการทีละใบเหมือนเดิม
+    ตอนส่งการบ้านชุดใหญ่ 20-30 รูป ดึงขนานเร็วกว่าทีละใบหลายวินาที"""
+    out: dict[int, bytes | Exception] = {}
+    if not rows:
+        return out
+
+    def one(r: dict) -> tuple[int, bytes | Exception]:
+        try:
+            return r["id"], api.download_isolated(r["storage_path"])
+        except Exception as e:                       # NotFound รวมอยู่ในนี้ (เก็บ object ไว้)
+            return r["id"], e
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(rows))) as ex:
+        for rid, res in ex.map(one, rows):
+            out[rid] = res
+    return out
 
 
 # ---------------- จับกลุ่มเซสชัน ----------------
@@ -544,6 +584,14 @@ def main() -> None:
                 print(f"  {day} {t0:%H:%M}-{t1:%H:%M}  รูป {len(imgs)} / ข้อความ {len(txts)}"
                       f"  (ใหม่ {fresh})  {mark}  ({why})")
 
+                # ดึงรูปที่ต้องโหลดแบบขนานไว้ล่วงหน้า แล้ว loop ข้างล่างค่อยหยิบจาก cache
+                # (ตรรกะตัดสิน/เขียน/นับ ไม่เปลี่ยน — แตะแค่ "แหล่งของ bytes")
+                # เผื่อไฟล์มีอยู่แล้วบางใบก็ดึงเกินนิดหน่อย ยอมได้ กันดึงซ้ำหลุด logic ง่ายกว่า
+                fetched: dict[int, bytes | Exception] = {}
+                if not args.dry_run:
+                    need = [r for r in imgs if r["id"] in pending_ids]
+                    fetched = fetch_parallel(api, need)
+
                 saved: list[str] = []       # เฉพาะไฟล์ที่มีจริงบนดิสก์ — context.json ห้ามอ้างรูปที่ไม่มี
                 for n, r in enumerate(imgs, start=1):       # นับจากรูปทั้งเซสชัน ชื่อจึงคงที่ทุกรอบ
                     ext = ".png" if (r.get("content_type") or "").endswith("png") else ".jpg"
@@ -565,19 +613,24 @@ def main() -> None:
                         done.append((r["id"], r.get("storage_path"), None))
                         continue
 
-                    try:
-                        data = api.download(r["storage_path"])
-                    except NotFound:
+                    res = fetched.get(r["id"])
+                    if res is None:                          # กันเหนียว: ไม่ควรเกิด — ดึงสำรองทีละใบ
+                        try:
+                            res = api.download_isolated(r["storage_path"])
+                        except Exception as e:
+                            res = e
+                    if isinstance(res, NotFound):
                         msg = f"{athlete} {day} {fname}: ไฟล์หายจากคลาวด์แล้ว"
                         print(f"      ! {msg}")
                         failures.append(msg)
                         done.append((r["id"], None, "ไฟล์หายจากคลาวด์ ดึงไม่ได้"))
                         continue
-                    except Exception as e:                  # ใบเดียวพัง ต้องไม่ล้มทั้งรอบ
-                        msg = f"{athlete} {day} {fname}: {e}"
-                        print(f"      ! โหลดไม่สำเร็จ — {e}")
+                    if isinstance(res, Exception):           # ใบเดียวพัง ต้องไม่ล้มทั้งรอบ
+                        msg = f"{athlete} {day} {fname}: {res}"
+                        print(f"      ! โหลดไม่สำเร็จ — {res}")
                         failures.append(msg)
                         continue
+                    data = res
 
                     expected = r.get("byte_size")
                     if expected and len(data) != expected:
