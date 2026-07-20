@@ -30,12 +30,11 @@ sync_line.py — ดึงรูป/ข้อความจากกลุ่�
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import re
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -132,26 +131,53 @@ class Api:
     def __init__(self, base_url: str, key: str) -> None:
         self.base = base_url
         self.key = key
+        parts = urllib.parse.urlparse(base_url)
+        self._host = parts.netloc
+        self._use_https = parts.scheme != "http"
+        self._conn: http.client.HTTPConnection | None = None   # เปิดค้างไว้ ใช้ซ้ำ (keep-alive)
+
+    def _connect(self) -> http.client.HTTPConnection:
+        if self._use_https:
+            return http.client.HTTPSConnection(self._host, timeout=60)
+        return http.client.HTTPConnection(self._host, timeout=60)
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def _req(self, method: str, path: str, body: bytes | None = None,
              extra_headers: dict[str, str] | None = None) -> bytes:
-        url = f"{self.base}{path}"
         headers = {"apikey": self.key, "Authorization": f"Bearer {self.key}"}
         if extra_headers:
             headers.update(extra_headers)
-        req = urllib.request.Request(url, data=body, method=method, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return resp.read()
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:400]
-            if e.code in (401, 403):
-                die(f"Supabase ปฏิเสธ ({e.code}) — key ผิดหรือหมดอายุ ลองรัน ตั้งกุญแจ.bat\n       {detail}")
-            if e.code in (400, 404) and "not_found" in detail:
+        # ยิงผ่าน connection เดิมที่เปิดค้างไว้ ถ้ามันขาด/พังค่อยต่อใหม่แล้วลองอีกครั้ง
+        # (เปิด TCP+TLS ใหม่ทุก request ช้ากว่าใช้ซ้ำ ~30% จากที่วัดจริงกับ Supabase)
+        last_err: Exception | None = None
+        for attempt in (1, 2):
+            if self._conn is None:
+                self._conn = self._connect()
+            try:
+                self._conn.request(method, path, body=body, headers=headers)
+                resp = self._conn.getresponse()
+                data = resp.read()          # ต้องอ่านจนจบก่อน ถึงจะใช้ connection ซ้ำได้
+            except (http.client.HTTPException, OSError) as e:
+                last_err = e
+                self.close()                # connection เสีย ทิ้งแล้วต่อใหม่รอบหน้า
+                continue
+            if 200 <= resp.status < 300:
+                return data
+            detail = data.decode("utf-8", "replace")[:400]
+            if resp.status in (401, 403):
+                die(f"Supabase ปฏิเสธ ({resp.status}) — key ผิดหรือหมดอายุ ลองรัน ตั้งกุญแจ.bat\n       {detail}")
+            if resp.status in (400, 404) and "not_found" in detail:
                 raise NotFound(detail) from None
-            raise RuntimeError(f"HTTP {e.code} {method} {path}: {detail}") from None
-        except urllib.error.URLError as e:
-            die(f"ต่อเน็ตไม่ได้: {e.reason}")
+            raise RuntimeError(f"HTTP {resp.status} {method} {path}: {detail}") from None
+        die(f"ต่อเน็ตไม่ได้: {last_err}")
+        raise RuntimeError("unreachable")   # die() ออกโปรแกรมไปแล้ว บรรทัดนี้แค่กัน type checker
 
     def pending(self) -> list[dict]:
         q = urllib.parse.urlencode({
@@ -183,6 +209,22 @@ class Api:
             json.dumps(payload).encode("utf-8"),
             {"Content-Type": "application/json", "Prefer": "return=minimal"},
         )
+
+    def mark_synced_many(self, row_ids: list[int], when: str) -> None:
+        """ทำเครื่องหมาย 'ดึงแล้ว' หลายแถวในครั้งเดียว (PostgREST id=in.(...))
+        เดิมยิงทีละแถว = ทีละ request วันหนึ่งเป็นหลายสิบ request; รวบเหลือ ~1"""
+        payload = json.dumps({"synced_at": when}).encode("utf-8")
+        hdr = {"Content-Type": "application/json", "Prefer": "return=minimal"}
+        for i in range(0, len(row_ids), 500):          # กัน URL ยาวเกิน แบ่งก้อนละ 500
+            ids = ",".join(str(x) for x in row_ids[i:i + 500])
+            self._req("PATCH", f"/rest/v1/line_messages?id=in.({ids})", payload, hdr)
+
+    def delete_objects(self, storage_paths: list[str]) -> None:
+        """ลบไฟล์บนคลาวด์หลายไฟล์ในครั้งเดียว (Supabase storage bulk delete)"""
+        hdr = {"Content-Type": "application/json"}
+        for i in range(0, len(storage_paths), 500):
+            body = json.dumps({"prefixes": storage_paths[i:i + 500]}).encode("utf-8")
+            self._req("DELETE", f"/storage/v1/object/{BUCKET}", body, hdr)
 
 
 # ---------------- จับกลุ่มเซสชัน ----------------
@@ -384,6 +426,7 @@ def main() -> None:
 
     if args.health:
         health_check(api)
+        api.close()
         return
 
     if args.dry_run:
@@ -392,6 +435,7 @@ def main() -> None:
     pending = api.pending()
     if not pending:
         print("\nไม่มีของใหม่ — ทุกอย่างถูกดึงลงเครื่องหมดแล้ว\n")
+        api.close()
         return
 
     # ดึงข้อความรอบๆ มาด้วย เพื่อให้จัดกลุ่มและตัดสินได้จากภาพรวมทั้งเซสชัน
@@ -600,19 +644,40 @@ def main() -> None:
                     failures.append(f"{athlete} {day}: เขียน context.json ไม่สำเร็จ — {e}")
 
             now = datetime.now(timezone.utc).isoformat()
-            for row_id, spath, note in done:
+            # ทำเครื่องหมาย 'ดึงแล้ว' แบบรวบ: แถวไม่มี note ยิงทีเดียวหมด (id=in.(...))
+            # แถวมี note (เช่น ไฟล์หายจากคลาวด์) ยิงแยกเพราะข้อความต่างกัน
+            # ลบไฟล์บนคลาวด์เฉพาะแถวที่ mark สำเร็จ (กันข้อมูลหายถ้า mark พลาด)
+            plain = [(rid, sp) for rid, sp, note in done if not note]
+            noted = [(rid, sp, note) for rid, sp, note in done if note]
+            to_delete: list[str] = []
+
+            if plain:
                 try:
-                    api.mark_synced(row_id, now, note)
+                    api.mark_synced_many([rid for rid, _ in plain], now)
+                    to_delete += [sp for _, sp in plain if sp]
+                except Exception:
+                    # ยิงรวบพลาด — ถอยไปทีละแถว ไม่ให้แถวเดียวทำพังทั้งก้อน
+                    for rid, sp in plain:
+                        try:
+                            api.mark_synced(rid, now)
+                            if sp:
+                                to_delete.append(sp)
+                        except Exception as e:
+                            failures.append(f"id={rid}: ทำเครื่องหมายไม่สำเร็จ — {e}")
+
+            for rid, sp, note in noted:
+                try:
+                    api.mark_synced(rid, now, note)
+                    if sp:
+                        to_delete.append(sp)
                 except Exception as e:
-                    failures.append(f"id={row_id}: ทำเครื่องหมายไม่สำเร็จ — {e}")
-                    continue
-                if spath and not args.keep_cloud:
-                    try:
-                        api.delete_object(spath)
-                    except NotFound:
-                        pass                                 # ถูกลบไปแล้ว ไม่เป็นไร
-                    except Exception as e:
-                        failures.append(f"ลบไฟล์บนคลาวด์ไม่สำเร็จ ({spath}) — {e}")
+                    failures.append(f"id={rid}: ทำเครื่องหมายไม่สำเร็จ — {e}")
+
+            if to_delete and not args.keep_cloud:
+                try:
+                    api.delete_objects(to_delete)
+                except Exception as e:
+                    failures.append(f"ลบไฟล์บนคลาวด์ไม่สำเร็จ ({len(to_delete)} ไฟล์) — {e}")
 
     # ---- สรุป ----
     print("\n" + "-" * 46)
@@ -635,6 +700,7 @@ def main() -> None:
             print(f"    {name}   [{uid}]")
         print("\n  บอก Claude ว่าใครเป็นใคร แล้วให้ตั้งค่าให้")
     print()
+    api.close()
 
 
 if __name__ == "__main__":
