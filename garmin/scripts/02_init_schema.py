@@ -142,6 +142,57 @@ WELLNESS_COLUMNS = [
     ("recovery_time_hrs", "REAL"),
     ("stress_history_pct", "REAL"),
     ("training_status", "TEXT"),
+    ("vo2max_trend", "REAL"),
+    ("fitness_age", "REAL"),
+    ("endurance_score", "REAL"),
+    ("hill_score_overall", "REAL"),
+    ("hill_score_strength", "REAL"),
+    ("hill_score_endurance", "REAL"),
+    ("lactate_threshold_hr", "REAL"),
+    ("lactate_threshold_pace_min_km", "REAL"),
+    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+]
+
+# ── ตารางใหม่ 21 ก.ค. 69 (รอบขยาย extras): range/snapshot endpoints ──────────
+RACE_PREDICTION_COLUMNS = [
+    ("athlete_id", "INTEGER NOT NULL REFERENCES dim_athlete(athlete_id)"),
+    ("calendar_date", "TEXT NOT NULL"),
+    ("time_5k_sec", "REAL"),
+    ("time_10k_sec", "REAL"),
+    ("time_half_sec", "REAL"),
+    ("time_full_sec", "REAL"),
+    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+]
+
+PERSONAL_RECORD_COLUMNS = [
+    ("athlete_id", "INTEGER NOT NULL REFERENCES dim_athlete(athlete_id)"),
+    ("record_type_id", "INTEGER NOT NULL"),
+    ("record_label", "TEXT"),
+    ("value", "REAL"),
+    ("activity_id", "INTEGER"),
+    ("achieved_date", "TEXT"),
+    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+]
+
+GEAR_COLUMNS = [
+    ("athlete_id", "INTEGER NOT NULL REFERENCES dim_athlete(athlete_id)"),
+    ("gear_uuid", "TEXT NOT NULL"),
+    ("gear_name", "TEXT"),
+    ("gear_type", "TEXT"),
+    ("custom_make_model", "TEXT"),
+    ("date_begin", "TEXT"),
+    ("retired", "INTEGER"),
+    ("total_distance_m", "REAL"),
+    ("total_activities", "INTEGER"),
+    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+]
+
+BODY_COMPOSITION_COLUMNS = [
+    ("athlete_id", "INTEGER NOT NULL REFERENCES dim_athlete(athlete_id)"),
+    ("calendar_date", "TEXT NOT NULL"),
+    ("weight_kg", "REAL"),
+    ("bmi", "REAL"),
+    ("body_fat_pct", "REAL"),
     ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
 ]
 
@@ -186,11 +237,24 @@ def init_schema(db_path: Path = DB_PATH):
             ",\n        PRIMARY KEY (activity_id, split_num) ON CONFLICT REPLACE")
     _create(cur, "fact_daily_wellness", WELLNESS_COLUMNS,
             ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
+    _create(cur, "fact_race_prediction", RACE_PREDICTION_COLUMNS,
+            ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
+    _create(cur, "fact_personal_record", PERSONAL_RECORD_COLUMNS,
+            ",\n        PRIMARY KEY (athlete_id, record_type_id) ON CONFLICT REPLACE")
+    _create(cur, "fact_gear", GEAR_COLUMNS,
+            ",\n        PRIMARY KEY (athlete_id, gear_uuid) ON CONFLICT REPLACE")
+    _create(cur, "fact_body_composition", BODY_COMPOSITION_COLUMNS,
+            ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
 
     # migration สำหรับ DB ที่มีอยู่แล้ว (เพิ่มคอลัมน์ใหม่)
     added_a = _migrate(cur, "fact_activity", ACTIVITY_COLUMNS)
     added_s = _migrate(cur, "fact_activity_split", SPLIT_COLUMNS)
     added_w = _migrate(cur, "fact_daily_wellness", WELLNESS_COLUMNS)
+    for table, cols in (("fact_race_prediction", RACE_PREDICTION_COLUMNS),
+                        ("fact_personal_record", PERSONAL_RECORD_COLUMNS),
+                        ("fact_gear", GEAR_COLUMNS),
+                        ("fact_body_composition", BODY_COMPOSITION_COLUMNS)):
+        _migrate(cur, table, cols)
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
@@ -207,7 +271,8 @@ def init_schema(db_path: Path = DB_PATH):
         print(f"   + fact_daily_wellness เพิ่ม {len(added_w)} คอลัมน์: {', '.join(added_w)}")
     if not (added_a or added_s or added_w):
         print("   (ไม่มีคอลัมน์ใหม่ต้องเพิ่ม)")
-    print("Tables: dim_athlete | fact_activity | fact_activity_split | fact_daily_wellness")
+    print("Tables: dim_athlete | fact_activity | fact_activity_split | fact_daily_wellness"
+          " | fact_race_prediction | fact_personal_record | fact_gear | fact_body_composition")
 
 
 if __name__ == "__main__":

@@ -304,6 +304,18 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
         training_status = safe_call(garmin.get_training_status, date_str)
         time.sleep(0.3)
 
+        # ── Max metrics (VO2max trend + fitness age — เทรนด์รายวัน ไม่ใช่แค่วันเทส) ──
+        max_metrics = safe_call(garmin.get_max_metrics, date_str)
+        time.sleep(0.3)
+
+        # ── Endurance score (device-dependent — นาฬิการุ่นเก่าได้ None) ──
+        endurance = safe_call(garmin.get_endurance_score, date_str)
+        time.sleep(0.3)
+
+        # ── Hill score (device-dependent) ──
+        hill = safe_call(garmin.get_hill_score, date_str)
+        time.sleep(0.3)
+
         # Parse stats (RHR, steps, stress, kcal, floors, body battery ละเอียด, respiration ตื่น)
         def _s(*keys):
             return safe_get(stats, *keys) if stats else None
@@ -412,6 +424,32 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
                     or safe_get(training_status, "currentDayTrainingStatus")
                 )
 
+        # Parse max metrics (payload เป็น list ต่อ device — เอาตัวแรกที่มีค่า generic)
+        vo2max_trend = fitness_age = None
+        mm_items = max_metrics if isinstance(max_metrics, list) else [max_metrics]
+        for item in mm_items:
+            if not isinstance(item, dict):
+                continue
+            generic = item.get("generic")
+            if isinstance(generic, dict):
+                vo2max_trend = generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue")
+                if fitness_age is None:
+                    fitness_age = generic.get("fitnessAge")
+                if vo2max_trend is not None:
+                    break
+
+        # Parse endurance score
+        endurance_score = None
+        if isinstance(endurance, dict):
+            endurance_score = endurance.get("overallScore")
+
+        # Parse hill score
+        hill_overall = hill_strength = hill_endurance = None
+        if isinstance(hill, dict):
+            hill_overall = hill.get("overallScore")
+            hill_strength = hill.get("strengthScore")
+            hill_endurance = hill.get("enduranceScore")
+
         cur.execute("""
             INSERT INTO fact_daily_wellness (
                 athlete_id, calendar_date, resting_hr,
@@ -425,9 +463,11 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
                 avg_waking_respiration, avg_sleep_respiration, highest_respiration, lowest_respiration,
                 training_readiness, readiness_level, readiness_feedback,
                 acute_load, acwr_percent, hrv_factor_pct, recovery_time_hrs, stress_history_pct,
-                training_status
+                training_status,
+                vo2max_trend, fitness_age, endurance_score,
+                hill_score_overall, hill_score_strength, hill_score_endurance
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             athlete_id, date_str, resting_hr,
             hrv_weekly, hrv_last_night, hrv_status,
@@ -441,6 +481,8 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
             readiness_score, readiness_level, readiness_feedback,
             acute_load, acwr_pct, hrv_factor, recovery_time, stress_hist,
             training_status_val,
+            vo2max_trend, fitness_age, endurance_score,
+            hill_overall, hill_strength, hill_endurance,
         ))
         count += 1
         print(" ✓")
@@ -454,12 +496,161 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
     return count
 
 
+# ── Extras (range/snapshot — เรียกครั้งเดียวต่อรอบ ไม่วนรายวัน) ──────────────
+
+# Garmin PR typeId → ป้ายอ่านง่าย (เฉพาะตัวที่ยืนยันความหมายแล้ว — ตัวอื่นเก็บ typeId ดิบ)
+PR_LABELS = {
+    1: "วิ่ง 1 กม. (วินาที)",
+    2: "วิ่ง 1 ไมล์ (วินาที)",
+    3: "วิ่ง 5 กม. (วินาที)",
+    4: "วิ่ง 10 กม. (วินาที)",
+    7: "วิ่งไกลสุด (เมตร)",
+    8: "ปั่นไกลสุด (เมตร)",
+    9: "ไต่สะสมสูงสุด/กิจกรรม (เมตร)",
+    12: "ก้าวมากสุด/วัน",
+    13: "ก้าวมากสุด/สัปดาห์",
+    14: "ก้าวมากสุด/เดือน",
+}
+
+
+def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
+    """ข้อมูลเสริมที่ API ให้แบบ range/snapshot (ไม่ต้องวนรายวัน — ประหยัด request):
+    lactate threshold ล่าสุดจากนาฬิกา, race predictions รายวันทั้งช่วง,
+    body composition (น้ำหนัก/BMI/ไขมัน), personal records, gear (รองเท้า)"""
+    print("\n🎯 Fetching extras (LT / race predictions / body comp / PR / gear)...")
+    cur = conn.cursor()
+
+    # ── Lactate Threshold ล่าสุด (Garmin ประเมินจาก HR+pace ระหว่างวิ่ง) ──
+    lt = safe_call(garmin.get_lactate_threshold, latest=True)
+    if isinstance(lt, dict):
+        shr = lt.get("speed_and_heart_rate") or {}
+        lt_date = shr.get("calendarDate")
+        if isinstance(lt_date, str):
+            lt_date = lt_date[:10]  # API คืน timestamp เต็ม — ตัดเหลือวันที่ให้ตรงคีย์ wellness
+        lt_hr = shr.get("heartRate")
+        lt_speed = shr.get("speed")
+        # API คืน speed สเกล 0.1 m/s (เจอจริง: พี่เก้าได้ 0.3306 = 3.306 m/s) —
+        # LT ของนักวิ่งอยู่ช่วง 2.5-6 m/s ถ้าค่า < 1 แปลว่ามาแบบสเกลย่อ คูณ 10 ก่อน
+        if isinstance(lt_speed, (int, float)) and 0 < lt_speed < 1.0:
+            lt_speed *= 10
+        lt_pace = round(1000.0 / lt_speed / 60.0, 2) if lt_speed else None
+        if lt_date and (lt_hr is not None or lt_pace is not None):
+            # สร้าง row โครงถ้ายังไม่มี แล้ว UPDATE เฉพาะคอลัมน์ LT
+            # (ห้าม INSERT OR REPLACE — จะล้างคอลัมน์ wellness อื่นของวันนั้นทิ้ง)
+            cur.execute(
+                "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
+                (athlete_id, lt_date))
+            cur.execute("""UPDATE fact_daily_wellness
+                           SET lactate_threshold_hr = ?, lactate_threshold_pace_min_km = ?
+                           WHERE athlete_id = ? AND calendar_date = ?""",
+                        (lt_hr, lt_pace, athlete_id, lt_date))
+            print(f"   ✅ LT ล่าสุด ({lt_date}): HR {lt_hr}, pace {lt_pace} นาที/กม.")
+    time.sleep(0.3)
+
+    # ── Race predictions รายวันทั้งช่วง (call เดียวครอบทุกวัน) ──
+    preds = safe_call(garmin.get_race_predictions,
+                      start_date.isoformat(), end_date.isoformat(), "daily")
+    n_pred = 0
+    for p in preds if isinstance(preds, list) else []:
+        if not isinstance(p, dict) or not p.get("calendarDate"):
+            continue
+        cur.execute("""INSERT OR REPLACE INTO fact_race_prediction
+            (athlete_id, calendar_date, time_5k_sec, time_10k_sec, time_half_sec, time_full_sec)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (athlete_id, p["calendarDate"], p.get("time5K"), p.get("time10K"),
+             p.get("timeHalfMarathon"), p.get("timeMarathon")))
+        n_pred += 1
+    if n_pred:
+        print(f"   ✅ Race predictions: {n_pred} วัน")
+    time.sleep(0.3)
+
+    # ── Body composition ทั้งช่วง (call เดียว) — มีค่าเฉพาะคนที่ชั่ง/กรอกน้ำหนัก ──
+    body = safe_call(garmin.get_body_composition,
+                     start_date.isoformat(), end_date.isoformat())
+    n_body = 0
+    if isinstance(body, dict):
+        for entry in body.get("dateWeightList") or []:
+            if not isinstance(entry, dict):
+                continue
+            cal = entry.get("calendarDate")
+            if not cal and isinstance(entry.get("date"), (int, float)):
+                cal = datetime.fromtimestamp(entry["date"] / 1000).date().isoformat()
+            if not cal:
+                continue
+            weight_g = entry.get("weight")  # Garmin คืนเป็นกรัม
+            cur.execute("""INSERT OR REPLACE INTO fact_body_composition
+                (athlete_id, calendar_date, weight_kg, bmi, body_fat_pct)
+                VALUES (?, ?, ?, ?, ?)""",
+                (athlete_id, cal,
+                 round(weight_g / 1000.0, 2) if isinstance(weight_g, (int, float)) else None,
+                 entry.get("bmi"), entry.get("bodyFat")))
+            n_body += 1
+    if n_body:
+        print(f"   ✅ Body composition: {n_body} รายการ")
+    time.sleep(0.3)
+
+    # ── Personal records (snapshot ทั้งบัญชี — ทับของเก่าด้วยค่าปัจจุบันเสมอ) ──
+    prs = safe_call(garmin.get_personal_record)
+    if isinstance(prs, dict):
+        prs = prs.get("personalRecords") or []
+    n_pr = 0
+    for pr in prs if isinstance(prs, list) else []:
+        if not isinstance(pr, dict) or pr.get("typeId") is None:
+            continue
+        achieved = pr.get("prStartTimeGmtFormatted") or pr.get("prStartTimeGmt")
+        if isinstance(achieved, (int, float)):
+            achieved = datetime.fromtimestamp(achieved / 1000).date().isoformat()
+        cur.execute("""INSERT OR REPLACE INTO fact_personal_record
+            (athlete_id, record_type_id, record_label, value, activity_id, achieved_date)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (athlete_id, pr["typeId"], PR_LABELS.get(pr["typeId"]), pr.get("value"),
+             pr.get("activityId"), achieved))
+        n_pr += 1
+    if n_pr:
+        print(f"   ✅ Personal records: {n_pr} รายการ")
+    time.sleep(0.3)
+
+    # ── Gear (รองเท้า) — ระยะสะสมต่อคู่ ไว้เตือนรองเท้าหมดสภาพ ──
+    profile = safe_call(garmin.get_user_profile)
+    profile_pk = None
+    if isinstance(profile, dict):
+        profile_pk = (profile.get("profileId") or profile.get("id")
+                      or profile.get("userProfileId"))
+    n_gear = 0
+    if profile_pk:
+        gear_list = safe_call(garmin.get_gear, str(profile_pk))
+        if isinstance(gear_list, dict):
+            gear_list = gear_list.get("gear") or []
+        for g in gear_list if isinstance(gear_list, list) else []:
+            if not isinstance(g, dict) or not g.get("uuid"):
+                continue
+            time.sleep(0.3)
+            stats = safe_call(garmin.get_gear_stats, g["uuid"]) or {}
+            retired = 1 if (g.get("gearStatusName") or "").lower() == "retired" else 0
+            cur.execute("""INSERT OR REPLACE INTO fact_gear
+                (athlete_id, gear_uuid, gear_name, gear_type, custom_make_model,
+                 date_begin, retired, total_distance_m, total_activities)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (athlete_id, g["uuid"], g.get("displayName") or g.get("customMakeModel"),
+                 g.get("gearTypeName"), g.get("customMakeModel"), g.get("dateBegin"),
+                 retired, stats.get("totalDistance"), stats.get("totalActivities")))
+            n_gear += 1
+    if n_gear:
+        print(f"   ✅ Gear: {n_gear} ชิ้น")
+
+    conn.commit()
+    print("   ✅ Extras done")
+
+
 # ── Main ─────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill Garmin data")
     parser.add_argument("--athlete", default="wayuo", help="Athlete slug (default: wayuo)")
     parser.add_argument("--days", type=int, default=90, help="Days to backfill (default: 90)")
+    parser.add_argument("--skip-activities", action="store_true",
+                        help="ข้ามการดึงกิจกรรม+splits (ใช้ตอน re-backfill เฉพาะ wellness/extras "
+                             "ของช่วงที่มีกิจกรรมครบแล้ว — กันยิง API ซ้ำของเดิม เสี่ยงโดน rate limit)")
     args = parser.parse_args()
 
     # Set up token path
@@ -502,8 +693,13 @@ def main():
     print(f"👤 Athlete: {args.athlete} (id={athlete_id})")
 
     # Fetch data
-    activity_count = fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date)
+    if args.skip_activities:
+        print("\n📊 (ข้ามการดึงกิจกรรม — --skip-activities)")
+        activity_count = 0
+    else:
+        activity_count = fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date)
     wellness_count = fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date)
+    fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
 
     conn.close()
 

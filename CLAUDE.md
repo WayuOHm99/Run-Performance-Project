@@ -94,7 +94,9 @@ D:\Run-Performance\
 **เก็บละเอียด "ทุกอย่างที่นาฬิกามี" (ขยาย 21 ก.ค. 69 — schema 58 คอลัมน์ใหม่):**
 - **กิจกรรม:** เพซ/HR (avg/max/**min**)/**speed**/cadence (avg/max)/power (avg/max/norm)/VO2max/training load + **HR time-in-zone (Z1-5)** + **running dynamics** (ground contact, vertical osc/ratio, stride length) + **stamina** (begin/end) + impact load + elevation (gain/loss/min/max) + intensity minutes + **weather** (อุณหภูมิ/ความชื้น/ลม — เฉพาะ outdoor) + sweat loss + lat/lon
 - **wellness:** RHR/HRV/นอน (score+ระยะ deep/light/REM)/**body battery ละเอียด** (high/low/at-wake/charged/drained/during-sleep) + stress (avg/max) + **respiration** (waking/sleep/high/low) + kcal (active/BMR) + floors + steps(+goal) + **training readiness แบบละเอียด** (score/level/feedback + **acute load + ACWR% ของ Garmin เอง** + hrv/recovery/stress factors) + training status
-- **หมายเหตุ device-dependent:** ฟิลด์ training_load/training_readiness/respiration ขึ้นกับรุ่นนาฬิกา — **พี่เก้ามีครบ**, ต้อง/แดนบางตัวเป็น NULL (นาฬิการุ่นเก่ากว่า) → dashboard/สคริปต์ต้อง fallback เสมอ
+- **wellness เพิ่ม (รอบขยาย 21 ก.ค. ค่ำ):** **vo2max_trend** (เทรนด์รายวัน ไม่ใช่แค่วันเทส) + fitness_age + endurance_score + hill_score (overall/strength/endurance) + **lactate_threshold ของ Garmin** (hr + pace — ไว้เทียบกับเทส Lactate จริงของพี่เก้า)
+- **ตารางใหม่ 4 ตาราง:** `fact_race_prediction` (Garmin ทำนาย 5K/10K/HM/FM รายวัน — ไว้เทียบ VDOT), `fact_personal_record` (PR ทุกระยะ + วันที่ทำได้), `fact_gear` (รองเท้า: ระยะสะสม/จำนวนกิจกรรม — **เตือนเปลี่ยนรองเท้าที่ ~600-800 กม.**), `fact_body_composition` (น้ำหนัก/BMI/ไขมัน — เฉพาะคนที่ชั่งผ่าน Garmin)
+- **หมายเหตุ device-dependent:** ฟิลด์ training_load/training_readiness/respiration/endurance_score/hill_score/lactate_threshold ขึ้นกับรุ่นนาฬิกา — **พี่เก้ามีครบ**, ต้อง/แดนบางตัวเป็น NULL (นาฬิการุ่นเก่ากว่า) → dashboard/สคริปต์ต้อง fallback เสมอ
 
 | ส่วน | ไฟล์ | หน้าที่ |
 |---|---|---|
@@ -102,7 +104,7 @@ D:\Run-Performance\
 | ขอ token แบบนักกีฬารันเอง (ทางเลือก) | `garmin\share\get_garmin_token.py` + `README_athlete.md` | ใช้เมื่อไม่สะดวกขอรหัสผ่านจากนักกีฬาตรงๆ — ส่งให้นักกีฬารันเองครั้งเดียว → ได้ `.zip` ส่งกลับมาแตกไว้ที่ `garmin\tokens\<slug>\` |
 | แตก token | วาง `garmin_tokens.json` ไว้ที่ `garmin\tokens\<slug>\` | slug ที่มีแล้ว: `tong`, `dan`, `p'kao` (พี่เก้า = Suwarong Vongsukda) — รอ: milk. **หมายเหตุ:** `p'kao` มี apostrophe → ปลอดภัยในสายอัตโนมัติ (auto-discover + subprocess list + SQL parameterized) แต่ถ้าสั่งเองใน shell ต้องครอบ `"p'kao"` |
 | ดึงทุกคน (daily) | `garmin\scripts\fetch_all.py --days 3` | incremental, idempotent — รันอัตโนมัติผ่าน Task `Run-Performance-Garmin` ทุกวัน 08:00 ผ่าน `garmin-sync-hidden.vbs` (ไม่โชว์จอดำ, log: `C:\Backup\garmin-sync-log.txt`) — อยากดึงมือเองดับเบิลคลิก `garmin-sync-auto.bat` ได้ (โชว์จอดำ) |
-| backfill รายคน | `garmin\scripts\03_backfill.py --athlete <slug> --days 90` | ดึงย้อนหลังลึกครั้งแรกหลังได้ token ใหม่ |
+| backfill รายคน | `garmin\scripts\03_backfill.py --athlete <slug> --days 90` | ดึงย้อนหลังลึกครั้งแรกหลังได้ token ใหม่ — มี `--skip-activities` ไว้ re-backfill เฉพาะ wellness/extras ของช่วงที่มีกิจกรรมครบแล้ว (กันยิง API ซ้ำ เสี่ยง rate limit) |
 | **ดูรายวัน (โค้ชคัดกรอง)** | `garmin\scripts\day.py --athlete <slug> [--date YYYY-MM-DD] [--splits]` | ดึงกิจกรรม+splits+wellness ของวันนั้นแบบอ่านง่าย — **ใช้ตัวนี้แทนอ่านรูป** |
 | วิเคราะห์สัปดาห์ | `garmin\scripts\04_weekly_review.py --athlete <slug>` | สรุปสัปดาห์/long run/VDOT/HRV/นอน/readiness/splits จาก DB |
 | เช็ค DB | `garmin\scripts\check_db.py` | นับ row + ตัวอย่างล่าสุด |

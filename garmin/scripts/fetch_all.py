@@ -80,6 +80,11 @@ def main():
         except subprocess.TimeoutExpired:
             print(f"   ❌ {slug}: เกิน 20 นาที — ยกเลิกแล้วไปคนถัดไป")
             failed.append(slug)
+        except Exception as e:
+            # คนเดียวพังต้องไม่ลากทั้งทีม — log แล้วไปคนถัดไป (เคยเกิด 21 ก.ค. 69:
+            # dan พังกลางทางทำให้ tong/p'kao ในคิวเดียวกันไม่ถูกดึงเลยทั้งรอบ)
+            print(f"   ❌ {slug}: {type(e).__name__}: {e} — ข้ามไปคนถัดไป")
+            failed.append(slug)
 
     print("\n" + "=" * 60)
     print(f"  เสร็จ: {len(ok)} สำเร็จ ({', '.join(ok) or '-'})"
