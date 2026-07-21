@@ -105,7 +105,9 @@ def main():
         SELECT resting_hr, hrv_last_night, hrv_status, sleep_score,
                sleep_duration_sec, deep_sleep_sec, rem_sleep_sec,
                body_battery_high, body_battery_low, stress_avg,
-               training_readiness, training_status
+               training_readiness, training_status,
+               vo2max_trend, endurance_score, hill_score_overall,
+               lactate_threshold_hr, lactate_threshold_pace_min_km
         FROM fact_daily_wellness WHERE athlete_id=? AND calendar_date=?
     """, (aid, args.date)).fetchone()
 
@@ -120,6 +122,26 @@ def main():
               f" | deep {fmt_hms(w[5])} | REM {fmt_hms(w[6])}")
         print(f"   Body Battery {w[8] or '—'}→{w[7] or '—'} | stress {w[9] or '—'}")
         print(f"   Readiness {w[10] or '—'} | สถานะซ้อม {w[11] or '—'}")
+        form = []
+        if w[12]:
+            form.append(f"VO2max {w[12]:.1f}")
+        if w[13]:
+            form.append(f"endurance {w[13]:.0f}")
+        if w[14]:
+            form.append(f"hill {w[14]:.0f}")
+        if w[15] or w[16]:
+            form.append(f"Garmin LT {w[15] or '—'} bpm @{fmt_pace(w[16])}/km")
+        if form:
+            print("   ฟอร์ม: " + " | ".join(form))
+
+    # ── Garmin คาดการณ์เวลาแข่ง ณ วันนั้น (จาก fact_race_prediction) ──
+    rp = conn.execute("""
+        SELECT time_5k_sec, time_10k_sec, time_half_sec, time_full_sec
+        FROM fact_race_prediction WHERE athlete_id=? AND calendar_date=?
+    """, (aid, args.date)).fetchone()
+    if rp and any(rp):
+        print(f"   คาดการณ์แข่ง: 5K {fmt_hms(rp[0])} | 10K {fmt_hms(rp[1])}"
+              f" | HM {fmt_hms(rp[2])} | FM {fmt_hms(rp[3])}")
 
     conn.close()
     print()

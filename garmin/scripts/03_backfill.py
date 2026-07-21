@@ -504,6 +504,8 @@ PR_LABELS = {
     2: "วิ่ง 1 ไมล์ (วินาที)",
     3: "วิ่ง 5 กม. (วินาที)",
     4: "วิ่ง 10 กม. (วินาที)",
+    5: "Half Marathon (วินาที)",
+    6: "Marathon (วินาที)",
     7: "วิ่งไกลสุด (เมตร)",
     8: "ปั่นไกลสุด (เมตร)",
     9: "ไต่สะสมสูงสุด/กิจกรรม (เมตร)",
@@ -554,11 +556,13 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
     for p in preds if isinstance(preds, list) else []:
         if not isinstance(p, dict) or not p.get("calendarDate"):
             continue
+        times = (p.get("time5K"), p.get("time10K"), p.get("timeHalfMarathon"), p.get("timeMarathon"))
+        if not any(t is not None for t in times):
+            continue  # วันปัจจุบัน Garmin มักคืนแถวว่าง (ยังไม่คำนวณ) — ไม่เก็บแถวขยะ
         cur.execute("""INSERT OR REPLACE INTO fact_race_prediction
             (athlete_id, calendar_date, time_5k_sec, time_10k_sec, time_half_sec, time_full_sec)
             VALUES (?, ?, ?, ?, ?, ?)""",
-            (athlete_id, p["calendarDate"], p.get("time5K"), p.get("time10K"),
-             p.get("timeHalfMarathon"), p.get("timeMarathon")))
+            (athlete_id, p["calendarDate"], *times))
         n_pred += 1
     if n_pred:
         print(f"   ✅ Race predictions: {n_pred} วัน")

@@ -120,7 +120,13 @@ RUN_TYPES = ("running", "track_running", "trail_running", "treadmill_running")
 
 # LTHR จากผลเทสเป็นทางการ (Notion = source of truth) — อัปเดตเมื่อมีเทสใหม่
 # tong: 5K TT 14 ก.ค. 69 | dan: VCR30 8 ก.ค. 69
-LTHR_BY_SLUG = {"tong": 171, "dan": 178}
+# p'kao: เทสแลบ Lactate ไม่มีค่า HR → ใช้ Garmin LT จากนาฬิกา (184 bpm, 16 ก.ค. 69) แทนค่าเดา 89%
+LTHR_BY_SLUG = {"tong": 171, "dan": 178, "p'kao": 184}
+LTHR_SOURCE_BY_SLUG = {
+    "tong": "จากผลเทสล่าสุด (5K TT 14 ก.ค.)",
+    "dan": "จากผลเทสล่าสุด (VCR30 8 ก.ค.)",
+    "p'kao": "จาก Garmin LT ล่าสุด 16 ก.ค. (เทสแลบไม่มีค่า HR)",
+}
 
 # ขอบเขตโซนตาม %LTHR (Friel): เบา Z1-2 <= 89%, กลาง Z3 90-93%, หนัก Z4-5 >= 94%
 EASY_MAX_PCT = 0.89
@@ -155,6 +161,16 @@ def fmt_pace(pace_min_per_km):
     if seconds == 60:
         minutes, seconds = minutes + 1, 0
     return f"{minutes}:{seconds:02d}"
+
+
+def fmt_sec(sec):
+    """แปลงวินาทีเป็นเวลาอ่านง่าย เช่น 1323 -> 22:03, 14023 -> 3:53:43"""
+    if pd.isna(sec):
+        return "–"
+    s = int(round(sec))
+    if s >= 3600:
+        return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+    return f"{s // 60}:{s % 60:02d}"
 
 
 def classify_intensity(avg_hr, lthr):
@@ -372,10 +388,86 @@ def load_splits(activity_id):
     return df
 
 
+@st.cache_data(ttl=600)
+def load_race_predictions(athlete_id, start_date, end_date):
+    """Garmin ทำนายเวลาแข่ง 5K/10K/HM/FM รายวัน (จาก fact_race_prediction)"""
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        """SELECT calendar_date, time_5k_sec, time_10k_sec, time_half_sec, time_full_sec
+           FROM fact_race_prediction
+           WHERE athlete_id = ? AND calendar_date >= ? AND calendar_date <= ?
+           ORDER BY calendar_date ASC""",
+        conn, params=(athlete_id, start_date, end_date))
+    conn.close()
+    for col in df.columns:
+        if col != "calendar_date":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["calendar_date"] = pd.to_datetime(df["calendar_date"])
+    return df
+
+
+@st.cache_data(ttl=600)
+def load_personal_records(athlete_id):
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        """SELECT record_type_id, record_label, value, achieved_date
+           FROM fact_personal_record WHERE athlete_id = ? ORDER BY record_type_id ASC""",
+        conn, params=(athlete_id,))
+    conn.close()
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=600)
+def load_gear(athlete_id=None):
+    """รองเท้า/อุปกรณ์ + ระยะสะสม — athlete_id=None คืนทั้งทีม (ใช้ในแท็บรวมทีม)"""
+    conn = sqlite3.connect(DB_PATH)
+    query = """SELECT g.athlete_id, a.display_name, g.gear_name, g.gear_type,
+                      g.date_begin, g.retired, g.total_distance_m, g.total_activities
+               FROM fact_gear g JOIN dim_athlete a ON g.athlete_id = a.athlete_id"""
+    params = ()
+    if athlete_id is not None:
+        query += " WHERE g.athlete_id = ?"
+        params = (athlete_id,)
+    df = pd.read_sql_query(query + " ORDER BY g.total_distance_m DESC", conn, params=params)
+    conn.close()
+    df["total_distance_m"] = pd.to_numeric(df["total_distance_m"], errors="coerce")
+    df["km"] = df["total_distance_m"] / 1000
+    df["gear_name"] = df["gear_name"].astype("string").str.strip()  # ชื่อจากแอปมักมี space ท้าย
+    return df
+
+
+@st.cache_data(ttl=600)
+def load_latest_lt(athlete_id):
+    """Garmin Lactate Threshold ล่าสุด (hr, pace, วันที่) — None ถ้านาฬิกาไม่ให้"""
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        """SELECT calendar_date, lactate_threshold_hr, lactate_threshold_pace_min_km
+           FROM fact_daily_wellness
+           WHERE athlete_id = ? AND (lactate_threshold_hr IS NOT NULL
+                                     OR lactate_threshold_pace_min_km IS NOT NULL)
+           ORDER BY calendar_date DESC LIMIT 1""", (athlete_id,)).fetchone()
+    conn.close()
+    return row
+
+
+def shoe_status(km):
+    """สถานะรองเท้าตามระยะสะสม (เกณฑ์ทั่วไป: เปลี่ยนที่ ~500-800 กม.)"""
+    if pd.isna(km):
+        return "⚪", "ไม่มีข้อมูล"
+    if km > 3000:
+        return "❓", "ตัวเลขผิดปกติ — น่าจะเป็น default gear ผูกทุกกิจกรรม เช็คการผูกในแอป"
+    if km >= 650:
+        return "🔴", "ควรเปลี่ยน"
+    if km >= 500:
+        return "🟡", "ใกล้หมดสภาพ"
+    return "🟢", "สภาพดี"
+
+
 def get_lthr(slug, athlete_id):
     """คืน (LTHR, ที่มา) — จากผลเทสก่อน ถ้าไม่มีประมาณจาก HR สูงสุดที่พบ"""
     if slug in LTHR_BY_SLUG:
-        return LTHR_BY_SLUG[slug], "จากผลเทสล่าสุด"
+        return LTHR_BY_SLUG[slug], LTHR_SOURCE_BY_SLUG.get(slug, "จากผลเทสล่าสุด")
     observed = load_observed_max_hr(athlete_id)
     if observed:
         return round(observed * 0.89), f"ประมาณ 89% ของ HR สูงสุดที่พบ ({observed:.0f}) — ควรเทสจริง"
@@ -435,10 +527,11 @@ if not activity_df.empty:
     activity_df["distance_km"] = activity_df["distance_m"] / 1000
 
 # --- MAIN DASHBOARD TABS ---
-tab_team, tab_health, tab_train, tab_splits = st.tabs([
+tab_team, tab_health, tab_train, tab_progress, tab_splits = st.tabs([
     "👥 รวมทีม (Team)",
     "💤 Health & Recovery (สุขภาพ)",
     "👟 Training (การซ้อม)",
+    "📈 ความก้าวหน้า (Progress)",
     "📉 เจาะลึกรายเซสชัน (Splits)",
 ])
 
@@ -573,6 +666,16 @@ with tab_team:
 
 _ACWR ใช้ Garmin training\_load (รวม cross-training) ถ้านาฬิกาให้ | ไม่งั้น fallback เป็นระยะวิ่ง_
 """)
+
+    # --- รองเท้าที่ควรเปลี่ยน (ทั้งทีม — กันบาดเจ็บจากโฟมเสื่อม) ---
+    all_gear = load_gear()
+    worn = all_gear[(all_gear["retired"] != 1) & all_gear["km"].between(500, 3000)] if not all_gear.empty else all_gear
+    if not worn.empty:
+        lines = []
+        for _, g in worn.iterrows():
+            icon, txt = shoe_status(g["km"])
+            lines.append(f"{icon} **{g['display_name']}** — {g['gear_name']}: {g['km']:,.0f} กม. ({txt})")
+        st.warning("👟 **รองเท้าใกล้หมดสภาพ** (เกณฑ์เปลี่ยน ~500-800 กม.):\n\n" + "\n".join(f"- {ln}" for ln in lines))
 
 
 # =====================================================================
@@ -840,7 +943,172 @@ with tab_train:
 
 
 # =====================================================================
-# TAB 4: SPLITS — เจาะลึกรายเซสชัน
+# TAB 4: PROGRESS — ความก้าวหน้า (VO2max / คาดการณ์แข่ง / PR / LT / รองเท้า)
+# =====================================================================
+with tab_progress:
+    st.header(f"ความก้าวหน้า: {selected_name}")
+    st.caption("เทรนด์ฟอร์มจากค่าประเมินของ Garmin — ใช้ดูทิศทาง (ขึ้น/ลง) "
+               "ค่าสัมบูรณ์ให้ยึดผลเทสจริงใน Notion เป็นหลัก")
+
+    # ---------------- VO2max trend ----------------
+    vo2 = (wellness_df.dropna(subset=["vo2max_trend"])
+           if "vo2max_trend" in wellness_df else wellness_df.iloc[0:0])
+    if not vo2.empty:
+        first_v, last_v = vo2["vo2max_trend"].iloc[0], vo2["vo2max_trend"].iloc[-1]
+        with st.container(horizontal=True):
+            st.metric("VO2max ล่าสุด (Garmin)", f"{last_v:.1f}",
+                      delta=f"{last_v - first_v:+.1f} เทียบต้นช่วง", border=True)
+            if "fitness_age" in vo2 and vo2["fitness_age"].notna().any():
+                st.metric("Fitness Age", fmt_num(vo2["fitness_age"].dropna().iloc[-1]), border=True)
+        fig_vo2 = px.line(vo2, x="calendar_date", y="vo2max_trend", markers=True,
+                          labels={"vo2max_trend": "VO2max", "calendar_date": "วันที่"},
+                          title="แนวโน้ม VO2max (ค่าประเมินรายวันของ Garmin)")
+        st.plotly_chart(fig_vo2, width="stretch")
+    else:
+        st.info("ไม่มีข้อมูล VO2max ในช่วงที่เลือก (นาฬิกาอัปเดตเฉพาะวันที่มีวิ่ง GPS)")
+
+    st.markdown("---")
+
+    # ---------------- Race predictions ----------------
+    st.subheader("🏁 Garmin คาดการณ์เวลาแข่ง")
+    preds = load_race_predictions(athlete_id, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+    if preds.empty:
+        st.info("ไม่มีข้อมูลคาดการณ์ในช่วงที่เลือก")
+    else:
+        race_cols = [("time_5k_sec", "5K"), ("time_10k_sec", "10K"),
+                     ("time_half_sec", "Half"), ("time_full_sec", "Marathon")]
+        with st.container(horizontal=True):
+            for col, label in race_cols:
+                # ใช้ค่าล่าสุด "ที่มีจริง" ต่อคอลัมน์ — แถววันปัจจุบันมักเป็น NULL
+                # (Garmin ยังไม่คำนวณของวันใหม่ตอน sync เช้า)
+                s = preds[col].dropna()
+                cur = s.iloc[-1] if not s.empty else float("nan")
+                base = s.iloc[0] if len(s) >= 2 else float("nan")
+                delta_s = cur - base if pd.notna(cur) and pd.notna(base) else float("nan")
+                st.metric(label, fmt_sec(cur),
+                          delta=(f"{delta_s:+.0f} วิ เทียบต้นช่วง" if pd.notna(delta_s) else None),
+                          delta_color="inverse", border=True)  # เวลาลด = ดีขึ้น (เขียว)
+        fig_pred = go.Figure()
+        for col, label, color in [("time_5k_sec", "5K", C_BLUE), ("time_10k_sec", "10K", C_GREEN)]:
+            if preds[col].notna().any():
+                fig_pred.add_trace(go.Scatter(
+                    x=preds["calendar_date"], y=preds[col], mode="lines", name=label,
+                    line=dict(color=color, width=2),
+                    customdata=[fmt_sec(v) for v in preds[col]],
+                    hovertemplate="%{x|%d %b}<br>" + label + ": %{customdata}<extra></extra>"))
+        fig_pred.update_layout(
+            title="แนวโน้มคาดการณ์ 5K / 10K (ยิ่งต่ำยิ่งเร็ว)",
+            yaxis=dict(title="เวลา"), xaxis=dict(title="วันที่"), hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        # แกน Y เป็น M:SS อ่านง่าย (แทนวินาทีดิบ) — step ปรับตามช่วงข้อมูล
+        all_t = pd.concat([preds["time_5k_sec"], preds["time_10k_sec"]]).dropna()
+        if not all_t.empty:
+            lo, hi = float(all_t.min()), float(all_t.max())
+            rng = max(hi - lo, 1.0)
+            step = 30 if rng <= 300 else (60 if rng <= 900 else 300)
+            start = int(lo // step) * step
+            tickvals = list(range(start, int(hi) + step + 1, step))
+            fig_pred.update_yaxes(tickvals=tickvals, ticktext=[fmt_sec(v) for v in tickvals])
+        st.plotly_chart(fig_pred, width="stretch")
+        st.caption("คาดการณ์ของ Garmin มักมองโลกในแง่ดีกว่าสนามจริง ~1-3% — "
+                   "ใช้ดูเทรนด์ว่าฟอร์มกำลังขึ้นหรือตก แล้วเทียบกับ VDOT จากเทสจริง")
+
+    st.markdown("---")
+
+    # ---------------- Lactate Threshold (Garmin) ----------------
+    lt_row = load_latest_lt(athlete_id)
+    if lt_row:
+        lt_date, lt_hr, lt_pace = lt_row
+        st.subheader("🧪 Lactate Threshold (Garmin ประเมินจากนาฬิกา)")
+        with st.container(horizontal=True):
+            st.metric("LT Heart Rate", f"{lt_hr:.0f} bpm" if lt_hr is not None else "–", border=True)
+            st.metric("LT Pace", f"{fmt_pace(lt_pace)} /km" if lt_pace is not None else "–", border=True)
+            st.metric("วันที่วัด", lt_date, border=True)
+        st.caption("ค่าประเมินจากการวิ่งจริงด้วยสาย HR — เทียบกับผลเทสแลบ (ถ้ามี) ก่อนใช้ปรับโซน")
+        st.markdown("---")
+
+    # ---------------- Endurance / Hill score (device-dependent) ----------------
+    eh_cols = [c for c in ("endurance_score", "hill_score_overall") if c in wellness_df]
+    eh = wellness_df.dropna(subset=eh_cols, how="all") if eh_cols else wellness_df.iloc[0:0]
+    if not eh.empty and any(eh[c].notna().any() for c in eh_cols):
+        st.subheader("⛰️ Endurance & Hill Score")
+        with st.container(horizontal=True):
+            if eh["endurance_score"].notna().any():
+                e_last = eh["endurance_score"].dropna()
+                st.metric("Endurance Score ล่าสุด", f"{e_last.iloc[-1]:.0f}",
+                          delta=f"{e_last.iloc[-1] - e_last.iloc[0]:+.0f} เทียบต้นช่วง", border=True)
+            if "hill_score_overall" in eh and eh["hill_score_overall"].notna().any():
+                h_last = eh["hill_score_overall"].dropna()
+                st.metric("Hill Score ล่าสุด", f"{h_last.iloc[-1]:.0f}", border=True)
+        if eh["endurance_score"].notna().any():
+            fig_end = px.line(eh, x="calendar_date", y="endurance_score", markers=True,
+                              labels={"endurance_score": "Endurance Score", "calendar_date": "วันที่"},
+                              title="แนวโน้ม Endurance Score (ความอึดสะสม)")
+            st.plotly_chart(fig_end, width="stretch")
+        st.markdown("---")
+
+    # ---------------- Personal records ----------------
+    st.subheader("🏆 สถิติส่วนตัว (PR จาก Garmin)")
+    prs = load_personal_records(athlete_id)
+    # typeId ที่ค่าเป็น "เวลา (วินาที)" / "ระยะไกล (เมตร→กม.)" / "ไต่สะสม (เมตร)" / "จำนวนก้าว"
+    _PR_TIME_IDS = {1, 2, 3, 4, 5, 6}
+    _PR_KM_IDS = {7, 8}
+    _PR_METER_IDS = {9}
+    _PR_STEP_IDS = {12, 13, 14}
+    if prs.empty:
+        st.info("ไม่มีข้อมูล PR")
+    else:
+        rows = []
+        for _, pr in prs.iterrows():
+            tid, val = int(pr["record_type_id"]), pr["value"]
+            if tid in _PR_TIME_IDS:
+                shown = fmt_sec(val)
+            elif tid in _PR_KM_IDS:
+                shown = f"{val / 1000:.2f} km" if pd.notna(val) else "–"
+            elif tid in _PR_METER_IDS:
+                shown = f"{val:,.0f} m" if pd.notna(val) else "–"
+            elif tid in _PR_STEP_IDS:
+                shown = f"{val:,.0f} ก้าว" if pd.notna(val) else "–"
+            else:
+                shown = f"{val:,.0f}" if pd.notna(val) else "–"
+            # ห้ามใช้ `label or default` — record_label ที่ว่างมาเป็น NaN ซึ่ง truthy ใน Python
+            label_val = pr["record_label"]
+            label_txt = label_val if (isinstance(label_val, str) and label_val) else f"ประเภท {tid}"
+            date_val = pr["achieved_date"]
+            rows.append({
+                "รายการ": label_txt,
+                "สถิติ": shown,
+                "ทำได้เมื่อ": str(date_val)[:10] if isinstance(date_val, str) and date_val else "–",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True)
+        st.caption("PR นับตามที่นาฬิกาบันทึกอัตโนมัติ — ระยะที่ GPS วัดไม่ถึงเกณฑ์ (เช่น 4.98 กม.) จะไม่ถูกนับเป็น 5K")
+
+    st.markdown("---")
+
+    # ---------------- Gear (รองเท้า) ----------------
+    st.subheader("👟 รองเท้า (ระยะสะสม)")
+    gear = load_gear(athlete_id)
+    gear_active = gear[gear["retired"] != 1] if not gear.empty else gear
+    if gear_active.empty:
+        st.info("ไม่มีข้อมูลรองเท้า — ผูกรองเท้ากับกิจกรรมในแอป Garmin Connect ก่อน")
+    else:
+        rows = []
+        for _, g in gear_active.iterrows():
+            icon, txt = shoe_status(g["km"])
+            rows.append({
+                "รองเท้า": g["gear_name"] or "(ไม่มีชื่อ)",
+                "ระยะสะสม (km)": round(g["km"], 1) if pd.notna(g["km"]) else None,
+                "กิจกรรม": int(g["total_activities"]) if pd.notna(g["total_activities"]) else None,
+                "สถานะ": f"{icon} {txt}",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True,
+                     column_config={"ระยะสะสม (km)": st.column_config.NumberColumn(format="%.1f")})
+        st.caption("เกณฑ์ทั่วไป: โฟมเสื่อมที่ ~500-800 กม. — 🔴 ≥650 ควรเปลี่ยน · 🟡 ≥500 ใกล้หมดสภาพ · "
+                   "❓ ตัวเลขเกิน 3,000 กม. = น่าจะเป็น default gear ผูกทุกกิจกรรมอัตโนมัติ ให้จัดระเบียบในแอปก่อน")
+
+
+# =====================================================================
+# TAB 5: SPLITS — เจาะลึกรายเซสชัน
 # =====================================================================
 with tab_splits:
     st.header(f"เจาะลึกรายเซสชัน: {selected_name}")
