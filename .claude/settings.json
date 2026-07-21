@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Skill(developing-with-streamlit)",
+      "Skill(developing-with-streamlit:*)",
+      "Bash(python \"C:\\\\Users\\\\wayuo\\\\.claude\\\\skills\\\\developing-with-streamlit\\\\scripts\\\\discover.py\" --project-dir \"D:\\\\Run-Performance\\\\garmin\")",
+      "Skill(dataviz)",
+      "Skill(dataviz:*)",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\wayuo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Run-Performance\\\\0f0f26a7-594d-4051-8327-652c76f8cdc2\\\\scratchpad\\\\smoke2.py\")",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe \"C:\\\\Users\\\\wayuo\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Run-Performance\\\\0f0f26a7-594d-4051-8327-652c76f8cdc2\\\\scratchpad\\\\smoke2.py\")",
+      "Read(//c/Backup/**)",
+      "Bash(schtasks /query /tn \"Run-Performance-Garmin\" /v /fo LIST)",
+      "Bash(schtasks /query /tn \"Run-Performance-Garmin\" /fo LIST)",
+      "Bash(schtasks /query /fo LIST)",
+      "Bash(.venv/Scripts/python.exe scripts/day.py --athlete tong --date 2026-07-21)",
+      "Bash(.venv/Scripts/python.exe scripts/day.py --athlete dan --date 2026-07-21)",
+      "Bash(.venv/Scripts/python.exe -m py_compile scripts/dashboard.py)",
+      "Bash(.venv/Scripts/python.exe -c \"import tomllib,pathlib; d=tomllib.loads\\(pathlib.Path\\('.streamlit/config.toml'\\).read_text\\(encoding='utf-8'\\)\\); print\\('✅ config OK:', d\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -c \"import tomllib,pathlib; d=tomllib.loads\\(pathlib.Path\\('.streamlit/config.toml'\\).read_text\\(encoding='utf-8'\\)\\); print\\('config OK ->', d['theme']\\)\")",
+      "Bash(LOG=\"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/pkao_backfill.log\" && PYTHONUNBUFFERED=1 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe scripts/03_backfill.py --athlete \"p'kao\" --days 90 > \"$LOG\" 2>&1; echo \"EXIT=$?\")",
+      "Bash(.venv/Scripts/python.exe scripts/day.py --athlete \"p'kao\" --date 2026-07-21)",
+      "Bash(.venv/Scripts/python.exe scripts/04_weekly_review.py --athlete \"p'kao\")",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -c ' *)",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe scripts/fetch_all.py --days 3)",
+      "Bash(.venv/Scripts/python.exe -m py_compile scripts/03_backfill.py scripts/fetch_all.py)",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe scripts/fetch_all.py --days 1)",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe __TRACKED_VAR__/probe.py 'p'\\\\''kao')",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe /c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/probe.py 'p'\\\\''kao')",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe scripts/02_init_schema.py)",
+      "Bash(.venv/Scripts/python.exe -m py_compile scripts/03_backfill.py scripts/02_init_schema.py)",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe scripts/03_backfill.py --athlete \"p'kao\" --days 6)",
+      "Bash(SP=\"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad\" && echo \"=== progress markers ===\" && grep -E \"RE-BACKFILL|Inserted|Backfill complete|Rate limited|ALL DONE|Day [0-9]+/\" \"$SP/rebackfill.log\" 2>/dev/null | tail -20 && echo \"\" && echo \"=== last line ===\" && tail -2 \"$SP/rebackfill.log\" 2>/dev/null)",
+      "Read(//c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/**)",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe \"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/verify.py\")",
+      "Bash(PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe \"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/smoke.py\")",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe \"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/probe_splits.py\")",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe \"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/fix_cadence.py\")",
+      "Bash(PYTHONUNBUFFERED=1 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe \"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad/refetch_splits.py\")",
+      "Bash(SP=\"/c/Users/wayuo/AppData/Local/Temp/claude/d--Run-Performance/30a81f6b-acb6-45a2-b174-678c411573da/scratchpad\" && tail -8 \"$SP/refetch_splits.log\" 2>/dev/null)",
+      "Bash(.venv/Scripts/python.exe -c \"import streamlit; print\\(streamlit.__version__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import sqlite3;c=sqlite3.connect\\('data/garmin.db'\\);print\\('wellness:',c.execute\\('SELECT MAX\\(fetched_at\\) FROM fact_daily_wellness'\\).fetchone\\(\\)[0]\\);print\\('activity:',c.execute\\('SELECT MAX\\(fetched_at\\) FROM fact_activity'\\).fetchone\\(\\)[0]\\);c.close\\(\\)\")",
+      "Bash(PYTHONUTF8=1 PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe scripts/fetch_all.py --days 2)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\wayuo\\AppData\\Local\\Temp\\claude\\d--Run-Performance\\30a81f6b-acb6-45a2-b174-678c411573da\\scratchpad"
+    ]
+  }
+}

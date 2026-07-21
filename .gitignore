@@ -6,6 +6,14 @@ scripts/.env.*
 # ── ไฟล์ขยะของ Python ──
 __pycache__/
 *.pyc
+garmin/.venv/
+
+# ── โมดูล Garmin: token = credential, garmin.db = ข้อมูลสุขภาพ — ห้ามขึ้น git ──
+garmin/tokens/
+garmin/data/
+# ไฟล์ token ที่นักกีฬาส่งกลับมา (เผื่อวางผิดที่)
+garmin_token_*.zip
+garmin_tokens.json
 
 # ── ค่าเฉพาะเครื่องของ Claude Code ──
 .claude/settings.local.json

@@ -87,8 +87,35 @@ D:\Run-Performance\
 
 รายละเอียดระบบทั้งหมดดูที่ `SPEC-ระบบเก็บข้อมูล.md`
 
+## โมดูล Garmin — ตัวเลขจาก API ตรง (ไม่ต้องแคปรูป) — เพิ่ม 20 ก.ค. 69
+
+อยู่ที่ `garmin\` ดึงข้อมูลจาก Garmin Connect API ตรงเข้า SQLite (`garmin\data\garmin.db`) — **นี่คือแหล่ง "ตัวเลข" หลักแล้ว**. ไลน์เหลือหน้าที่เก็บแค่สิ่งที่ API ไม่มี: **RPE/ความรู้สึก/อาการเจ็บ/คำสั่งโค้ช**
+
+**เก็บละเอียด "ทุกอย่างที่นาฬิกามี" (ขยาย 21 ก.ค. 69 — schema 58 คอลัมน์ใหม่):**
+- **กิจกรรม:** เพซ/HR (avg/max/**min**)/**speed**/cadence (avg/max)/power (avg/max/norm)/VO2max/training load + **HR time-in-zone (Z1-5)** + **running dynamics** (ground contact, vertical osc/ratio, stride length) + **stamina** (begin/end) + impact load + elevation (gain/loss/min/max) + intensity minutes + **weather** (อุณหภูมิ/ความชื้น/ลม — เฉพาะ outdoor) + sweat loss + lat/lon
+- **wellness:** RHR/HRV/นอน (score+ระยะ deep/light/REM)/**body battery ละเอียด** (high/low/at-wake/charged/drained/during-sleep) + stress (avg/max) + **respiration** (waking/sleep/high/low) + kcal (active/BMR) + floors + steps(+goal) + **training readiness แบบละเอียด** (score/level/feedback + **acute load + ACWR% ของ Garmin เอง** + hrv/recovery/stress factors) + training status
+- **หมายเหตุ device-dependent:** ฟิลด์ training_load/training_readiness/respiration ขึ้นกับรุ่นนาฬิกา — **พี่เก้ามีครบ**, ต้อง/แดนบางตัวเป็น NULL (นาฬิการุ่นเก่ากว่า) → dashboard/สคริปต์ต้อง fallback เสมอ
+
+| ส่วน | ไฟล์ | หน้าที่ |
+|---|---|---|
+| เพิ่มนักกีฬาใหม่ (ทางหลัก) | ดับเบิลคลิก `garmin\เพิ่มนักกีฬา.bat` (เรียก `01_generate_token.py`) | ผู้จัดการทีมกรอกอีเมล/รหัสผ่าน Garmin ของนักกีฬาเอง 3 อย่าง (ชื่อ/อีเมล/รหัส) → ได้ token ทันทีที่ `garmin\tokens\<slug>\` (รหัสผ่านไม่ถูกเก็บ) |
+| ขอ token แบบนักกีฬารันเอง (ทางเลือก) | `garmin\share\get_garmin_token.py` + `README_athlete.md` | ใช้เมื่อไม่สะดวกขอรหัสผ่านจากนักกีฬาตรงๆ — ส่งให้นักกีฬารันเองครั้งเดียว → ได้ `.zip` ส่งกลับมาแตกไว้ที่ `garmin\tokens\<slug>\` |
+| แตก token | วาง `garmin_tokens.json` ไว้ที่ `garmin\tokens\<slug>\` | slug ที่มีแล้ว: `tong`, `dan`, `p'kao` (พี่เก้า = Suwarong Vongsukda) — รอ: milk. **หมายเหตุ:** `p'kao` มี apostrophe → ปลอดภัยในสายอัตโนมัติ (auto-discover + subprocess list + SQL parameterized) แต่ถ้าสั่งเองใน shell ต้องครอบ `"p'kao"` |
+| ดึงทุกคน (daily) | `garmin\scripts\fetch_all.py --days 3` | incremental, idempotent — รันอัตโนมัติผ่าน Task `Run-Performance-Garmin` ทุกวัน 08:00 ผ่าน `garmin-sync-hidden.vbs` (ไม่โชว์จอดำ, log: `C:\Backup\garmin-sync-log.txt`) — อยากดึงมือเองดับเบิลคลิก `garmin-sync-auto.bat` ได้ (โชว์จอดำ) |
+| backfill รายคน | `garmin\scripts\03_backfill.py --athlete <slug> --days 90` | ดึงย้อนหลังลึกครั้งแรกหลังได้ token ใหม่ |
+| **ดูรายวัน (โค้ชคัดกรอง)** | `garmin\scripts\day.py --athlete <slug> [--date YYYY-MM-DD] [--splits]` | ดึงกิจกรรม+splits+wellness ของวันนั้นแบบอ่านง่าย — **ใช้ตัวนี้แทนอ่านรูป** |
+| วิเคราะห์สัปดาห์ | `garmin\scripts\04_weekly_review.py --athlete <slug>` | สรุปสัปดาห์/long run/VDOT/HRV/นอน/readiness/splits จาก DB |
+| เช็ค DB | `garmin\scripts\check_db.py` | นับ row + ตัวอย่างล่าสุด |
+| **Dashboard (Streamlit)** | `garmin\scripts\dashboard.py` — เปิดด้วย `run_dashboard.bat` (root) | 4 แท็บ: 👥 รวมทีม (สถานะ🟢🟡🔴+ACWR+ธงเฝ้าระวัง+**แถบเตือน sync ล่าสุดต่อคน**), 💤 Health, 👟 Training (ACWR แถบสี + โดนัท 80/20), 📉 Splits. **ธีม light ถาวร** (`garmin\.streamlit\config.toml` — แก้ print สีเพี้ยน). **ACWR ใช้ Garmin training_load ถ้านาฬิกาให้ (พี่เก้า = รวม cross-training) ไม่งั้น fallback ระยะวิ่ง (ต้อง/แดน)**. **`LTHR_BY_SLUG` ต้องอัปเดตหลังเทสใหม่** (tong=171, dan=178 — พี่เก้าใช้ fallback 89% ของ max HR ≈180 เพราะเทส Lactate ไม่มี HR) |
+
+- venv แยกที่ `garmin\.venv` (python 3.14) — bat/สคริปต์เรียก `.venv\Scripts\python.exe` เสมอ
+- **git:** `garmin\tokens\`, `garmin\data\`, `garmin\.venv\` ถูก ignore (token=credential, db=ข้อมูลสุขภาพ)
+- **workflow ใหม่เมื่อดูผลซ้อม:** รัน `day.py --athlete <slug> --date <วัน>` เอาตัวเลขจาก `garmin.db` (แทนการอ่านรูป) → ประกอบกับ RPE/ความรู้สึก/คำสั่งจากไลน์ → **โค้ชคัดกรอง** แล้วเขียน Training Log ใน Notion ผ่าน MCP
+- **Notion = โค้ชคัดกรองเอง (ไม่ auto push)** — เลือกแนวนี้ไว้ (20 ก.ค.) เพราะ Notion เป็น source of truth ที่ต้องมีวิจารณญาณโค้ช ไม่ push กิจกรรมดิบอัตโนมัติ (กัน noise/ซ้ำ) — ดู memory `garmin-module-integration`
+
 ### เมื่อถูกขอให้วางแผนซ้อม
 
+- **คำสั่งซ้อมรายวันที่จะให้ผู้จัดการทีมเอาไปส่ง LINE ต้องตามรูปแบบใน `.agents\AGENTS.md` เคร่งครัด** — เกียร์ความเร็ว @RE/@E/@Sub-T/@T/@I/@R + emoji เฉพาะ, template ยืดเหยียด+ดริล 6 ท่า+วิ่ง คั่นด้วย "จิบน้ำ" ทุกข้อ, โทนกันเอง ("น้อนแดน", "พี่เก้า", "พี่มิลค์", "คับ/ครับ")
 - อิงโซนจากเทสล่าสุดของคนนั้นเสมอ + ระบุว่าแผนหมดอายุเมื่อไหร่ (ควรเทสใหม่ทุก 4–6 สัปดาห์)
 - Easy volume 70–80% ของระยะรวม | Quality sessions ไม่เกิน 2–3 ครั้ง/สัปดาห์ | เพิ่มระยะรวมไม่เกิน ~10%/สัปดาห์
 - พี่เก้าใช้แผน 8 สัปดาห์จากรายงาน Lactate เป็นแกน (Double Threshold + Cruise Intervals + เวทขา)
