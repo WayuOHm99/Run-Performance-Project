@@ -357,12 +357,19 @@ def load_first_activity_date(athlete_id):
 
 @st.cache_data(ttl=600)
 def load_last_data_dates(athlete_id):
-    """วันล่าสุดที่มี activity / wellness — ใช้ทำแถบเตือนถ้า sync ค้าง (token หมด/Task ล้ม)"""
+    """วันล่าสุดที่มี activity / wellness — ใช้ทำแถบเตือนถ้า sync ค้าง (token หมด/Task ล้ม)
+
+    wellness ต้องนับเฉพาะวันที่ "มีข้อมูลจริง" — ระบบ sync insert แถวของวันใหม่ไว้ก่อน
+    แม้ค่าทุกช่องเป็น NULL (นักกีฬายังไม่ sync นาฬิกา) ถ้านับแถวเปล่าด้วย แถบจะโชว์
+    🟢 "วันนี้" ทั้งที่ข้อมูลจริงหยุดไปแล้ว (เคสพี่เก้า 22 ก.ค. 69)"""
     conn = sqlite3.connect(DB_PATH)
     la = conn.execute("SELECT MAX(SUBSTR(start_time_local, 1, 10)) FROM fact_activity WHERE athlete_id = ?",
                       (athlete_id,)).fetchone()[0]
-    lw = conn.execute("SELECT MAX(calendar_date) FROM fact_daily_wellness WHERE athlete_id = ?",
-                      (athlete_id,)).fetchone()[0]
+    lw = conn.execute(
+        """SELECT MAX(calendar_date) FROM fact_daily_wellness
+           WHERE athlete_id = ? AND (resting_hr IS NOT NULL OR sleep_score IS NOT NULL
+                                     OR body_battery_high IS NOT NULL OR hrv_last_night IS NOT NULL)""",
+        (athlete_id,)).fetchone()[0]
     conn.close()
     return la, lw
 
@@ -420,25 +427,6 @@ def load_personal_records(athlete_id):
 
 
 @st.cache_data(ttl=600)
-def load_gear(athlete_id=None):
-    """รองเท้า/อุปกรณ์ + ระยะสะสม — athlete_id=None คืนทั้งทีม (ใช้ในแท็บรวมทีม)"""
-    conn = sqlite3.connect(DB_PATH)
-    query = """SELECT g.athlete_id, a.display_name, g.gear_name, g.gear_type,
-                      g.date_begin, g.retired, g.total_distance_m, g.total_activities
-               FROM fact_gear g JOIN dim_athlete a ON g.athlete_id = a.athlete_id"""
-    params = ()
-    if athlete_id is not None:
-        query += " WHERE g.athlete_id = ?"
-        params = (athlete_id,)
-    df = pd.read_sql_query(query + " ORDER BY g.total_distance_m DESC", conn, params=params)
-    conn.close()
-    df["total_distance_m"] = pd.to_numeric(df["total_distance_m"], errors="coerce")
-    df["km"] = df["total_distance_m"] / 1000
-    df["gear_name"] = df["gear_name"].astype("string").str.strip()  # ชื่อจากแอปมักมี space ท้าย
-    return df
-
-
-@st.cache_data(ttl=600)
 def load_latest_lt(athlete_id):
     """Garmin Lactate Threshold ล่าสุด (hr, pace, วันที่) — None ถ้านาฬิกาไม่ให้"""
     conn = sqlite3.connect(DB_PATH)
@@ -450,19 +438,6 @@ def load_latest_lt(athlete_id):
            ORDER BY calendar_date DESC LIMIT 1""", (athlete_id,)).fetchone()
     conn.close()
     return row
-
-
-def shoe_status(km):
-    """สถานะรองเท้าตามระยะสะสม (เกณฑ์ทั่วไป: เปลี่ยนที่ ~500-800 กม.)"""
-    if pd.isna(km):
-        return "⚪", "ไม่มีข้อมูล"
-    if km > 3000:
-        return "❓", "ตัวเลขผิดปกติ — น่าจะเป็น default gear ผูกทุกกิจกรรม เช็คการผูกในแอป"
-    if km >= 650:
-        return "🔴", "ควรเปลี่ยน"
-    if km >= 500:
-        return "🟡", "ใกล้หมดสภาพ"
-    return "🟢", "สภาพดี"
 
 
 def get_lthr(slug, athlete_id):
@@ -562,7 +537,8 @@ with tab_team:
     st.markdown("**🔄 sync ล่าสุด (wellness):** &nbsp; " + " &nbsp;·&nbsp; ".join(fresh_parts))
     if stale_names:
         st.warning("⚠️ ข้อมูลค้าง ≥ 3 วัน: " + ", ".join(stale_names)
-                   + " — เช็ค log `C:\\Backup\\garmin-sync-log.txt` หรือ token อาจหมดอายุ (รัน `01_generate_token.py` ใหม่)")
+                   + " — เช็ค log `C:\\Backup\\garmin-sync-log.txt` | token เสียให้รัน `เพิ่มนักกีฬา.bat` ใหม่ "
+                     "| ถ้า sync รอบล่าสุดผ่าน (ไม่มีแถบแดงด้านล่าง) = นักกีฬาไม่ได้เปิดแอป Garmin ให้นาฬิกา sync")
 
     # --- ผลรอบ sync ล่าสุด (จาก data/sync_status.json ที่ fetch_all.py เขียน) ---
     # จับปัญหาได้ทันทีในรอบเดียว (token เสีย/ข้อมูลเพี้ยน) ไม่ต้องรอข้อมูลค้าง 3 วันแบบแถบบน
@@ -610,13 +586,23 @@ with tab_team:
         w = load_wellness_data(aid, (today - datetime.timedelta(days=30)).isoformat(), today.isoformat())
         bb = sleep = rhr = hrv_ms = float("nan")
         rhr_delta = float("nan")
-        hrv_stat = None
+        hrv_stat = train_stat = None
         day_complete = True
-        if not w.empty:
-            latest = w.iloc[-1]
+        # "ล่าสุด" = แถวล่าสุดที่มีข้อมูลจริง ไม่ใช่แถวล่าสุดตามปฏิทิน — วันใหม่ถูก insert
+        # เป็น NULL ทั้งแถวได้ถ้านักกีฬายังไม่ sync นาฬิกา (เคสพี่เก้า 22 ก.ค. 69) ถ้าหยิบแถวนั้น
+        # ตรงๆ การ์ดจะว่างหมดและ "ซ่อนธง" ของวันก่อนหน้า (เช่น sleep 52 ที่ควรเตือน)
+        _key_cols = ["resting_hr", "sleep_score", "body_battery_high", "hrv_last_night"]
+        w_data = w[w[_key_cols].notna().any(axis=1)] if not w.empty else w
+        wellness_date = None          # วันที่ของแถว wellness ที่ใช้จริง (ไว้บอกในตารางถ้าไม่ใช่วันนี้)
+        if not w_data.empty:
+            latest = w_data.iloc[-1]
+            wellness_date = datetime.date.fromisoformat(str(latest["calendar_date"])[:10])
             bb, sleep, rhr = latest["body_battery_high"], latest["sleep_score"], latest["resting_hr"]
             hrv_ms, hrv_stat = latest["hrv_last_night"], latest["hrv_status"]
-            baseline = w.iloc[:-1]["resting_hr"].dropna()
+            # อาจเป็น NaN (float) ไม่ใช่ None เมื่อ SQL คืน NULL — เช็คชนิดตรงๆ กัน .split() พัง
+            _ts_raw = latest["training_status"]
+            train_stat = _ts_raw if isinstance(_ts_raw, str) else None
+            baseline = w_data.iloc[:-1]["resting_hr"].dropna()
             if pd.notna(rhr) and len(baseline) >= 7:
                 rhr_delta = rhr - baseline.mean()
             # แถวที่ sync ภายในวันเดียวกัน = ค่ายังไม่ครบวัน (Body Battery จุดสูงสุดยังไม่เกิด)
@@ -638,19 +624,40 @@ with tab_team:
             flags.append(f"RHR สูงกว่าฐาน +{rhr_delta:.0f}")
         if hrv_stat in ("LOW", "UNBALANCED"):
             flags.append(f"HRV {hrv_stat}")
+        # training_status ของ Garmin (device-dependent — พี่เก้ามี, ต้อง/แดนเป็น NULL)
+        # ค่าดิบมี suffix ตัวเลข เช่น STRAINED_1 / UNPRODUCTIVE_5 → ตัดเหลือคำหลักก่อนเทียบ
+        _ts_base = (train_stat or "").split("_")[0]
+        _ts_flag = {"STRAINED": "ล้าสะสม (Strained)",
+                    "OVERREACHING": "โหลดเกินตัว (Overreaching)",
+                    "UNPRODUCTIVE": "ซ้อมไม่ขึ้น (Unproductive)"}
+        if _ts_base in _ts_flag:
+            flags.append(f"Garmin: {_ts_flag[_ts_base]}")
 
         hard_red = pd.notna(acwr) and acwr > 1.5
-        if hard_red or len(flags) >= 2:
+        no_data = daily.empty and w_data.empty
+        if no_data:
+            # ไม่มีทั้ง workload และ wellness เลย — ห้ามตกไปเคส 🟢 "พร้อมซ้อม" ทั้งที่ไม่รู้อะไร
+            # (เกิดได้ตอนเพิ่มนักกีฬาใหม่ที่ยังไม่ backfill หรือ token เสียจนข้อมูลขาดยาว)
+            status = "⚪ ไม่มีข้อมูล"
+        elif hard_red or len(flags) >= 2:
             status = "🔴 ต้องพัก/ลดโหลด"
         elif len(flags) == 1:
             status = "🟡 เฝ้าระวัง"
         else:
             status = "🟢 พร้อมซ้อม"
 
+        # ค่าบนการ์ดมาจากแถวเก่า (นักกีฬายังไม่ sync นาฬิกา) — บอกวันที่กำกับกันเข้าใจผิดว่าเป็นของวันนี้
+        stale_note = ""
+        if wellness_date is not None and wellness_date < today:
+            stale_note = f" (wellness ล่าสุด {wellness_date.strftime('%d/%m')})"
+
         emoji, acwr_txt = acwr_status(acwr)
         team_rows.append({
             "นักกีฬา": name,
             "สถานะ": status,
+            # อยู่ต้นตาราง (ไม่ใช่ท้ายสุด) เพราะตารางนี้มี 13 คอลัมน์ กว้างเกินจอปกติ —
+            # วางไว้ท้ายก่อนหน้านี้ทำให้มองข้ามว่า "ไม่ขึ้น" ทั้งที่จริงมีข้อมูล แค่ต้องเลื่อนดู
+            "สถานะซ้อม (Garmin)": _ts_base.title() if _ts_base else "–",
             "ACWR": round(acwr, 2) if pd.notna(acwr) else None,
             "โซน ACWR": f"{emoji} {acwr_txt}",
             "โหลด 7 วัน": (f"{acute:.0f} {unit}" if metric == "training_load"
@@ -661,7 +668,8 @@ with tab_team:
             "RHR": rhr if pd.notna(rhr) else None,
             "ΔRHR": f"{rhr_delta:+.0f}" if pd.notna(rhr_delta) else "–",
             "HRV คืนล่าสุด": f"{hrv_ms:.0f} ms · {hrv_stat}" if pd.notna(hrv_ms) and hrv_stat else "–",
-            "ธงเฝ้าระวัง": (" | ".join(flags) if flags else "—") + ("" if day_complete else " (BB ยังไม่ครบวัน)"),
+            "ธงเฝ้าระวัง": (" | ".join(flags) if flags else "—")
+                           + ("" if day_complete else " (BB ยังไม่ครบวัน)") + stale_note,
         })
 
     team_df = pd.DataFrame(team_rows)
@@ -676,6 +684,10 @@ with tab_team:
             "Body Battery": st.column_config.NumberColumn("Body Battery", format="%.0f"),
             "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
             "RHR": st.column_config.NumberColumn("RHR", format="%.0f"),
+            "สถานะซ้อม (Garmin)": st.column_config.TextColumn(
+                "สถานะซ้อม (Garmin)",
+                help="training status ที่ Garmin คำนวณเอง — Strained/Overreaching/Unproductive = ธงเฝ้าระวัง | "
+                     "ขึ้นกับรุ่นนาฬิกา (ต้อง/แดนไม่มี = –)"),
         },
     )
 
@@ -683,22 +695,13 @@ with tab_team:
 **📏 เกณฑ์สถานะ:** &nbsp;
 🔴 ต้องพัก = ACWR>1.5 หรือธง≥2 &nbsp;·&nbsp;
 🟡 เฝ้าระวัง = ธง 1 ข้อ &nbsp;·&nbsp;
-🟢 พร้อมซ้อม = ไม่มีธง
+🟢 พร้อมซ้อม = ไม่มีธง &nbsp;·&nbsp;
+⚪ ไม่มีข้อมูล = ยังไม่มีทั้ง workload/wellness ใน 30-42 วัน
 
-**🚩 ธงเฝ้าระวัง:** ACWR>1.3 · Body Battery<40 · Sleep<60 · RHR สูงกว่าฐาน≥+5 · HRV LOW/UNBALANCED
+**🚩 ธงเฝ้าระวัง:** ACWR>1.3 · Body Battery<40 · Sleep<60 · RHR สูงกว่าฐาน≥+5 · HRV LOW/UNBALANCED · Garmin status Strained/Overreaching/Unproductive
 
 _ACWR ใช้ Garmin training\_load (รวม cross-training) ถ้านาฬิกาให้ | ไม่งั้น fallback เป็นระยะวิ่ง_
 """)
-
-    # --- รองเท้าที่ควรเปลี่ยน (ทั้งทีม — กันบาดเจ็บจากโฟมเสื่อม) ---
-    all_gear = load_gear()
-    worn = all_gear[(all_gear["retired"] != 1) & all_gear["km"].between(500, 3000)] if not all_gear.empty else all_gear
-    if not worn.empty:
-        lines = []
-        for _, g in worn.iterrows():
-            icon, txt = shoe_status(g["km"])
-            lines.append(f"{icon} **{g['display_name']}** — {g['gear_name']}: {g['km']:,.0f} กม. ({txt})")
-        st.warning("👟 **รองเท้าใกล้หมดสภาพ** (เกณฑ์เปลี่ยน ~500-800 กม.):\n\n" + "\n".join(f"- {ln}" for ln in lines))
 
 
 # =====================================================================
@@ -966,7 +969,7 @@ with tab_train:
 
 
 # =====================================================================
-# TAB 4: PROGRESS — ความก้าวหน้า (VO2max / คาดการณ์แข่ง / PR / LT / รองเท้า)
+# TAB 4: PROGRESS — ความก้าวหน้า (VO2max / คาดการณ์แข่ง / PR / LT)
 # =====================================================================
 with tab_progress:
     st.header(f"ความก้าวหน้า: {selected_name}")
@@ -1105,29 +1108,6 @@ with tab_progress:
             })
         st.dataframe(pd.DataFrame(rows), hide_index=True)
         st.caption("PR นับตามที่นาฬิกาบันทึกอัตโนมัติ — ระยะที่ GPS วัดไม่ถึงเกณฑ์ (เช่น 4.98 กม.) จะไม่ถูกนับเป็น 5K")
-
-    st.markdown("---")
-
-    # ---------------- Gear (รองเท้า) ----------------
-    st.subheader("👟 รองเท้า (ระยะสะสม)")
-    gear = load_gear(athlete_id)
-    gear_active = gear[gear["retired"] != 1] if not gear.empty else gear
-    if gear_active.empty:
-        st.info("ไม่มีข้อมูลรองเท้า — ผูกรองเท้ากับกิจกรรมในแอป Garmin Connect ก่อน")
-    else:
-        rows = []
-        for _, g in gear_active.iterrows():
-            icon, txt = shoe_status(g["km"])
-            rows.append({
-                "รองเท้า": g["gear_name"] or "(ไม่มีชื่อ)",
-                "ระยะสะสม (km)": round(g["km"], 1) if pd.notna(g["km"]) else None,
-                "กิจกรรม": int(g["total_activities"]) if pd.notna(g["total_activities"]) else None,
-                "สถานะ": f"{icon} {txt}",
-            })
-        st.dataframe(pd.DataFrame(rows), hide_index=True,
-                     column_config={"ระยะสะสม (km)": st.column_config.NumberColumn(format="%.1f")})
-        st.caption("เกณฑ์ทั่วไป: โฟมเสื่อมที่ ~500-800 กม. — 🔴 ≥650 ควรเปลี่ยน · 🟡 ≥500 ใกล้หมดสภาพ · "
-                   "❓ ตัวเลขเกิน 3,000 กม. = น่าจะเป็น default gear ผูกทุกกิจกรรมอัตโนมัติ ให้จัดระเบียบในแอปก่อน")
 
 
 # =====================================================================
