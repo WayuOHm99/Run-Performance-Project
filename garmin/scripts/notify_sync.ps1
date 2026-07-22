@@ -7,6 +7,10 @@
 #   - ทุกอย่างปกติ                              -> เงียบ (ไม่มี toast)
 # toast ค้างอยู่ใน Action Center ของ Windows — ไม่อยู่หน้าจอตอนเด้งก็ย้อนดูได้
 #
+# "รอบนี้เขียนสถานะจริงไหม" ตัดสินจาก start-marker (data\sync_run_start.txt ที่ bat เขียน
+# ก่อนรัน fetch_all) — ไม่ใช่เดาจากอายุไฟล์ (heuristic เดิม >1 ชม. false-fire ตอนกดมือ).
+# ถ้า sync_status.run_at เก่ากว่าเวลาเริ่มรอบ = fetch_all ไม่ได้เขียน (ไม่ได้รัน/ตายก่อน).
+#
 # กติกา: สคริปต์แจ้งเตือนต้องไม่ทำให้ Task ล้มเอง — ทุก error ในนี้กลืนเงียบ (exit 0 เสมอ)
 
 param([int]$SyncExit = 0)
@@ -34,10 +38,18 @@ function Show-Toast([string]$Title, [string]$Body) {
 }
 
 try {
-    $statusPath = Join-Path (Split-Path $PSScriptRoot -Parent) "data\sync_status.json"
+    $dataDir = Join-Path (Split-Path $PSScriptRoot -Parent) "data"
+    $statusPath = Join-Path $dataDir "sync_status.json"
+    $startPath = Join-Path $dataDir "sync_run_start.txt"
+
+    # เวลาเริ่มรอบนี้ (bat เขียนก่อนรัน fetch_all) — ใช้ตัดสินว่าสถานะถูกเขียน "รอบนี้" จริงไหม
+    $runStart = $null
+    if (Test-Path $startPath) {
+        try { $runStart = [datetime]::Parse((Get-Content $startPath -Raw).Trim()) } catch {}
+    }
 
     if (-not (Test-Path $statusPath)) {
-        # fetch_all ตายก่อนเขียนสถานะ — ยังต้องแจ้งถ้า exit code บอกว่าพัง
+        # ไม่มีไฟล์สถานะเลย — แจ้งถ้ารอบนี้ exit ผิดปกติ
         if ($SyncExit -ne 0) {
             Show-Toast "Garmin sync ล้มเหลว" "ไม่มีไฟล์สถานะ — เปิด log C:\Backup\garmin-sync-log.txt"
         }
@@ -45,11 +57,13 @@ try {
     }
 
     $s = Get-Content $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $statusTime = [datetime]$s.run_at
 
-    # ไฟล์สถานะเก่าค้างจากรอบก่อน (fetch_all รอบนี้ตายก่อนเขียน) — เชื่อ exit code แทน
-    $ageHours = ((Get-Date) - [datetime]$s.run_at).TotalHours
-    if ($ageHours -gt 1 -and $SyncExit -ne 0) {
-        Show-Toast "Garmin sync ล้มเหลว" "รอบล่าสุดตายก่อนเขียนสถานะ — เปิด log C:\Backup\garmin-sync-log.txt"
+    # สถานะรอบนี้จริงไหม: run_at ต้อง >= เวลาเริ่มรอบ (เผื่อ jitter 5 วิ). ถ้าไม่มี start-marker
+    # (เช่นรัน fetch_all มือตรง ๆ ไม่ผ่าน bat) ถือว่า fresh เพื่อไม่เตือนพร่ำเพรื่อ
+    $isFresh = ($runStart -eq $null) -or ($statusTime -ge $runStart.AddSeconds(-5))
+    if (-not $isFresh) {
+        Show-Toast "Garmin sync ล้มเหลว" "fetch_all ไม่ได้เขียนสถานะรอบนี้ (ไม่ได้รัน/ตายก่อน) — เปิด log C:\Backup\garmin-sync-log.txt"
         exit 0
     }
 
