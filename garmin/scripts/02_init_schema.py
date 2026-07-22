@@ -75,6 +75,10 @@ ACTIVITY_COLUMNS = [
     ("weather_apparent_temp_c", "REAL"),
     ("weather_humidity", "REAL"),
     ("weather_wind_kph", "REAL"),
+    # ตั้งค่าเมื่อ reconciliation พบว่ากิจกรรมนี้ถูกลบฝั่ง Garmin แล้ว (soft delete —
+    # ไม่ลบแถวจริง กันเข้าใจผิด/กู้คืนได้). NULL = ยังมีอยู่จริง. ทุก query ที่คิดสถิติ
+    # (ACWR/ระยะรวม) ต้องกรอง deleted_at IS NULL เสมอ
+    ("deleted_at", "TEXT"),
     ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
 ]
 

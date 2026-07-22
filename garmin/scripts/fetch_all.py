@@ -7,9 +7,12 @@
 
 วิธีใช้:
     python scripts/fetch_all.py [--days 3] [--athlete tong]
+    python scripts/fetch_all.py --days 45 --skip-activities   # deep resync wellness รายเดือน
+    python scripts/fetch_all.py --days 90 --reconcile         # เช็คกิจกรรมถูกลบ รายสัปดาห์
 
 - ไม่ใส่ --athlete → วนทุกโฟลเดอร์ใน tokens/
 - เรียก 03_backfill.py เป็น subprocess ต่อคน (โค้ดดึงข้อมูลชุดเดียว ไม่ซ้ำ)
+- --skip-activities / --reconcile ส่งต่อให้ 03_backfill ทุกคน (ดู help ของ 03_backfill)
 """
 
 import argparse
@@ -65,7 +68,20 @@ def main():
                         help="จำนวนวันย้อนหลัง (ค่าเริ่มต้น 3)")
     parser.add_argument("--athlete", default=None,
                         help="เจาะจงคนเดียว (ไม่ใส่ = ทุกคน)")
+    parser.add_argument("--skip-activities", action="store_true",
+                        help="ส่งต่อให้ 03_backfill — ดึงเฉพาะ wellness/extras "
+                             "(ใช้ทำ deep resync รายเดือน ดักค่าที่ Garmin คำนวณย้อนหลัง)")
+    parser.add_argument("--reconcile", action="store_true",
+                        help="ส่งต่อให้ 03_backfill — โหมดเช็คกิจกรรมถูกลบฝั่ง Garmin "
+                             "(ใช้ทำ reconciliation รายสัปดาห์ เช่น --days 90 --reconcile)")
     args = parser.parse_args()
+
+    # ธงที่ส่งต่อให้ subprocess 03_backfill ต่อคน
+    passthrough = []
+    if args.skip_activities:
+        passthrough.append("--skip-activities")
+    if args.reconcile:
+        passthrough.append("--reconcile")
 
     athletes = [args.athlete] if args.athlete else list_athletes()
 
@@ -73,7 +89,9 @@ def main():
     print("=" * 60)
     print(f"  FETCH ALL — {stamp}")
     print(f"  นักกีฬา: {', '.join(athletes) if athletes else '(ไม่พบ token)'}")
-    print(f"  ช่วง: {args.days} วันล่าสุด")
+    _mode = "reconcile (เช็คกิจกรรมถูกลบ)" if args.reconcile else \
+            ("deep resync wellness (ข้ามกิจกรรม)" if args.skip_activities else "ปกติ")
+    print(f"  ช่วง: {args.days} วันล่าสุด | โหมด: {_mode}")
     print("=" * 60)
 
     if not athletes:
@@ -89,7 +107,8 @@ def main():
         # ใน 03_backfill) — กันเผื่อลูกกระบวนการค้าง ไม่ให้คนเดียวลากทั้งทีมค้างข้ามวัน
         try:
             proc = subprocess.run(
-                [sys.executable, str(BACKFILL), "--athlete", slug, "--days", str(args.days)],
+                [sys.executable, str(BACKFILL), "--athlete", slug,
+                 "--days", str(args.days), *passthrough],
                 cwd=str(PROJECT_ROOT),
                 env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
                 timeout=1200,

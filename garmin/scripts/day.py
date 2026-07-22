@@ -65,7 +65,7 @@ def main():
                avg_cadence, elevation_gain_m, avg_power, training_load,
                training_effect_aerobic, training_effect_anaerobic, calories
         FROM fact_activity
-        WHERE athlete_id=? AND date(start_time_local)=?
+        WHERE athlete_id=? AND date(start_time_local)=? AND deleted_at IS NULL
         ORDER BY start_time_local
     """, (aid, args.date)).fetchall()
 

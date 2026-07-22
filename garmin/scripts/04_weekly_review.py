@@ -52,6 +52,7 @@ def weekly_training_summary(conn, athlete_id, weeks):
         WHERE athlete_id = ?
           AND activity_type = 'running'
           AND start_time_local >= date('now', ?)
+          AND deleted_at IS NULL
         GROUP BY week
         ORDER BY week DESC
     """, (athlete_id, f'-{weeks * 7} days')).fetchall()
@@ -99,6 +100,7 @@ def long_run_tracker(conn, athlete_id, weeks):
           AND activity_type = 'running'
           AND distance_m >= 10000
           AND start_time_local >= date('now', ?)
+          AND deleted_at IS NULL
         ORDER BY start_time_local DESC
         LIMIT 10
     """, (athlete_id, f'-{weeks * 7} days')).fetchall()
@@ -137,6 +139,7 @@ def vdot_estimation(conn, athlete_id):
           AND activity_type = 'running'
           AND distance_m >= 3000
           AND avg_pace_min_per_km IS NOT NULL
+          AND deleted_at IS NULL
         ORDER BY avg_pace_min_per_km ASC
         LIMIT 5
     """, (athlete_id,)).fetchall()
@@ -157,7 +160,7 @@ def vdot_estimation(conn, athlete_id):
     # Garmin VO2Max if available
     latest_vo2 = conn.execute("""
         SELECT vo2max_value FROM fact_activity
-        WHERE athlete_id = ? AND vo2max_value IS NOT NULL
+        WHERE athlete_id = ? AND vo2max_value IS NOT NULL AND deleted_at IS NULL
         ORDER BY start_time_local DESC LIMIT 1
     """, (athlete_id,)).fetchone()
 
@@ -336,6 +339,7 @@ def split_analysis(conn, athlete_id):
                ROUND(distance_m / 1000.0, 2), ROUND(duration_sec / 60.0, 1)
         FROM fact_activity
         WHERE athlete_id = ? AND activity_type = 'running' AND distance_m >= 8000
+          AND deleted_at IS NULL
         ORDER BY start_time_local DESC LIMIT 1
     """, (athlete_id,)).fetchone()
 

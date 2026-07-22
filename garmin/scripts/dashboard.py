@@ -262,6 +262,7 @@ def load_activity_data(athlete_id, start_date, end_date):
     query = """
         SELECT * FROM fact_activity
         WHERE athlete_id = ? AND start_time_local >= ? AND start_time_local <= ?
+          AND deleted_at IS NULL
         ORDER BY start_time_local ASC
     """
     df = pd.read_sql_query(query, conn, params=(athlete_id, start_date, f"{end_date} 23:59:59"))
@@ -282,6 +283,7 @@ def load_daily_run_km(athlete_id, start_date, end_date):
         FROM fact_activity
         WHERE athlete_id = ? AND activity_type IN ({placeholders})
           AND start_time_local >= ? AND start_time_local <= ?
+          AND deleted_at IS NULL
         GROUP BY SUBSTR(start_time_local, 1, 10)
         ORDER BY date ASC
     """
@@ -299,7 +301,7 @@ def load_first_run_date(athlete_id):
     placeholders = ",".join("?" for _ in RUN_TYPES)
     row = conn.execute(
         f"SELECT MIN(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
-        f"WHERE athlete_id = ? AND activity_type IN ({placeholders})",
+        f"WHERE athlete_id = ? AND activity_type IN ({placeholders}) AND deleted_at IS NULL",
         (athlete_id, *RUN_TYPES)).fetchone()
     conn.close()
     return datetime.date.fromisoformat(row[0]) if row and row[0] else None
@@ -310,7 +312,8 @@ def athlete_has_load(athlete_id):
     """นาฬิกาคนนี้ให้ค่า training_load ไหม (บางรุ่นไม่ให้ → ต้อง fallback เป็นระยะวิ่ง)"""
     conn = sqlite3.connect(DB_PATH)
     n = conn.execute(
-        "SELECT COUNT(*) FROM fact_activity WHERE athlete_id = ? AND training_load IS NOT NULL",
+        "SELECT COUNT(*) FROM fact_activity "
+        "WHERE athlete_id = ? AND training_load IS NOT NULL AND deleted_at IS NULL",
         (athlete_id,)).fetchone()[0]
     conn.close()
     return n > 0
@@ -325,6 +328,7 @@ def load_daily_load(athlete_id, start_date, end_date):
         FROM fact_activity
         WHERE athlete_id = ? AND training_load IS NOT NULL
           AND start_time_local >= ? AND start_time_local <= ?
+          AND deleted_at IS NULL
         GROUP BY SUBSTR(start_time_local, 1, 10)
         ORDER BY date ASC
     """
@@ -349,7 +353,8 @@ def load_first_activity_date(athlete_id):
     """วันแรกที่มีกิจกรรม (ทุกประเภท) — ใช้ตัดสินความพอของประวัติเมื่อ ACWR อิง training_load"""
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        "SELECT MIN(SUBSTR(start_time_local, 1, 10)) FROM fact_activity WHERE athlete_id = ?",
+        "SELECT MIN(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
+        "WHERE athlete_id = ? AND deleted_at IS NULL",
         (athlete_id,)).fetchone()
     conn.close()
     return datetime.date.fromisoformat(row[0]) if row and row[0] else None
@@ -363,7 +368,8 @@ def load_last_data_dates(athlete_id):
     แม้ค่าทุกช่องเป็น NULL (นักกีฬายังไม่ sync นาฬิกา) ถ้านับแถวเปล่าด้วย แถบจะโชว์
     🟢 "วันนี้" ทั้งที่ข้อมูลจริงหยุดไปแล้ว (เคสพี่เก้า 22 ก.ค. 69)"""
     conn = sqlite3.connect(DB_PATH)
-    la = conn.execute("SELECT MAX(SUBSTR(start_time_local, 1, 10)) FROM fact_activity WHERE athlete_id = ?",
+    la = conn.execute("SELECT MAX(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
+                      "WHERE athlete_id = ? AND deleted_at IS NULL",
                       (athlete_id,)).fetchone()[0]
     lw = conn.execute(
         """SELECT MAX(calendar_date) FROM fact_daily_wellness
@@ -378,7 +384,8 @@ def load_last_data_dates(athlete_id):
 def load_observed_max_hr(athlete_id):
     """HR สูงสุดที่เคยบันทึก — ใช้ประมาณ LTHR เมื่อยังไม่มีผลเทส"""
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT MAX(max_hr) FROM fact_activity WHERE athlete_id = ?", (athlete_id,)).fetchone()
+    row = conn.execute("SELECT MAX(max_hr) FROM fact_activity "
+                       "WHERE athlete_id = ? AND deleted_at IS NULL", (athlete_id,)).fetchone()
     conn.close()
     return row[0] if row and row[0] else None
 
@@ -470,7 +477,7 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
     _c = sqlite3.connect(DB_PATH)
-    _la = _c.execute("SELECT MAX(start_time_local) FROM fact_activity").fetchone()[0]
+    _la = _c.execute("SELECT MAX(start_time_local) FROM fact_activity WHERE deleted_at IS NULL").fetchone()[0]
     _lw = _c.execute("SELECT MAX(calendar_date) FROM fact_daily_wellness").fetchone()[0]
     _c.close()
     st.caption(f"📅 ข้อมูลล่าสุดในระบบ — กิจกรรม: {_la or '—'} · wellness: {_lw or '—'}")

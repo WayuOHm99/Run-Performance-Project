@@ -122,17 +122,21 @@ def fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date):
         start_date.isoformat(),
         end_date.isoformat(),
     )
-    if not activities:
-        print("   No activities found.")
+    # แยก None (ดึงไม่สำเร็จ) ออกจาก [] (ไม่มีกิจกรรมจริง) — สำคัญมากสำหรับ reconcile:
+    # ถ้าดึงพลาดแล้วเข้าใจว่า "ไม่มีกิจกรรม" จะ mark ทุกกิจกรรมในช่วงว่าถูกลบ (ผิด)
+    if activities is None:
+        print("   ⚠️  ดึงรายการกิจกรรมไม่สำเร็จ — ข้ามรอบนี้ (ไม่แตะข้อมูลเดิม/ไม่ reconcile)")
         return 0
 
     cur = conn.cursor()
     count = 0
+    present_ids = set()   # activityId ทั้งหมดที่ Garmin คืนช่วงนี้ — ใช้ reconcile ตอนจบ
 
     for act in activities:
         activity_id = act.get("activityId")
         if not activity_id:
             continue
+        present_ids.add(activity_id)
 
         duration = act.get("duration")
         distance = act.get("distance")
@@ -207,6 +211,9 @@ def fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date):
 
     conn.commit()
     print(f"   ✅ Inserted {count} activities")
+    # reconcile ช่วงที่เพิ่งดึง (ฟรี — ใช้รายการที่ดึงมาแล้ว): กิจกรรมใน DB ช่วงนี้ที่ไม่อยู่
+    # ในรายการจริงของ Garmin = ถูกลบฝั่งแอป → mark deleted_at (daily 3 วันจับการลบล่าสุดได้เอง)
+    reconcile_activities(conn, athlete_id, start_date, end_date, present_ids)
     return count
 
 
@@ -266,6 +273,57 @@ def fetch_and_insert_splits(garmin, conn, activity_id):
             lap.get("intensityType"),
             avg_pace,
         ))
+
+
+# ── Reconciliation (กิจกรรมถูกลบฝั่ง Garmin) ──────────────────
+
+def reconcile_activities(conn, athlete_id, start_date, end_date, present_ids):
+    """เทียบกิจกรรมใน DB ช่วง [start,end] กับ activityId จริงจาก Garmin (present_ids):
+      - อยู่ DB แต่ไม่อยู่ Garmin = ถูกลบฝั่งแอป → set deleted_at (soft delete ไม่ลบแถวจริง)
+      - เคยมาร์ค deleted แต่กลับมาอยู่ Garmin = กู้คืน → clear deleted_at (self-healing)
+
+    ⚠️ เรียกเฉพาะเมื่อ present_ids มาจากการดึงที่ "สำเร็จ" เท่านั้น — ถ้าดึงพลาดแล้วส่ง set ว่าง
+    เข้ามาจะ mark กิจกรรมที่ยังอยู่จริงทั้งหมดว่าถูกลบ (ผู้เรียกต้องกันกรณี None ก่อน)"""
+    cur = conn.cursor()
+    db_rows = cur.execute(
+        """SELECT activity_id, deleted_at FROM fact_activity
+           WHERE athlete_id = ? AND date(start_time_local) BETWEEN ? AND ?""",
+        (athlete_id, str(start_date), str(end_date))).fetchall()
+    now = datetime.now().isoformat(timespec="seconds")
+    marked, restored = [], []
+    for act_id, deleted_at in db_rows:
+        present = act_id in present_ids
+        if not present and deleted_at is None:
+            cur.execute("UPDATE fact_activity SET deleted_at = ? WHERE activity_id = ?",
+                        (now, act_id))
+            marked.append(act_id)
+        elif present and deleted_at is not None:
+            cur.execute("UPDATE fact_activity SET deleted_at = NULL WHERE activity_id = ?",
+                        (act_id,))
+            restored.append(act_id)
+    conn.commit()
+    if marked:
+        print(f"   🗑️  กิจกรรมถูกลบฝั่ง Garmin {len(marked)} รายการ → mark deleted (id: {marked})")
+    if restored:
+        print(f"   ♻️  กิจกรรมกลับมา {len(restored)} รายการ → เคลียร์ deleted (id: {restored})")
+    return marked, restored
+
+
+def reconcile_only(garmin, conn, athlete_id, start_date, end_date):
+    """โหมด --reconcile: ดึงแค่ "รายชื่อ activityId" ช่วงกว้าง (ไม่ดึงรายละเอียด/ไม่ insert)
+    แล้วมาร์คกิจกรรมที่ถูกลบ — เบา API พอสำหรับรันรายสัปดาห์ช่วง 90 วัน.
+    คืน (marked, restored) หรือ None ถ้าดึงรายการไม่สำเร็จ (ห้าม reconcile)."""
+    print(f"\n🔍 Reconcile (เช็คกิจกรรมถูกลบ) {start_date} → {end_date}...")
+    activities = safe_call(garmin.get_activities_by_date,
+                           start_date.isoformat(), end_date.isoformat())
+    if activities is None:
+        print("   ⚠️  ดึงรายการจาก Garmin ไม่สำเร็จ — ข้าม reconcile (กัน mark ผิด)")
+        return None
+    present_ids = {a.get("activityId") for a in activities if a.get("activityId")}
+    marked, restored = reconcile_activities(conn, athlete_id, start_date, end_date, present_ids)
+    print(f"   ✅ Reconcile เสร็จ — Garmin มี {len(present_ids)} กิจกรรม | "
+          f"mark deleted {len(marked)} | กู้คืน {len(restored)}")
+    return marked, restored
 
 
 # ── Daily Wellness Fetching ──────────────────────────────────
@@ -720,6 +778,9 @@ def main():
     parser.add_argument("--skip-activities", action="store_true",
                         help="ข้ามการดึงกิจกรรม+splits (ใช้ตอน re-backfill เฉพาะ wellness/extras "
                              "ของช่วงที่มีกิจกรรมครบแล้ว — กันยิง API ซ้ำของเดิม เสี่ยงโดน rate limit)")
+    parser.add_argument("--reconcile", action="store_true",
+                        help="โหมดเช็คกิจกรรมถูกลบฝั่ง Garmin (ดึงแค่รายชื่อ ไม่ดึงรายละเอียด/ไม่ insert) "
+                             "→ mark deleted_at ตัวที่หายไป. ใช้รันรายสัปดาห์ (เช่น --days 90 --reconcile)")
     args = parser.parse_args()
 
     # Set up token path
@@ -773,6 +834,22 @@ def main():
 
     print(f"\n🗓️  Backfill range: {start_date} → {end_date} ({args.days} days)")
     print(f"👤 Athlete: {args.athlete} (id={athlete_id})")
+
+    # โหมด reconcile อย่างเดียว (ไม่ดึงกิจกรรม/wellness ใหม่) — สำหรับ task รายสัปดาห์
+    if args.reconcile:
+        result = reconcile_only(garmin, conn, athlete_id, start_date, end_date)
+        conn.close()
+        if result is None:
+            write_status(args.athlete, ok=False, reason="network",
+                         error="reconcile: ดึงรายการกิจกรรมไม่สำเร็จ")
+            sys.exit(1)
+        marked, restored = result
+        write_status(args.athlete, ok=True, reason="ok",
+                     warnings=([f"reconcile: mark กิจกรรมถูกลบ {len(marked)} รายการ"] if marked else []))
+        print("\n" + "=" * 50)
+        print(f"🎉 Reconcile complete! deleted +{len(marked)} | restored +{len(restored)}")
+        print("=" * 50)
+        return
 
     # Fetch data
     if args.skip_activities:
