@@ -1,4 +1,5 @@
 import datetime
+import json
 import math
 import sqlite3
 from pathlib import Path
@@ -562,6 +563,28 @@ with tab_team:
     if stale_names:
         st.warning("⚠️ ข้อมูลค้าง ≥ 3 วัน: " + ", ".join(stale_names)
                    + " — เช็ค log `C:\\Backup\\garmin-sync-log.txt` หรือ token อาจหมดอายุ (รัน `01_generate_token.py` ใหม่)")
+
+    # --- ผลรอบ sync ล่าสุด (จาก data/sync_status.json ที่ fetch_all.py เขียน) ---
+    # จับปัญหาได้ทันทีในรอบเดียว (token เสีย/ข้อมูลเพี้ยน) ไม่ต้องรอข้อมูลค้าง 3 วันแบบแถบบน
+    try:
+        _sync = json.loads((DB_PATH.parent / "sync_status.json").read_text(encoding="utf-8"))
+        _fail = [r for r in _sync["results"] if not r["ok"]]
+        _warn = [r for r in _sync["results"] if r["ok"] and r.get("warnings")]
+        if _fail:
+            _reason_txt = {"token": "token เสีย → รัน เพิ่มนักกีฬา.bat",
+                           "network": "เน็ต/เซิร์ฟเวอร์มีปัญหา",
+                           "timeout": "ค้างเกินเวลา"}
+            st.error(f"❌ รอบ sync {_sync['run_at'][:16].replace('T', ' ')} ล้มเหลว: "
+                     + " · ".join(f"**{r['slug']}** ({_reason_txt.get(r['reason'], 'ดู log')})"
+                                  for r in _fail))
+        if _warn:
+            for r in _warn:
+                st.warning(f"🧐 **{r['slug']}** — sanity check รอบล่าสุด: "
+                           + " | ".join(r["warnings"]))
+    except FileNotFoundError:
+        pass    # ยังไม่เคยรัน sync รอบใหม่หลังอัพเกรด — ไม่ต้องโชว์อะไร
+    except Exception as e:
+        st.caption(f"อ่าน sync_status.json ไม่ได้: {e}")
 
     team_rows = []
     for _, ath in athletes_df.iterrows():

@@ -9,6 +9,7 @@ Requires token to already exist in tokens/<athlete>/.
 """
 
 import argparse
+import json
 import os
 import socket
 import sqlite3
@@ -19,6 +20,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "garmin.db"
+# สถานะรายคนของรอบ sync ล่าสุด — fetch_all.py อ่านไปรวมเป็น data/sync_status.json
+# เพื่อให้ toast/dashboard บอกได้ว่าใครพังเพราะอะไร (token/เน็ต) และข้อมูลมีจุดน่าสงสัยไหม
+STATUS_DIR = PROJECT_ROOT / "data" / "sync_status"
 
 # กันการเชื่อมต่อค้างไม่รู้จบ: เคยเจอ SSL recv ค้างจน Task แขวนข้ามวัน (21 ก.ค. 69)
 # requests/urllib3 ไม่ตั้ง timeout เอง → ตั้ง default ให้ทุก socket แทน
@@ -646,6 +650,67 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
     print("   ✅ Extras done")
 
 
+# ── Sync status + sanity check ───────────────────────────────
+
+def write_status(slug, ok, reason="ok", error=None,
+                 activities=None, wellness_days=None, warnings=None):
+    """เขียนสถานะรอบนี้ลง data/sync_status/<slug>.json (เขียน tmp แล้ว rename กันไฟล์ครึ่งเดียว)."""
+    STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "slug": slug,
+        "ok": ok,
+        "reason": reason,          # ok | token | network | error
+        "error": error,
+        "activities": activities,
+        "wellness_days": wellness_days,
+        "warnings": warnings or [],
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    tmp = STATUS_DIR / f"{slug}.json.tmp"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(STATUS_DIR / f"{slug}.json")
+
+
+def sanity_check(conn, athlete_id, start_date, end_date):
+    """ตรวจความสมบูรณ์ของข้อมูลช่วงที่เพิ่งดึง — คืน list ข้อความเตือน (ว่าง = ปกติ).
+
+    หลักการ: Garmin ส่ง response แปลก ๆ มาได้ (ค่าหลักหาย/เป็นศูนย์) แล้วระบบจะเก็บเงียบ ๆ
+    เช็คหลังดึงทุกรอบดีกว่ามารู้ตอนวิเคราะห์ — เตือนอย่างเดียว ไม่ลบ/ไม่แก้ข้อมูล
+    """
+    warns = []
+
+    # 1) กิจกรรมที่ค่าหลักหาย/เพี้ยน — เวลารวมเป็น 0, วิ่งแต่ไม่มีระยะ/ไม่มี HR
+    rows = conn.execute(
+        """SELECT activity_id, activity_type, start_time_local, duration_sec, distance_m, avg_hr
+           FROM fact_activity
+           WHERE athlete_id = ? AND date(start_time_local) BETWEEN ? AND ?""",
+        (athlete_id, str(start_date), str(end_date))).fetchall()
+    for act_id, atype, started, dur, dist, hr in rows:
+        day = (started or "?")[:10]
+        if not dur or dur <= 0:
+            warns.append(f"กิจกรรม {day} ({atype}) เวลารวมเป็น 0/ว่าง (id {act_id})")
+        elif atype == "running":
+            if not dist or dist <= 0:
+                warns.append(f"วิ่ง {day} ไม่มีระยะทาง (id {act_id})")
+            elif hr is None:
+                warns.append(f"วิ่ง {day} ไม่มี HR — เช็คนาฬิกา/สายวัด (id {act_id})")
+
+    # 2) วัน wellness ที่ว่างทั้งแถว เฉพาะวันที่จบไปแล้ว — วันนี้ยังไม่จบวัน ค่าอาจยังไม่มา ไม่นับ
+    #    (ปกติ = นักกีฬายังไม่เปิดแอป Garmin ให้นาฬิกา sync ขึ้น cloud — ตามคนได้ตรงจุด)
+    rows = conn.execute(
+        """SELECT calendar_date FROM fact_daily_wellness
+           WHERE athlete_id = ? AND calendar_date BETWEEN ? AND ?
+             AND calendar_date < date('now', 'localtime')
+             AND resting_hr IS NULL AND sleep_score IS NULL AND body_battery_high IS NULL
+           ORDER BY calendar_date""",
+        (athlete_id, str(start_date), str(end_date))).fetchall()
+    if rows:
+        days = ", ".join(r[0] for r in rows)
+        warns.append(f"wellness ว่างทั้งวัน: {days} — นักกีฬาอาจยังไม่ได้ sync นาฬิกาเข้าแอป")
+
+    return warns
+
+
 # ── Main ─────────────────────────────────────────────────────
 
 def main():
@@ -662,7 +727,8 @@ def main():
     if not token_dir.exists():
         print(f"❌ Token directory not found: {token_dir}")
         print("   Run 01_generate_token.py first.")
-        sys.exit(1)
+        write_status(args.athlete, ok=False, reason="token", error="token directory not found")
+        sys.exit(2)
 
     # Login with saved token
     print(f"🔐 Loading token for '{args.athlete}'...")
@@ -671,9 +737,21 @@ def main():
     try:
         garmin.login(str(token_dir))
     except Exception as e:
-        print(f"❌ Token login failed: {e}")
-        print("   Re-run 01_generate_token.py to refresh.")
-        sys.exit(1)
+        # แยกให้ชัดว่า "token เสีย" หรือ "เน็ตล่ม" — token เสียจะพังเงียบทุกรอบจนกว่าจะขอใหม่
+        # จึงต้องแจ้งแบบเจาะจง (exit 2) ให้ fetch_all/toast บอกได้ทันทีว่าต้องรัน เพิ่มนักกีฬา.bat
+        err = str(e).lower()
+        is_network = any(s in err for s in (
+            "timed out", "timeout", "connection", "resolve", "getaddrinfo",
+            "unreachable", "temporary failure"))
+        if is_network:
+            print(f"❌ Login ล้มเหลวจากปัญหาเน็ต/เซิร์ฟเวอร์: {e}")
+            print("   ไม่ใช่ปัญหา token — รอบถัดไปจะลองใหม่เอง")
+            write_status(args.athlete, ok=False, reason="network", error=str(e))
+            sys.exit(1)
+        print(f"❌ TOKEN ใช้ไม่ได้ (หมดอายุ/ถูก revoke): {e}")
+        print(f"   → รัน garmin\\เพิ่มนักกีฬา.bat เพื่อขอ token ใหม่ของ '{args.athlete}'")
+        write_status(args.athlete, ok=False, reason="token", error=str(e))
+        sys.exit(2)
 
     full_name = garmin.get_full_name()
     print(f"✅ Logged in as: {full_name}")
@@ -705,7 +783,16 @@ def main():
     wellness_count = fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date)
     fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
 
+    warnings = sanity_check(conn, athlete_id, start_date, end_date)
+    if warnings:
+        print("\n⚠️  Sanity check พบจุดน่าสงสัย:")
+        for w in warnings:
+            print(f"   - {w}")
+
     conn.close()
+    write_status(args.athlete, ok=True, reason="ok",
+                 activities=activity_count, wellness_days=wellness_count,
+                 warnings=warnings)
 
     print("\n" + "=" * 50)
     print("🎉 Backfill complete!")

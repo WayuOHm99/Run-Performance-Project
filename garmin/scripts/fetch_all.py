@@ -13,6 +13,7 @@
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -30,6 +31,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent      # D:\Run-Performance\
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 TOKENS_DIR = PROJECT_ROOT / "tokens"
 BACKFILL = SCRIPTS_DIR / "03_backfill.py"
+STATUS_DIR = PROJECT_ROOT / "data" / "sync_status"          # สถานะรายคน (03_backfill เขียน)
+STATUS_FILE = PROJECT_ROOT / "data" / "sync_status.json"    # สถานะรวมรอบล่าสุด (ไฟล์นี้เขียน)
+
+
+def read_athlete_status(slug: str, not_before: datetime) -> dict | None:
+    """อ่าน data/sync_status/<slug>.json เฉพาะเมื่อเขียน "ในรอบนี้" (กันหยิบไฟล์เก่าค้าง
+    จากรอบก่อนมาปนเมื่อ 03_backfill ตายก่อนเขียนสถานะ)."""
+    p = STATUS_DIR / f"{slug}.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if datetime.fromisoformat(data["finished_at"]) >= not_before:
+            return data
+    except Exception:
+        pass
+    return None
 
 
 def list_athletes() -> list[str]:
@@ -64,7 +80,9 @@ def main():
         print("⚠️  ไม่พบ token ใน tokens/ — ยังไม่มีใครให้ดึง")
         sys.exit(0)
 
+    run_started = datetime.now()
     ok, failed = [], []
+    results = []            # สถานะละเอียดรายคน → data/sync_status.json (toast/dashboard อ่าน)
     for slug in athletes:
         print(f"\n▶ {slug}")
         # เพดานเวลา 20 นาที/คน (daily --days 3 ปกติเสร็จใน <1 นาที เพราะมี socket timeout 30 วิ
@@ -76,19 +94,47 @@ def main():
                 env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
                 timeout=1200,
             )
-            (ok if proc.returncode == 0 else failed).append(slug)
+            status = read_athlete_status(slug, run_started)
+            if proc.returncode == 0:
+                ok.append(slug)
+                results.append({"slug": slug, "ok": True, "reason": "ok",
+                                "warnings": (status or {}).get("warnings", [])})
+            else:
+                failed.append(slug)
+                # exit 2 = token เสีย (03_backfill แยกให้แล้ว) — บอกวิธีแก้ได้ตรงจุด
+                reason = (status or {}).get("reason") or \
+                    ("token" if proc.returncode == 2 else "error")
+                results.append({"slug": slug, "ok": False, "reason": reason,
+                                "warnings": []})
         except subprocess.TimeoutExpired:
             print(f"   ❌ {slug}: เกิน 20 นาที — ยกเลิกแล้วไปคนถัดไป")
             failed.append(slug)
+            results.append({"slug": slug, "ok": False, "reason": "timeout", "warnings": []})
         except Exception as e:
             # คนเดียวพังต้องไม่ลากทั้งทีม — log แล้วไปคนถัดไป (เคยเกิด 21 ก.ค. 69:
             # dan พังกลางทางทำให้ tong/p'kao ในคิวเดียวกันไม่ถูกดึงเลยทั้งรอบ)
             print(f"   ❌ {slug}: {type(e).__name__}: {e} — ข้ามไปคนถัดไป")
             failed.append(slug)
+            results.append({"slug": slug, "ok": False, "reason": "error", "warnings": []})
 
+    # สรุปรวมรอบนี้ให้ notify_sync.ps1 (toast) กับ dashboard อ่าน
+    try:
+        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATUS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({
+            "run_at": run_started.isoformat(timespec="seconds"),
+            "days": args.days,
+            "results": results,
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(STATUS_FILE)
+    except Exception as e:
+        print(f"⚠️  เขียน sync_status.json ไม่สำเร็จ: {e}")
+
+    n_warn = sum(len(r["warnings"]) for r in results)
     print("\n" + "=" * 60)
     print(f"  เสร็จ: {len(ok)} สำเร็จ ({', '.join(ok) or '-'})"
-          f" | ล้มเหลว: {len(failed)} ({', '.join(failed) or '-'})")
+          f" | ล้มเหลว: {len(failed)} ({', '.join(failed) or '-'})"
+          f" | ข้อมูลน่าสงสัย: {n_warn} จุด")
     print("=" * 60)
     # exit code != 0 ถ้ามีคนล้มเหลว เพื่อให้ log/Task เห็นสถานะ
     sys.exit(1 if failed else 0)
