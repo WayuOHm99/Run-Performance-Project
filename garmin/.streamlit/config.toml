@@ -4,3 +4,9 @@
 [theme]
 base = "light"
 primaryColor = "#2a78d6"
+textColor = "#31333F"
+
+# ต้องระบุ textColor ของ sidebar ตรงๆ — Streamlit 1.59 มีบั๊ก: ถ้าตั้งธีมเองแต่ไม่กำหนด
+# ค่านี้ frontend จะได้สตริงว่างแล้วสแปม console warning "Invalid color passed for textColor"
+[theme.sidebar]
+textColor = "#31333F"
