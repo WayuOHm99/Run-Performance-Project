@@ -817,8 +817,11 @@ def main():
     full_name = garmin.get_full_name()
     print(f"✅ Logged in as: {full_name}")
 
-    # Connect to database
-    conn = sqlite3.connect(DB_PATH)
+    # Connect to database — busy_timeout 30 วิ + WAL (idempotent) กัน "database is locked"
+    # ตอน dashboard เปิดค้างอ่านพร้อมกัน (เจอจริง 22 ก.ค. 69 รอบ 21:43 ล้มทั้ง 3 คน)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     athlete_id = get_athlete_id(conn, args.athlete)
 
     # Update garmin_full_name

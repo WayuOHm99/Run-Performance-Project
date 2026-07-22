@@ -224,6 +224,11 @@ def _migrate(cur, table, columns):
 def init_schema(db_path: Path = DB_PATH):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    # WAL mode: อ่าน (dashboard) กับ เขียน (sync) ทำพร้อมกันได้ ไม่ล็อกกัน —
+    # เป็นคุณสมบัติของไฟล์ ตั้งครั้งเดียวติดถาวร (แก้อาการ "database is locked"
+    # ตอนเปิด dashboard ค้างแล้ว sync อัตโนมัติเขียนไม่ได้ 22 ก.ค. 69)
+    wal_mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+    conn.execute("PRAGMA busy_timeout=30000")   # ถ้าล็อกจริง รอ 30 วิ แทนล้มทันที
     cur = conn.cursor()
 
     cur.execute("""
@@ -267,6 +272,7 @@ def init_schema(db_path: Path = DB_PATH):
     conn.close()
 
     print(f"✅ Schema initialized: {db_path}")
+    print(f"   journal_mode = {wal_mode} (WAL = อ่าน/เขียนพร้อมกันได้)")
     if added_a:
         print(f"   + fact_activity เพิ่ม {len(added_a)} คอลัมน์: {', '.join(added_a)}")
     if added_s:
