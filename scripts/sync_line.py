@@ -7,7 +7,7 @@ sync_line.py — ดึงรูป/ข้อความจากกลุ่�
   1. ถาม Supabase ว่ามีรูป/ข้อความใหม่ที่ยังไม่ได้ดึงลงเครื่องไหม
   2. จับกลุ่มเป็น "เซสชัน" ด้วยเวลา (ห่างกันเกิน 30 นาที = คนละเซสชัน)
   3. แยกว่าเป็นการบ้านหรือคุยเล่น (ดู classify)
-  4. บันทึกลง  D:\\Run-Performance\\<ชื่อนักกีฬา>\\<YYYY-MM-DD>\\
+  4. บันทึกลง  <โฟลเดอร์โปรเจกต์>\\athletes\\<ชื่อนักกีฬา>\\<YYYY-MM-DD>\\
        การบ้าน  -> sN_MM.jpg
        คุยเล่น   -> _แชท\\HHMM_MM.jpg
   5. เขียน context.json เก็บข้อความ/RPE ของวันนั้นไว้ให้โค้ชกับ Claude อ่าน
@@ -42,7 +42,8 @@ from pathlib import Path
 # ---------------- ตั้งค่า ----------------
 
 TH = timezone(timedelta(hours=7))          # ไทยไม่มี DST ใช้ offset คงที่ได้เลย
-ROOT = Path(r"D:\Run-Performance")
+ROOT = Path(__file__).resolve().parent.parent   # โฟลเดอร์โปรเจกต์ (แม่ของ scripts\)
+                                                # อิงตัวไฟล์เสมอ ย้าย/เปลี่ยนชื่อโฟลเดอร์แล้วไม่พัง
 BUCKET = "line-media"
 SESSION_GAP_MINUTES = 30                    # ห่างเกินนี้ = คนละเซสชัน
 CONTEXT_LOOKBACK_HOURS = 24                 # ดึงข้อความเก่ามาช่วยตัดสินย้อนหลังแค่ไหน
@@ -78,6 +79,11 @@ ORDER_HINTS = (
 )
 ORDER_FILE = "คำสั่งโค้ช.md"
 TEAM_DIR_NAME = "_ทีม"          # ใช้เมื่อคำสั่งไม่ได้ระบุตัวใครเป็นพิเศษ
+
+def get_dest_dir(name: str) -> Path:
+    if name.startswith("_"):
+        return ROOT / "team_data" / name
+    return ROOT / "athletes" / name
 
 # หน้าจอ Windows ปกติไม่ใช่ UTF-8 ถ้าไม่บังคับตรงนี้ ภาษาไทยจะกลายเป็นตัวประหลาด
 for _stream in (sys.stdout, sys.stderr):
@@ -527,11 +533,11 @@ def main() -> None:
         print(f"   \"{head}...\"")
         if args.dry_run:
             for d in dests:
-                print(f"   จะเขียนลง {ROOT / d / when.strftime('%Y-%m-%d') / ORDER_FILE}")
+                print(f"   จะเขียนลง {get_dest_dir(d) / when.strftime('%Y-%m-%d') / ORDER_FILE}")
             continue
         for d in dests:
             try:
-                if write_order(ROOT / d / when.strftime("%Y-%m-%d"),
+                if write_order(get_dest_dir(d) / when.strftime("%Y-%m-%d"),
                                when, r["line_message_id"], text, targets):
                     orders_written += 1
                     print(f"   เขียนลง {d}/{when:%Y-%m-%d}/{ORDER_FILE}")
@@ -553,7 +559,7 @@ def main() -> None:
         for day, day_rows in sorted(by_day.items()):
             if not any(r["id"] in pending_ids for r in day_rows):
                 continue
-            day_dir = ROOT / athlete / day
+            day_dir = get_dest_dir(athlete) / day
             sessions = split_sessions(day_rows)
             blocks: list[dict] = []
             done: list[tuple[int, str | None, str | None]] = []   # (id, storage_path, note)

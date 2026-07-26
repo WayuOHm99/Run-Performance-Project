@@ -1,8 +1,10 @@
 @echo off
-rem === Run-Performance backup (mirror D:\Run-Performance to C:\Backup) ===
+rem === Run-Performance backup (mirror the project folder to C:\Backup) ===
 rem Excludes: .env (secret key), __pycache__ (junk)
 rem Usage: double-click to run manually, or Task Scheduler runs it daily 22:00
-set SRC=D:\Run-Performance
+rem SRC is derived from this file's own location (parent of scripts\), never
+rem hardcoded - renaming or moving the project folder must not break backups.
+for %%I in ("%~dp0..") do set SRC=%%~fI
 set DEST=C:\Backup\Run-Performance
 set LOG=C:\Backup\backup-log.txt
 if not exist "C:\Backup" mkdir "C:\Backup"

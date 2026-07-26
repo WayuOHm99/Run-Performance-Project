@@ -49,11 +49,13 @@
 ## โครงสร้างโฟลเดอร์
 
 ```
-D:\Run-Performance\
-  <ชื่อนักกีฬา>\<YYYY-MM-DD>_<ชื่อกิจกรรม>\   ← รูป Garmin / PDF / ไฟล์ .FIT
+D:\Run-Performance-Project\
+  athletes\<ชื่อนักกีฬา>\<YYYY-MM-DD>_<ชื่อกิจกรรม>\   ← รูป Garmin / PDF / ไฟล์ .FIT
+  team_data\_ทีม\                                      ← ข้อมูลส่วนกลาง/ทีม
+  docs\                                                ← เอกสารและคู่มือต่างๆ
 ```
 
-ตัวอย่าง: `แดน\2026-07-08_VCR30-Test\`, `น้องต้อง\2026-07-14_5K-Time-Trial\`
+ตัวอย่าง: `athletes\แดน\2026-07-08_VCR30-Test\`, `athletes\น้องต้อง\2026-07-14_5K-Time-Trial\`
 
 ## Workflow ประจำ
 
@@ -85,7 +87,7 @@ D:\Run-Performance\
 | `context.json` | ข้อความ/RPE ของนักกีฬา พร้อมเวลา และเหตุผลที่จัดประเภทแบบนั้น |
 | `คำสั่งโค้ช.md` | คำสั่งซ้อมที่โค้ชพิมพ์ในไลน์ (จับอัตโนมัติ) — **วันที่ = วันที่ส่ง ไม่ใช่วันที่ให้ทำ** |
 
-รายละเอียดระบบทั้งหมดดูที่ `SPEC-ระบบเก็บข้อมูล.md`
+รายละเอียดระบบทั้งหมดดูที่ `docs\SPEC-ระบบเก็บข้อมูล.md`
 
 ## โมดูล Garmin — ตัวเลขจาก API ตรง (ไม่ต้องแคปรูป) — เพิ่ม 20 ก.ค. 69
 
@@ -116,7 +118,7 @@ D:\Run-Performance\
 - venv แยกที่ `garmin\.venv` (python 3.14) — bat/สคริปต์เรียก `.venv\Scripts\python.exe` เสมอ
 - **DB เป็น WAL mode (แก้ 22 ก.ค. 69):** `garmin.db` ตั้ง `journal_mode=WAL` ถาวร (ใน `02_init_schema.py`) — **dashboard เปิดค้าง (อ่าน) + sync อัตโนมัติ (เขียน) ทำพร้อมกันได้ ไม่ "database is locked"** (เจอจริงรอบ 21:43 ล้มทั้ง 3 คนเพราะ dashboard ค้าง). writer ใน 03_backfill ตั้ง `busy_timeout=30000` เพิ่ม. **หมายเหตุ:** WAL สร้าง sidecar `garmin.db-wal`/`-shm` (อยู่ใน `data\` ที่ ignore แล้ว) + Task Scheduler `LastTaskResult` เชื่อไม่ได้ (bat จบด้วย notify ที่ exit 0 เสมอ → โชว์ success ตลอด) ให้ดู log/dashboard/toast แทน
 - **แจ้งเตือน sync (เพิ่ม 22 ก.ค. 69):** ทุกรอบ sync เขียนสถานะลง `garmin\data\sync_status.json` (+ รายคนใน `sync_status\<slug>.json`) แล้ว `garmin-sync-auto.bat` เรียก `scripts\notify_sync.ps1` → เด้ง **Windows toast** เมื่อมีคนล้มเหลวหรือข้อมูลเพี้ยน (ปกติเงียบ) — `03_backfill.py` แยก **exit 2 = token เสีย** (บอกให้รัน เพิ่มนักกีฬา.bat) จากปัญหาเน็ต (exit 1) + มี **sanity check** หลังดึงทุกรอบ (กิจกรรมเวลา 0 / วิ่งไม่มีระยะ-HR / wellness ว่างทั้งวันที่จบแล้ว = นักกีฬายังไม่ sync นาฬิกา) — dashboard แท็บรวมทีมโชว์ผลรอบล่าสุดจากไฟล์เดียวกัน. **กฎ encoding ของไฟล์สั่งงาน (สำคัญ — เคยพังจริง 22 ก.ค.):** ไฟล์ `.ps1` ต้อง **UTF-8 มี BOM** (PS 5.1 อ่านไทยไม่มี BOM แล้ว parser พัง) | ไฟล์ `.bat` ต้อง **ASCII ล้วน ห้ามมีไทยแม้ใน `rem`** (cmd.exe แตก multibyte ไทยเป็นคำสั่งขยะ ทำให้ทั้ง bat ล้ม — คอมเมนต์ไทยไว้ใน .py/.ps1 แทน). **notify ตัดสิน "รอบนี้เขียนสถานะจริงไหม" จาก start-marker `data\sync_run_start.txt`** (bat เขียน ISO time ก่อนรัน fetch_all) ไม่ใช่เดาจากอายุไฟล์ — กัน toast หลอก "ตายก่อนเขียนสถานะ" ตอนกดมือใกล้รอบก่อน
-- **ความถูกต้องข้อมูล = ตรงกับ Garmin จริง (เพิ่ม 22 ก.ค. 69):** (1) **soft delete** — กิจกรรมที่ถูกลบฝั่ง Garmin จะถูก mark `deleted_at` (ไม่ลบแถวจริง, self-healing กลับมาได้), reconcile ทำเองในหน้าต่าง daily 3 วัน + กวาดไกล 90 วันรายสัปดาห์ — **ทุก query ที่คิดสถิติ (ACWR/ระยะรวม/VDOT) กรอง `deleted_at IS NULL` เสมอ** (dashboard/day.py/04_weekly_review แก้ครบแล้ว ถ้าเขียน query fact_activity ใหม่ต้องกรองด้วย) (2) **deep resync รายเดือน** ดักค่าที่ Garmin คำนวณย้อนหลัง (3) **check_drift** จับ field หายเงียบ (4) **ตรวจทานมือรายเดือน** เทียบ day.py กับแอป Garmin จริง — เช็คลิสต์ `garmin\ตรวจทานข้อมูล-รายเดือน.md`. **Task Scheduler:** ตั้งเพิ่มได้เอง — reconcile รายสัปดาห์ (`garmin-reconcile-auto.bat`) + deepsync รายเดือน (`garmin-deepsync-auto.bat`) นอกเหนือ daily ที่มีอยู่
+- **ความถูกต้องข้อมูล = ตรงกับ Garmin จริง (เพิ่ม 22 ก.ค. 69):** (1) **soft delete** — กิจกรรมที่ถูกลบฝั่ง Garmin จะถูก mark `deleted_at` (ไม่ลบแถวจริง, self-healing กลับมาได้), reconcile ทำเองในหน้าต่าง daily 3 วัน + กวาดไกล 90 วันรายสัปดาห์ — **ทุก query ที่คิดสถิติ (ACWR/ระยะรวม/VDOT) กรอง `deleted_at IS NULL` เสมอ** (dashboard/day.py/04_weekly_review แก้ครบแล้ว ถ้าเขียน query fact_activity ใหม่ต้องกรองด้วย) (2) **deep resync รายเดือน** ดักค่าที่ Garmin คำนวณย้อนหลัง (3) **check_drift** จับ field หายเงียบ (4) **ตรวจทานมือรายเดือน** เทียบ day.py กับแอป Garmin จริง — เช็คลิสต์ `docs\ตรวจทานข้อมูล-รายเดือน.md`. **Task Scheduler:** งานอัตโนมัติทั้งชุดตั้งได้ด้วย `scripts\setup_scheduled_tasks.ps1` (ดู "ตารางงานอัตโนมัติ" ล่างสุด) — ใส่ `-IncludeOptional` เพื่อเพิ่ม reconcile รายสัปดาห์ + deepsync รายเดือน นอกเหนือ daily ที่มีอยู่
 - **git:** `garmin\tokens\`, `garmin\data\`, `garmin\.venv\` ถูก ignore (token=credential, db=ข้อมูลสุขภาพ)
 - **workflow ใหม่เมื่อดูผลซ้อม:** รัน `day.py --athlete <slug> --date <วัน>` เอาตัวเลขจาก `garmin.db` (แทนการอ่านรูป) → ประกอบกับ RPE/ความรู้สึก/คำสั่งจากไลน์ → **โค้ชคัดกรอง** แล้วเขียน Training Log ใน Notion ผ่าน MCP
 - **Notion = โค้ชคัดกรองเอง (ไม่ auto push)** — เลือกแนวนี้ไว้ (20 ก.ค.) เพราะ Notion เป็น source of truth ที่ต้องมีวิจารณญาณโค้ช ไม่ push กิจกรรมดิบอัตโนมัติ (กัน noise/ซ้ำ) — ดู memory `garmin-module-integration`
@@ -134,3 +136,17 @@ D:\Run-Performance\
 - **แดน:** เพซตกช่วงท้ายเทส 30 นาที (3:44 → 3:54) — เน้นความทนทานที่ T-pace; gap สู่ sub-18 ยังอีก ~14 วิ/กม.
 - **พี่เก้า:** Lactate Cliff (+3.40 ใน 1 สเต็ป) + โซน Threshold แคบ ~1.4 km/h — ห้ามซ้อมเกินโซนนิดเดียวเด็ดขาด, กล้ามเนื้อขาล้าก่อนปอด → เวทขาสำคัญ
 - **พี่มิลค์:** มือใหม่ — เริ่มจาก Base เบาๆ ก่อน อย่าเพิ่งใส่ quality; เทส Baseline ก่อนกำหนดโซน
+
+## ตารางงานอัตโนมัติ (Windows Scheduled Task) — เพิ่ม 26 ก.ค. 69
+
+**`scripts\setup_scheduled_tasks.ps1` = source of truth ของตารางงานอัตโนมัติ** (คลิกขวา → Run with PowerShell) เพราะ Scheduled Task อยู่ใน Windows ไม่ได้อยู่ใน git → ลง Windows ใหม่/ย้ายเครื่อง/เปลี่ยนชื่อโฟลเดอร์ แล้วงานจะหายหรือชี้ path ผิด **เงียบๆ** ให้รันสคริปต์นี้ซ้ำได้เรื่อยๆ (idempotent) มี `-DryRun` ดูก่อน และ `-IncludeOptional` เพื่อตั้ง 2 งานท้ายตาราง
+
+| Task | เวลา | ทำอะไร |
+|---|---|---|
+| `Run-Performance-LineSync` | ทุก 15 นาที | ดึงรูป/ข้อความจากไลน์ (`sync-hidden.vbs`) |
+| `Run-Performance-Garmin` | 08:00 + 21:00 | ดึง Garmin ทุกคนลง `garmin.db` (`garmin-sync-hidden.vbs`) |
+| `Run-Performance-Backup` | 22:00 | สำรองโปรเจกต์ไป `C:\Backup` (`สำรองข้อมูล.bat`) |
+| `Run-Performance-Garmin-Reconcile` | อาทิตย์ 09:30 | เช็คกิจกรรมถูกลบย้อน 90 วัน — ต้องใช้ `-IncludeOptional` |
+| `Run-Performance-Garmin-DeepSync` | ทุก 4 สัปดาห์ 10:30 | deep resync wellness + check_drift — ต้องใช้ `-IncludeOptional` |
+
+> ⚠️ **path ต้องอิงตัวไฟล์เองเสมอ ห้าม hardcode `D:\...`** — เคยพังจริง 26 ก.ค. 69 (เปลี่ยนชื่อโฟลเดอร์ → เด้ง "Can not find script file" + `sync_line.py` เกือบเขียนลงโฟลเดอร์ผี) `.vbs` ใช้ `WScript.ScriptFullName` | `.bat` ใช้ `%~dp0` | `.py` ใช้ `__file__`

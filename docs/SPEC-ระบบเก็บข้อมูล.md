@@ -31,7 +31,7 @@ Supabase Edge Function — จับกลุ่มด้วย timestamp, ร�
         ↓
 Supabase Storage (ที่พักชั่วคราว) + ตาราง log
         ↓  sync script บนเครื่องโค้ช
-D:\Run-Performance\athletes\<ชื่อ>\<วันที่>\  + context.json (RPE/ข้อความ/เวลา)
+D:\Run-Performance-Project\athletes\<ชื่อ>\<วันที่>\  + context.json (RPE/ข้อความ/เวลา)
    แล้วล้างของบนคลาวด์
         ↓
 🧍 โค้ชพิมพ์ "ดูของใหม่"
@@ -216,7 +216,7 @@ Claude Code อ่านรูป → วิเคราะห์ → เขี�
 | 0 | พิสูจน์ว่า OCR อ่านได้แม่นพอ | ✅ ผ่าน |
 | 1 | ตั้ง LINE OA + Supabase + Edge Function รับ webhook | ✅ **ทดสอบผ่านจริงแล้ว** |
 | 2 | จับกลุ่มข้อความเป็นเซสชัน + เก็บรูปเข้า Storage + context.json | ✅ อยู่ในสคริปต์ Phase 3 |
-| 3 | Sync script ดึงลง `D:\Run-Performance\` แล้วล้างคลาวด์ | 🔨 เขียนเสร็จ รอใส่ key แล้วทดสอบ |
+| 3 | Sync script ดึงลง `D:\Run-Performance-Project\` แล้วล้างคลาวด์ | 🔨 เขียนเสร็จ รอใส่ key แล้วทดสอบ |
 | 4 | ชั้น context: ดึงคำสั่งค้าง + โหลด 7 วัน มาช่วยตอนรีวิว | ⏳ |
 | ~~—~~ | ~~ขา "ส่ง": push ตารางซ้อมเข้าไลน์~~ | ❌ **ตัดออกจากขอบเขต** — เจ้าของโปรเจกต์จัดการเอง (18 ก.ค.) |
 | — | *(ทางเลือกอนาคต)* เสียบ Claude API เพื่อให้ auto เต็มรูปแบบ | ⏸️ เมื่อเจ้าของพร้อมจ่าย |
@@ -255,7 +255,7 @@ Storage bucket: `line-media` (private)
 **Edge Function** — `line-webhook` (`verify_jwt = false` เพราะตรวจลายเซ็น HMAC ของ LINE เอง)
 
 - Webhook URL: `https://tnmxpwcyfaekwwwrefjd.supabase.co/functions/v1/line-webhook`
-- ซอร์ส: `D:\Run-Performance\supabase\functions\line-webhook\index.ts`
+- ซอร์ส: `D:\Run-Performance-Project\supabase\functions\line-webhook\index.ts`
 - ตอบ LINE 200 ทันที แล้วดึงรูปเบื้องหลังด้วย `EdgeRuntime.waitUntil` (เนื้อไฟล์บน LINE มีอายุจำกัด ต้องรีบดึง)
 - ดึง `displayName` จาก LINE อัตโนมัติตอนเจอ userId ใหม่
 - ถ้าดึงรูปพลาด บันทึกลงคอลัมน์ `error` ไม่ปล่อยเงียบหาย
@@ -277,7 +277,7 @@ Storage bucket: `line-media` (private)
 
 ### สคริปต์ดึงลงเครื่อง (Phase 3)
 
-`D:\Run-Performance\scripts\sync_line.py` — Python ล้วน ไม่ต้องติดตั้งไลบรารีเพิ่ม
+`D:\Run-Performance-Project\scripts\sync_line.py` — Python ล้วน ไม่ต้องติดตั้งไลบรารีเพิ่ม
 
 - จับกลุ่มเซสชันด้วยช่องว่างเวลา > 30 นาที
 - บันทึกเป็น `<ชื่อ>\<YYYY-MM-DD>\sN_MM.jpg` + `context.json` (เก็บข้อความ/RPE พร้อมเวลา)
