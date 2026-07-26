@@ -31,7 +31,7 @@ Supabase Edge Function — จับกลุ่มด้วย timestamp, ร�
         ↓
 Supabase Storage (ที่พักชั่วคราว) + ตาราง log
         ↓  sync script บนเครื่องโค้ช
-D:\Run-Performance\<ชื่อ>\<วันที่>\  + context.json (RPE/ข้อความ/เวลา)
+D:\Run-Performance\athletes\<ชื่อ>\<วันที่>\  + context.json (RPE/ข้อความ/เวลา)
    แล้วล้างของบนคลาวด์
         ↓
 🧍 โค้ชพิมพ์ "ดูของใหม่"
