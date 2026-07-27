@@ -99,6 +99,23 @@ The stack is entirely local. It never links, logs in to, or migrates the hosted
 Supabase project. `supabase login`, `supabase link`, `supabase db push`, and any
 other remote command are out of bounds for local development work.
 
+### Database authorization tests
+
+Row Level Security and grant behaviour are covered by pgTAP tests in
+`platform/supabase/tests/database/`. With the local stack running, run from
+`platform/`:
+
+```powershell
+corepack pnpm exec supabase db reset --local --no-seed
+corepack pnpm exec supabase test db --local
+corepack pnpm exec supabase db lint --local --schema public,private --level warning --fail-on warning
+```
+
+`db reset` rebuilds only the local database from `supabase/migrations/`. Every
+fixture is synthetic, transaction-scoped, and rolled back, so no seed file or
+persistent test data is needed. These commands are local-only; never add
+`--linked` or a remote database URL.
+
 ### Credential hygiene
 
 `supabase start` and `supabase status` print development-only API keys and a
