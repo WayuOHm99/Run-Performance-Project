@@ -1,21 +1,41 @@
-import { StyleSheet, Text, View } from "react-native";
+import { useRouter } from "expo-router";
+import { StyleSheet, View } from "react-native";
 
 import { AppScreen } from "@/components/app-screen";
 import { InfoCard } from "@/components/info-card";
-import { colors, spacing, type } from "@/theme/tokens";
+import { PrimaryButton } from "@/components/primary-button";
+import { ScreenHeading } from "@/components/screen-heading";
+import { ROUTES } from "@/features/auth/gate";
+import { useAccountQuery } from "@/features/profile/use-account";
+import { spacing } from "@/theme/tokens";
 
+/**
+ * The coach shell.
+ *
+ * Reachable only while `canEnterRoleArea(gate, "coach")` holds. An
+ * athlete-only user has no route here at all, and would in any case see nothing
+ * through RLS.
+ */
 export default function CoachTeamScreen() {
+  const account = useAccountQuery();
+  const router = useRouter();
+
   return (
     <AppScreen>
-      <View style={styles.heading}>
-        <Text style={styles.eyebrow}>สำหรับโค้ช</Text>
-        <Text style={styles.title}>ภาพรวมทีม</Text>
-        <Text style={styles.subtitle}>หน้าพรีวิวนี้ไม่มีข้อมูลทีมจริง</Text>
-      </View>
+      <ScreenHeading
+        eyebrow="สำหรับโค้ช"
+        title="ภาพรวมทีม"
+        description={
+          account.data?.displayName === null ||
+          account.data?.displayName === undefined
+            ? undefined
+            : `สวัสดี ${account.data.displayName}`
+        }
+      />
 
       <InfoCard
         label="ทีม"
-        title="ยังไม่มีนักกีฬาในพื้นที่พรีวิว"
+        title="ยังไม่มีข้อมูลนักกีฬาในขั้นนี้"
         description="เมื่อระบบสมาชิกพร้อม คุณจะเห็นเฉพาะนักกีฬาที่อยู่ในทีมและยินยอมแชร์ข้อมูล"
         accent="primary"
       />
@@ -29,29 +49,23 @@ export default function CoachTeamScreen() {
         title="การสร้างแผนยังไม่เปิดใช้งาน"
         description="ฟังก์ชันสร้างและเผยแพร่แผนจะเพิ่มหลังระบบสิทธิ์และทีมผ่านการทดสอบ"
       />
+
+      <View style={styles.actions}>
+        <PrimaryButton
+          label="บัญชีของฉัน"
+          variant="quiet"
+          onPress={() => {
+            router.push(ROUTES.profile);
+          }}
+        />
+      </View>
     </AppScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  heading: {
-    gap: spacing.xs,
-    marginBottom: spacing.md,
-  },
-  eyebrow: {
-    color: colors.primaryStrong,
-    fontSize: type.caption,
-    fontWeight: "800",
-    letterSpacing: 1,
-  },
-  title: {
-    color: colors.ink,
-    fontSize: type.title,
-    fontWeight: "800",
-  },
-  subtitle: {
-    color: colors.inkMuted,
-    fontSize: type.small,
-    lineHeight: 20,
+  actions: {
+    gap: spacing.md,
+    marginTop: spacing.lg,
   },
 });

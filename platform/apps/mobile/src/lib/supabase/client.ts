@@ -1,25 +1,27 @@
 import "react-native-url-polyfill/auto";
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import {
-  createClient,
-  processLock,
-  type SupabaseClient,
-} from "@supabase/supabase-js";
+import { createClient, processLock } from "@supabase/supabase-js";
 import { AppState, Platform, type NativeEventSubscription } from "react-native";
 
+import type { AppSupabaseClient } from "./app-client";
+import type { Database } from "./database.types";
 import {
   readPublicSupabaseEnvironment,
   type PublicSupabaseEnvironment,
 } from "./environment";
 
-let supabaseClient: SupabaseClient | undefined;
+// The client carries the generated schema types, so a typo in a column name or
+// a table this app holds no grant on fails at typecheck rather than at runtime.
+// The types are generated from the local database only; see the mobile README.
+
+let supabaseClient: AppSupabaseClient | undefined;
 let appStateSubscription: NativeEventSubscription | undefined;
 
 function createConfiguredClient(
   environment: PublicSupabaseEnvironment,
-): SupabaseClient {
-  return createClient(environment.url, environment.publishableKey, {
+): AppSupabaseClient {
+  return createClient<Database>(environment.url, environment.publishableKey, {
     auth: {
       ...(Platform.OS === "web" ? {} : { storage: AsyncStorage }),
       autoRefreshToken: true,
@@ -30,7 +32,7 @@ function createConfiguredClient(
   });
 }
 
-function startNativeAuthLifecycle(client: SupabaseClient): void {
+function startNativeAuthLifecycle(client: AppSupabaseClient): void {
   if (Platform.OS === "web" || appStateSubscription) {
     return;
   }
@@ -51,7 +53,7 @@ function startNativeAuthLifecycle(client: SupabaseClient): void {
   );
 }
 
-export function getSupabaseClient(): SupabaseClient {
+export function getSupabaseClient(): AppSupabaseClient {
   if (!supabaseClient) {
     const environment = readPublicSupabaseEnvironment();
     supabaseClient = createConfiguredClient(environment);

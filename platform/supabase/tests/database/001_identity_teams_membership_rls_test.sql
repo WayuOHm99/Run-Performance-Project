@@ -16,7 +16,7 @@ create extension if not exists pgtap with schema extensions;
 
 set local search_path = public, extensions, pg_catalog;
 
-select plan(172);
+select plan(173);
 
 -- ---------------------------------------------------------------------------
 -- Synthetic fixtures
@@ -710,11 +710,15 @@ select throws_ok(
   '42501', null,
   'an authenticated user cannot insert a profile'
 );
+-- TASK-009 replaced the former blanket refusal here. Editing one's own
+-- display_name is now an intended capability and is covered in full by
+-- 002_profile_display_name_self_update_test.sql. What remains prohibited, and
+-- is asserted instead, is rewriting any other column of one's own profile.
 select throws_ok(
-  $$ update public.profiles set display_name = 'renamed'
+  $$ update public.profiles set created_at = now()
      where id = '00000000-0000-4000-8000-00000000000b' $$,
   '42501', null,
-  'an authenticated user cannot update their own profile in this task'
+  'an authenticated user cannot update created_at on their own profile'
 );
 select throws_ok(
   $$ delete from public.profiles where id = '00000000-0000-4000-8000-00000000000b' $$,
@@ -762,10 +766,20 @@ select throws_ok(
   '42501', null,
   'no cross-team delete succeeds'
 );
-select throws_ok(
+-- Still refused after TASK-009, but by a different mechanism. The coach now
+-- holds the display_name column privilege, so the attempt is no longer stopped
+-- at the privilege layer; the profiles_update_self policy filters the row out
+-- instead. The statement therefore succeeds while changing nothing, so the
+-- refusal has to be asserted as an unchanged value rather than as a raise.
+select lives_ok(
   $$ update public.profiles set display_name = 'renamed'
      where id = '00000000-0000-4000-8000-00000000000b' $$,
-  '42501', null,
+  'a coach updating an athlete profile is filtered, not refused outright'
+);
+select is(
+  (select display_name from public.profiles
+    where id = '00000000-0000-4000-8000-00000000000b'),
+  null,
   'an active coach cannot edit an athlete profile'
 );
 
@@ -886,13 +900,18 @@ select is(
   3,
   'exactly one SELECT policy exists per table'
 );
+-- TASK-009 added exactly one intended write policy: profiles_update_self.
+-- Asserting the exact name and count keeps this a real guard against an
+-- unnoticed future write policy rather than a loosened one.
 select is(
-  (select count(*)::int from pg_catalog.pg_policies
+  (select coalesce(string_agg(tablename || '.' || policyname || ':' || cmd, ', '
+                              order by tablename, policyname), '')
+     from pg_catalog.pg_policies
     where schemaname = 'public'
       and tablename in ('profiles', 'teams', 'team_memberships')
       and cmd <> 'SELECT'),
-  0,
-  'no write policy exists on any of the three tables'
+  'profiles.profiles_update_self:UPDATE',
+  'the only write policy on the three tables is the TASK-009 self display-name update'
 );
 select is(
   (select count(*)::int from pg_catalog.pg_policies
