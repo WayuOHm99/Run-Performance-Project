@@ -39,6 +39,11 @@ protected athlete data is introduced.
 - `platform/pnpm-lock.yaml`
 - `platform/supabase/`
 - `platform/README.md`
+- `platform/.prettierignore`
+
+`platform/.prettierignore` was added to this list by Product Owner approval during
+implementation. Ownership is limited to ignoring `platform/supabase/.temp/` and
+`platform/supabase/.branches/`. Any other formatter-ignore rule needs its own task.
 
 ## Forbidden paths
 
@@ -157,10 +162,11 @@ git diff --name-only
 - Added `platform/.prettierignore`. Running the stack generates
   `platform/supabase/.temp/`, which Git already ignores through
   `platform/supabase/.gitignore`, but Prettier reads only top-level ignore files
-  and therefore failed `format:check` after every `supabase start`. This file is
-  outside the literal owned-path list; it was required to keep the in-scope item
-  "keep generated local runtime state ignored" true for the formatter as well as
-  for Git.
+  and therefore failed `format:check` after every `supabase start`. This keeps the
+  in-scope item "keep generated local runtime state ignored" true for the formatter
+  as well as for Git. The Product Owner approved adding this path to the owned-path
+  list, limited to the two generated Supabase directories; the file contains no
+  other rule.
 
 ### Pre-existing formatting defect fixed
 
