@@ -22,8 +22,9 @@ platform/
 └─ tooling/            App-only development tooling
 ```
 
-Directories will be created only when an accepted task needs them. This avoids
-empty scaffolding that has no tested user outcome.
+The mobile application now lives at `apps/mobile/`. Other directories will be
+created only when an accepted task needs them. This avoids empty scaffolding that
+has no tested user outcome.
 
 ## Boundary
 
@@ -49,5 +50,13 @@ directory.
 
 ## Commands
 
-Future JavaScript commands will run from `platform/` with pnpm. No package manager
-or framework has been initialized by the boundary task.
+Run JavaScript commands from `platform/` with the pinned pnpm version:
+
+```powershell
+corepack pnpm install
+corepack pnpm --filter @run-performance/mobile start
+```
+
+The first mobile shell is a development preview only. It has no authentication,
+backend, wearable connection, production data, deployment configuration, or store
+identifier.

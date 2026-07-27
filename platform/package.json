@@ -1,0 +1,19 @@
+{
+  "name": "run-performance-platform",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "corepack pnpm --filter @run-performance/mobile lint",
+    "typecheck": "corepack pnpm --filter @run-performance/mobile typecheck",
+    "test": "corepack pnpm --filter @run-performance/mobile test"
+  },
+  "devDependencies": {
+    "prettier": "3.9.6"
+  }
+}
