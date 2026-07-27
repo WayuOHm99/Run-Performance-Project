@@ -16,7 +16,8 @@ Round 1 handoff:         ac415e4c306d6c90b5ac9fca635b458bd52e633b
 Round 2 fix (F1, F2):    8dd6ae717814b57e392658c09be29ac4d584f3d0
 Round 2 handoff:         68796cdd6518038bf574d064cc307dfa49d7f812
 Round 3 verification:    94685b9ac9f245e123c29c3ba6cd00b4031b26ec (ambiguous; see below)
-Round 4 Phase A:         documentation + canary only; this is the head
+Round 4 Phase A:         f5d3258af27347fd3753a86656b926e12714660d (canary isolation)
+Round 4 Phase B:         documentation only; records the isolated worktree-canary verification; this is the head
 ```
 
 Nothing has been merged, pushed, deployed, linked, or migrated. The branch and
@@ -28,17 +29,22 @@ Both findings were accepted as correct. Neither was disputed.
 
 | Finding                                                                | Severity | Status                                                            |
 | ---------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
-| 1 — protected-path deny rules do not cover worktrees                   | High     | **Fix updated; isolated fresh-session verification pending**      |
+| 1 — protected-path deny rules do not cover worktrees                   | High     | **Fixed and verified** by an isolated fresh-session canary read    |
 | 2 — partial storage removal may leave protected routing open in memory | Medium   | **Fixed** and proved by mutation testing                          |
 
-**Finding 1 is not closed.** Round 2 wrote the worktree rules but could not
+**Finding 1 is now closed.** Round 2 wrote the worktree rules but could not
 verify them, because Claude Code reads its settings at launch and a session
 cannot validate its own settings edits. Round 3 ran a fresh-session canary check
 that was denied — but that test was **ambiguous**, as Codex then found: the
 canary carried three overlapping rules, so the denial did not isolate the
-worktree wildcard. Round 4 Phase A replaces the canary design with two
-single-rule fixtures so the next check is attributable. **Verification is still
-outstanding.** Details in "Protected-path incident and remediation".
+worktree wildcard. Round 4 Phase A replaced the canary design with two
+single-rule fixtures so the check would be attributable. Round 4 Phase B then
+ran that attributable check: a fresh worktree session requested
+`WORKTREE-CANARY.md` by its exact absolute path using the built-in `Read` tool
+only, and was **denied by permission settings with no content returned**. Since
+that file is matched by exactly one rule — the `worktrees/*/` wildcard — the
+denial isolates the worktree wildcard, which is the single thing the High
+finding turns on. Details in "Protected-path incident and remediation".
 
 ### Finding 2 — how it was fixed
 
@@ -138,7 +144,16 @@ never written to either backend in readable form.
 | `docs/app/permission-canary/CANARY.md`          | **deleted** — the ambiguous three-rule fixture                                                   |
 | `docs/app/claude-app-settings.json`             | 3 canary rules removed, 2 added. 63 → 62 rules; **no protected-path rule removed or weakened**  |
 | `docs/app/CLAUDE-CODE-SETUP.md`                 | two-canary procedure, exact-absolute-path requirement, Read-only/no-fallback rule                |
-| `docs/app/handoffs/TASK-010.md`                 | round-3 conclusion withdrawn; Finding 1 reopened as verification-pending                        |
+| `docs/app/handoffs/TASK-010.md`                 | round-3 conclusion withdrawn; Finding 1 reopened as verification-pending *(closed in Phase B)*  |
+
+### Round 4 Phase B — verification record (documentation only)
+
+| File                            | Change                                                                            |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| `docs/app/handoffs/TASK-010.md` | records the isolated worktree-canary denial; Finding 1 closed as verified          |
+
+No other file was changed in Phase B: no fixture, no settings file, no source
+file.
 
 **No application source, dependency, lockfile, database, or migration file was
 touched in round 4.**
@@ -316,9 +331,10 @@ verification change under a whole-file rewrite.
 
 ### Round 4 Phase A — documentation and canary fixtures only
 
-No canary read was attempted in this session, deliberately: the settings were
-edited here, and a session cannot validate its own settings edits. Verification
-is deferred to a fresh session.
+No canary read was attempted in the Phase A session, deliberately: the settings
+were edited there, and a session cannot validate its own settings edits.
+Verification was deferred to a fresh session, and was carried out in Phase B
+below.
 
 | Command / check                  | Result                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------- |
@@ -338,6 +354,24 @@ The same `format:check` scoping caveat noted for round 3 applies here: the
 script runs from `platform/`, so `docs/` is outside its scope and the passing
 result does not cover these files. `docs/` is not Prettier-managed in this
 repository.
+
+### Round 4 Phase B — isolated canary verification
+
+The attributable check deferred by Phase A was run in a **fresh worktree
+session** launched with the updated settings. This phase changed no source file
+and no fixture; only this handoff was edited.
+
+| Command / check              | Result                                                          |
+| ---------------------------- | ----------------------------------------------------------------- |
+| isolated canary read         | **denied by permission settings, no content returned** — see the record below |
+| `corepack pnpm format:check` | exit 0 — "All matched files use Prettier code style!"           |
+| `git diff --check`           | clean                                                           |
+| `git status --short`         | ` M docs/app/handoffs/TASK-010.md` only — one documentation file |
+
+No test, typecheck, Expo Doctor, or web export re-run was performed, and none is
+claimed: nothing under `src/`, `platform/`, or any config file changed since the
+round-2 results, which therefore still stand. The `format:check` scoping caveat
+above applies unchanged.
 
 The round-2 web export used a **fully synthetic** project URL
 (`https://synthetic-local.supabase.co`) rather than the real project identifier,
@@ -540,11 +574,11 @@ very content it existed to protect.**
 4. **`CLAUDE-CODE-SETUP.md` updated** with the worktree explanation, the canary
    procedure, and the fact that settings are read at launch.
 
-### Sanitized verification result — NOT yet proven
+### Sanitized verification result — proven in round 4 Phase B
 
-**Status: the worktree wildcard is still unverified.** Round 3 produced a
-denial, but not an attributable one. The history below is preserved in full,
-including the claim that was withdrawn.
+**Status: the worktree wildcard is verified.** The isolated Phase B result is
+recorded below. Round 3 produced a denial, but not an attributable one; that
+history is preserved in full below, including the claim that was withdrawn.
 
 Round 2 could not verify its own fix. Claude Code loads `--settings` at launch,
 so editing the settings file mid-session does not change that session's
@@ -623,18 +657,39 @@ well-formed, there are no duplicates, `MAIN-CANARY.md` and `WORKTREE-CANARY.md`
 each match exactly one rule, all nine protected paths retain worktree coverage,
 and no protected-path rule was removed or weakened.
 
-**Required next step, for the Product Owner:** exit, keep the worktree, and
-launch a **fresh worktree session** with the updated settings. Ask it to read
-`WORKTREE-CANARY.md` by the current worktree's exact absolute path, using the
-built-in Read tool only. A denial before any content closes Finding 1. Optionally
-run `MAIN-CANARY.md` from a main-repository session the same way. **Treat the
-worktree deny rules as unproven until the worktree canary is denied.**
+#### Round 4 Phase B — the isolated verification result
 
-**Residual limitation, even after that check passes.** A denied worktree canary
-proves the rule *shape* resolves. It is evidence for the nine protected paths by
-construction, not a direct read attempt against each — those are deliberately
-never attempted, since a per-path test would re-expose the content the rules
-exist to protect.
+The check was run in a **fresh worktree session** launched with the updated
+settings, exactly as step 7 of `CLAUDE-CODE-SETUP.md` now requires:
+
+| Item             | Result                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Tool used        | the built-in `Read` tool only                                                                                                  |
+| Path requested   | `//d/Run-Performance-Project/.claude/worktrees/task-010-secure-session-storage/docs/app/permission-canary/WORKTREE-CANARY.md` — the exact absolute path, no wildcard, no project-relative form |
+| Outcome          | **denied by permission settings**                                                                                              |
+| Content returned | **none.** The denial preceded any content; not one line of the file was returned.                                              |
+| Fallback used    | **none.** No Bash, PowerShell, `grep`, `cat`, or other bypass was attempted after the denial.                                  |
+| Protected paths  | **none requested.** No protected legacy path was named, opened, or attempted in this check.                                    |
+
+This is attributable in the way round 3 was not. `WORKTREE-CANARY.md` is matched
+by **exactly one** deny rule —
+`Read(//d/Run-Performance-Project/.claude/worktrees/*/docs/app/permission-canary/WORKTREE-CANARY.md)`
+— with no project-relative rule and no second absolute rule. The request used
+the exact absolute worktree path, so the `worktrees/*/` wildcard is the only
+pattern that could have produced the denial. The wildcard resolves, and the
+protected-path rules written in the same shape are therefore live in a worktree
+session. Finding 1 is closed.
+
+**Scope of what was tested.** Only the `WORKTREE-CANARY.md` Read-rule shape —
+the `worktrees/*/` wildcard for `Read` — was exercised. **`MAIN-CANARY.md` was
+not tested**, and no claim is made about the repository-root absolute rule
+beyond its static validation; running it from a main-repository session remains
+optional and unperformed. Nothing here tests the `Edit` rules either.
+
+**Residual limitation.** A denied worktree canary proves the rule *shape*
+resolves. It is evidence for the nine protected paths by construction, not a
+direct read attempt against each — those are deliberately never attempted, since
+a per-path test would re-expose the content the rules exist to protect.
 
 ## Rollback
 
@@ -668,9 +723,13 @@ are in "Protected-path incident and remediation" above. During the round-2 fix
 itself, no protected file was read at all — verification used the synthetic
 canary and a harmless `docs/app/README.md` probe instead. **Round 3 requested
 only the synthetic canary**, which was denied with no content returned, and no
-fallback tool was used to work around that denial. **Round 4 requested no
-protected path and no canary at all**: it only edited documentation and the
-synthetic fixtures. The one file deleted in round 4,
+fallback tool was used to work around that denial. **Round 4 Phase A requested
+no protected path and no canary at all**: it only edited documentation and the
+synthetic fixtures. **Round 4 Phase B requested exactly one path — the synthetic
+`WORKTREE-CANARY.md`, by its exact absolute worktree path, using the built-in
+`Read` tool only.** It was denied by permission settings with no content
+returned, no fallback tool was used afterwards, and no protected legacy path was
+requested. The one file deleted in round 4,
 `docs/app/permission-canary/CANARY.md`, is a synthetic fixture this task created,
 and its removal was explicitly authorized; its contents were never read.
 
