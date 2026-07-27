@@ -2,9 +2,9 @@
 
 Status: In Progress
 
-Writer: ChatGPT/Codex
+Writer: Claude Code
 
-Reviewer: AGY (`app-reviewer`, read-only)
+Reviewer: ChatGPT/Codex (read-only after ownership transfer)
 
 ## Goal and user value
 
@@ -85,7 +85,8 @@ protected athlete data is introduced.
 - [ ] Existing format, lint, typecheck, and unit tests pass.
 - [ ] No protected legacy path, real athlete data, or remote Supabase resource is
       read or modified.
-- [ ] AGY returns no blocker, high, or medium finding.
+- [ ] ChatGPT/Codex returns no blocker, high, or medium finding in the final
+      read-only review.
 
 ## Privacy classification
 
@@ -130,6 +131,15 @@ git diff --name-only
 - Docker Desktop 4.83.0 and WSL 2.7.11 are installed and verified.
 - Database schema and RLS design will be a separate task with independent
   authorization-negative tests.
+
+## Ownership transfer
+
+- ChatGPT/Codex created the task, pinned Supabase CLI 2.109.1, initialized
+  `platform/supabase/`, and completed the clean checkpoint commit
+  `432d229a3a5682e3810a6eb05632271368986d77`.
+- Claude Code is the sole writer for all work after this checkpoint.
+- ChatGPT/Codex becomes read-only for review after the transfer. Any accepted
+  finding must be fixed by Claude Code.
 
 ## Required handoff
 
