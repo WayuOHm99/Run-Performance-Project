@@ -60,6 +60,32 @@ function isNetworkError(error: unknown): boolean {
   );
 }
 
+/**
+ * Codes Supabase returns when the address already has an account.
+ *
+ * These must never reach the user as a distinct outcome. When email
+ * confirmation is enabled, Supabase already hides an existing account behind an
+ * obfuscated user and a null session; when it is disabled, it returns one of
+ * these codes instead. Surfacing that difference would hand an attacker an
+ * account-enumeration oracle, so `signUpWithPassword` normalizes it to the same
+ * generic check-email outcome a null session produces.
+ */
+const EXISTING_ACCOUNT_CODES: readonly string[] = [
+  "user_already_exists",
+  "email_exists",
+  "user_already_registered",
+];
+
+/**
+ * Whether an error means "this address already has an account".
+ *
+ * Pure, and deliberately separate from `classifyAuthError`: the sign-up flow
+ * must branch on this *before* it decides to show any failure at all.
+ */
+export function isExistingAccountError(error: unknown): boolean {
+  return EXISTING_ACCOUNT_CODES.includes(readErrorCode(error));
+}
+
 export function classifyAuthError(error: unknown): AuthFailure {
   if (isNetworkError(error)) {
     return "offline";

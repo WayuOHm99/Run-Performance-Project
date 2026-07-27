@@ -13,16 +13,15 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { readVerifiedIdentity } from "./claims";
 import type { Credentials } from "./credentials";
 import {
   authErrorMessage,
   classifyAuthError,
+  isExistingAccountError,
   type AuthFailure,
 } from "./errors";
-import {
-  readAuthenticatedIdentity,
-  type AuthenticatedIdentity,
-} from "./session";
+import { readSessionCandidate, type AuthenticatedIdentity } from "./session";
 
 export type AuthClient = Pick<SupabaseClient, "auth">;
 
@@ -53,9 +52,38 @@ export type SignUpOutcome =
 export function classifySignUpResult(result: {
   session: unknown;
 }): SignUpOutcome {
-  return readAuthenticatedIdentity(result.session) === null
+  return readSessionCandidate(result.session) === null
     ? { kind: "confirmation-required" }
     : { kind: "session" };
+}
+
+/**
+ * Decides what a sign-up response means, without leaking account existence.
+ *
+ * Pure, so the enumeration-resistance rule is testable on its own. Three inputs
+ * collapse into the single `confirmation-required` outcome:
+ *
+ *   * a null session, which is what an unconfirmed *new* account looks like;
+ *   * an obfuscated user with no session, which is what Supabase returns for an
+ *     *existing* address while confirmations are enabled;
+ *   * an existing-account error code, which is what it returns instead while
+ *     confirmations are disabled.
+ *
+ * A caller therefore cannot tell those three apart, which is the point.
+ */
+export function resolveSignUpResponse(response: {
+  session: unknown;
+  error: unknown;
+}): SignUpOutcome {
+  if (response.error !== null && response.error !== undefined) {
+    if (isExistingAccountError(response.error)) {
+      return { kind: "confirmation-required" };
+    }
+
+    throw toAuthActionError(response.error);
+  }
+
+  return classifySignUpResult({ session: response.session });
 }
 
 /**
@@ -75,17 +103,20 @@ export async function signUpWithPassword(
     password: credentials.password,
   });
 
-  if (error) {
-    throw toAuthActionError(error);
-  }
-
-  return classifySignUpResult({ session: data.session });
+  return resolveSignUpResponse({ session: data.session, error });
 }
 
+/**
+ * Signs in, and fails closed on any response that is not a usable session.
+ *
+ * Deliberately returns nothing. The authoritative identity is produced by
+ * `resolveVerifiedIdentity` in the provider, from verified JWT claims; returning
+ * an identity from here would create a second, weaker source of truth.
+ */
 export async function signInWithPassword(
   client: AuthClient,
   credentials: Credentials,
-): Promise<AuthenticatedIdentity> {
+): Promise<void> {
   const { data, error } = await client.auth.signInWithPassword({
     email: credentials.email,
     password: credentials.password,
@@ -95,15 +126,10 @@ export async function signInWithPassword(
     throw toAuthActionError(error);
   }
 
-  const identity = readAuthenticatedIdentity(data.session);
-
-  if (identity === null) {
-    // A sign-in that reports success without a usable session is a state we
-    // refuse to interpret, so it fails closed rather than half-authenticating.
+  if (readSessionCandidate(data.session) === null) {
+    // Success without a usable session is a state we refuse to interpret.
     throw new AuthActionError("unknown", authErrorMessage(null));
   }
-
-  return identity;
 }
 
 /**
@@ -121,25 +147,59 @@ export async function signOutGlobally(client: AuthClient): Promise<void> {
   }
 }
 
-/**
- * Reads the restored session, failing closed.
- *
- * A storage read that throws, or a session that does not survive
- * `readAuthenticatedIdentity`, both resolve to signed out rather than
- * propagating. A corrupt blob must not be able to wedge the app on the loading
- * screen.
- */
-export async function restoreIdentity(
-  client: AuthClient,
-): Promise<AuthenticatedIdentity | null> {
+/** Reads the stored session without interpreting it. Fails closed on throw. */
+export async function readStoredSession(client: AuthClient): Promise<unknown> {
   try {
     const { data, error } = await client.auth.getSession();
 
-    if (error) {
+    return error ? null : data.session;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Turns a stored session into a **verified** identity, or into `null`.
+ *
+ * This is the only function in the app that produces an `AuthenticatedIdentity`
+ * from storage, and it does so from the JWT's verified `sub` claim rather than
+ * from the stored `user.id`.
+ *
+ * Order matters:
+ *
+ *   1. a cheap structural check, so a missing or truncated blob costs no round
+ *      trip;
+ *   2. `getClaims()`, which verifies the signature and expiry;
+ *   3. a cross-check that the verified subject matches what storage claimed.
+ *
+ * Step 3 catches a stored session whose user was swapped while the token was
+ * left intact. Any failure at any step returns `null`; there is no partially
+ * trusted result and no error is propagated to a caller that might display it.
+ */
+export async function resolveVerifiedIdentity(
+  client: AuthClient,
+  session: unknown,
+): Promise<AuthenticatedIdentity | null> {
+  const candidate = readSessionCandidate(session);
+
+  if (candidate === null) {
+    return null;
+  }
+
+  try {
+    const verified = readVerifiedIdentity(await client.auth.getClaims());
+
+    if (verified === null) {
       return null;
     }
 
-    return readAuthenticatedIdentity(data.session);
+    if (verified.userId !== candidate.unverifiedUserId) {
+      // Storage and the verified token disagree about who this is. Treated as
+      // tampering rather than trusting either side.
+      return null;
+    }
+
+    return verified;
   } catch {
     return null;
   }

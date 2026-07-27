@@ -11,11 +11,16 @@ Reviewer:        ChatGPT/Codex (read-only). No AGY reviewer.
 Branch:          feat/TASK-009-auth-profile-onboarding
 Worktree:        isolated, locked, based on feat/mobile-foundation
 Base commit:     d8857c7a145e78aac2c6db48d169dbf4c430197b
-Commit SHA:      d78ccb91fd09f0a380a497a1310c16b39c24087f
+
+Round 1 implementation:  d78ccb91fd09f0a380a497a1310c16b39c24087f
+Round 1 handoff:         75bdfeeb5ccf28d49534fb2fb54044f930c9a7ce
+Round 2 fix (M1, M2):    see "Reviewer findings" below; this is the head
 ```
 
-The commit above is the implementation and task packet. This handoff document is
-a documentation-only follow-up commit, as required.
+Round 2 fixes the two Codex Medium findings on the same branch. The file list
+and results below are cumulative for the whole task unless a section says
+otherwise. Nothing has been merged or pushed, and the worktree is still in
+place.
 
 ## Changed files
 
@@ -30,11 +35,15 @@ a documentation-only follow-up commit, as required.
 The TASK-008 **migration** was not edited. Only its test file changed, and only
 where TASK-009 intentionally made an assertion obsolete.
 
-### Mobile — pure logic, fully unit-tested (9)
+### Mobile — pure logic, fully unit-tested (11)
 
 `src/features/auth/`: `roles.ts`, `gate.ts`, `session.ts`, `credentials.ts`,
-`display-name.ts`, `submission.ts`, `errors.ts`
+`display-name.ts`, `submission.ts`, `errors.ts`, **`claims.ts`** (round 2),
+**`sequence.ts`** (round 2)
 `src/lib/query/`: `keys.ts`, `client.ts`
+
+Round 2 changed `session.ts` (candidate/identity split), `errors.ts`
+(`isExistingAccountError`), `auth-repository.ts`, and `auth-provider.tsx`.
 
 ### Mobile — integration (6)
 
@@ -50,7 +59,7 @@ where TASK-009 intentionally made an assertion obsolete.
 `src/components/`: `text-field.tsx`, `primary-button.tsx`, `screen-heading.tsx`,
 `notice.tsx`
 
-### Tests (11 files, 187 assertions)
+### Tests (14 files, 244 assertions)
 
 Alongside each pure module, plus `auth-repository.test.ts`,
 `account-repository.test.ts`, `query/keys.test.ts`, `query/client.test.ts`, and
@@ -76,6 +85,10 @@ ones:
 
 | Criterion | Where it is enforced and proved |
 | --- | --- |
+| The restored JWT is verified before an identity exists | `resolveVerifiedIdentity` calls `getClaims()`; identity comes from the verified `sub` |
+| A stored `user.id` can no longer mint an identity | `SessionCandidate` is a distinct type accepted nowhere an identity is required |
+| A stale restore cannot resurrect a signed-out session | `sequence.ts`, with an explicit out-of-order ordering test |
+| An existing address shows no distinct error | `resolveSignUpResponse` normalizes to the generic outcome |
 | `/athlete` and `/coach` fail closed in every non-ready state | `canEnterRoleArea` returns true only for `ready`; gate test iterates all 7 non-ready states |
 | Roles come only from active membership rows | `resolveAuthorizedRoles`; never from metadata, JWT, storage, or the chooser |
 | A revoked membership disappears on the next load | `resolveAuthorizedRoles` filters `status !== 'active'`; gate test asserts before/after |
@@ -100,7 +113,7 @@ Local database only. No `--linked`, no remote URL, no hosted Auth.
 | `pnpm format:check` | exit 0 |
 | `pnpm lint` | exit 0 |
 | `pnpm typecheck` | exit 0 |
-| `pnpm test` | **187 passed, 12 files** |
+| `pnpm test` | **244 passed, 14 files** |
 | `expo-doctor@latest` | **21/21 checks passed** |
 | `expo export --platform web` | exit 0, 13 static routes |
 | `pnpm db:stop *> $null` | exit 0, no container remains |
@@ -128,9 +141,12 @@ sleep, heart rate, or workout value is read, written, logged, or displayed.
 The data involved is an email address, a user id, and a self-chosen display
 name.
 
-- Passwords, access tokens, refresh tokens, and session objects are never
-  logged, never placed in an error message, and never stored outside the
-  Supabase auth storage adapter. Only the user id is lifted out of a session.
+- Passwords, access tokens, refresh tokens, session objects, and JWT claims are
+  never logged, never placed in an error message, and never stored outside the
+  Supabase auth storage adapter. Only the verified `sub` is lifted out.
+- An authenticated identity exists only after `getClaims()` verifies the JWT. A
+  stored `user.id` cannot produce one, so an attacker with writable device
+  storage cannot mint an identity by editing the stored session.
 - The password is never trimmed, lower-cased, or otherwise transformed;
   whitespace is legitimate password content. Only the email is normalized.
 - Credentials live in component state and are cleared after every completed
@@ -149,26 +165,39 @@ name.
 
 ## Known limitations
 
-1. **SecureStore hardening is mandatory before pilot release, and before any
+1. **Sign-up enumeration resistance is incomplete while email confirmation is
+   disabled.** See the M1 table in "Reviewer findings" below. The finding as
+   reported is fixed; the
+   residual distinction is structural, is stated rather than hidden, and needs
+   an Auth configuration decision before pilot.
+2. **JWT verification may cost a network round trip.** `getClaims()` verifies
+   locally only for an asymmetric signing key. With a symmetric secret it
+   validates at the Auth server, so an offline launch fails closed to signed-out
+   rather than restoring. That is the correct direction to fail, but moving the
+   project to asymmetric signing keys would remove the cost.
+3. If sign-in succeeds but the resulting JWT then fails verification, the user
+   returns to the sign-in screen with no message. Fails closed correctly, but is
+   opaque.
+4. **SecureStore hardening is mandatory before pilot release, and before any
    health data is added.** Supabase session tokens persist in AsyncStorage,
    which is not encrypted at rest on device. This is acceptable only because
    TASK-009 handles no health data. Carrying it into a build that touches RPE,
    pain/injury, sleep, heart rate, or workout data would be a privacy
    regression. This is the single most important follow-up.
-2. Email confirmation has no deep-link handler. A confirming user must return to
+5. Email confirmation has no deep-link handler. A confirming user must return to
    the app and sign in manually. Hosted Auth and email configuration were not
    changed, as required.
-3. No password reset, change-email, or account-deletion flow yet.
-4. Membership state is read on load and on explicit retry, not live-subscribed.
+6. No password reset, change-email, or account-deletion flow yet.
+7. Membership state is read on load and on explicit retry, not live-subscribed.
    A revocation takes effect in the database immediately but in the UI on the
    next successful load. Safe because RLS, not the client, is the authorization
    boundary.
-5. Verification is mock-and-local-database only. There is no end-to-end evidence
+8. Verification is mock-and-local-database only. There is no end-to-end evidence
    against the hosted project.
-6. The athlete and coach shells remain empty-state placeholders. This task
+9. The athlete and coach shells remain empty-state placeholders. This task
    delivers the way in, not what is inside.
-7. No render/component test exists, by approved decision. Screens are
-   deliberately thin so the tested pure functions carry the behaviour.
+10. No render/component test exists, by approved decision. Screens are
+    deliberately thin so the tested pure functions carry the behaviour.
 
 ## Rollback
 
@@ -187,20 +216,84 @@ name.
 4. Nothing exists outside this repository to undo: no remote migration, no
    deployment, no hosted account, no push.
 
-## Reviewer findings remaining
+## Reviewer findings
 
-None. No review has been performed yet — this is the first submission.
+Codex round 1 raised two Medium findings. Both were accepted as correct and are
+fixed. **No finding remains open.**
 
-### Suggested review focus
+### M1 — sign-up account enumeration — fixed
 
-1. The migration and `002_..._test.sql`, especially the two refusal shapes: an
-   ungranted column raises `42501`, while a row excluded by the policy's `USING`
-   is filtered and affects zero rows without raising. Confirm the zero-row
-   assertions are the right shape rather than a weakened test.
-2. The three changed assertions in the TASK-008 test file — whether each is
-   genuinely obsolete rather than quietly relaxed.
-3. `resolveAuthGate` ordering in `gate.ts`: restoration before everything, and
-   the error check before the membership count.
-4. Whether any path could still let a role reach the UI from somewhere other
-   than an active membership row.
-5. `errors.ts`, for any category that could leak account existence.
+The old code threw for `user_already_exists`, so an existing address produced an
+error while a new one produced check-email. `resolveSignUpResponse` is now a
+pure function that collapses a null session, an obfuscated user with no session,
+and every existing-account code into one `confirmation-required` outcome. No
+error is shown for an existing address, and no raw error, email, or payload is
+displayed or logged. Genuine failures — weak password, rate limit, transport —
+still raise.
+
+**The claim of complete enumeration resistance has been withdrawn, not
+re-asserted.** It holds only while email confirmation is enabled:
+
+| `enable_confirmations` | New address | Existing address | Distinguishable? |
+| --- | --- | --- | --- |
+| `true` | null session → check-email | obfuscated user, null session → check-email | **No** |
+| `false` | session returned → app enters | existing-account code → check-email | **Yes** |
+
+With confirmations disabled a successful sign-up necessarily signs the user in,
+and that can only happen for a new address. Hiding it would mean discarding a
+valid session and breaking approved outcome 3. Closing it requires enabling
+email confirmation, which is a hosted Auth configuration change and is out of
+scope. The local stack currently has `enable_confirmations = false`, so it is in
+the distinguishable row. A timing side channel also remains in both rows.
+
+### M2 — restored session trusted without verifying the JWT — fixed
+
+`getSession()` reads on-device storage and proves nothing about authenticity.
+The session type was split so the two can no longer be confused at a call site:
+
+- `readSessionCandidate` → `SessionCandidate { unverifiedUserId }`, a cheap
+  structural pre-check, accepted nowhere an identity is required;
+- `readVerifiedIdentity` (new `claims.ts`) → `AuthenticatedIdentity { userId }`
+  from the **verified** `sub`, additionally rejecting a missing/blank/non-string
+  `sub`, an expired or non-finite `exp`, a `role` other than `authenticated`,
+  and `is_anonymous`.
+
+`resolveVerifiedIdentity` runs structural check → `getClaims()` → subject
+cross-check, and returns `null` on any failure. The cross-check catches a stored
+session whose user was swapped while the token was left intact.
+`signInWithPassword` now returns `void`, so verified claims are the only source
+of identity.
+
+Ordering is handled by the pure `sequence.ts` guard. `onAuthStateChange` stays
+synchronous and only records the observation with a freshly claimed token; a
+second effect verifies outside the callback, so no async re-entrant Auth call is
+made. The restore path claims its token *before* the read starts, so a slow
+restore carries the older token and cannot resurrect a session after a later
+sign-out. `restored` stays `false` until the first result applies, so the gate
+reports `restoring` and no protected route renders while validation is pending.
+Both effects guard on an `active` flag, so nothing is applied after unmount.
+
+### Security impact of the fix round
+
+Strictly a tightening. An attacker with writable device storage can no longer
+mint an identity by editing a stored session, since the identity now comes from
+a signature-verified `sub` rather than a stored `user.id`. Expired, wrong-role,
+anonymous, and subject-mismatched tokens are refused. The sign-up flow no longer
+returns a distinct response for a registered address at the point the server
+lets us hide it. No authorization was widened, no database object changed, and
+RLS remains the enforcement boundary throughout.
+
+### Suggested focus for re-review
+
+1. `claims.ts` — whether any accepted claim shape could still yield an identity
+   from an unverified or unintended token.
+2. `resolveVerifiedIdentity` — the ordering of the structural check, `getClaims()`,
+   and the subject cross-check, and that no error escapes.
+3. `sequence.ts` plus the two effects in `auth-provider.tsx` — whether any
+   interleaving of restore, sign-in, sign-out, and unmount can apply a stale
+   result or leave `restored` true with an unverified identity.
+4. `resolveSignUpResponse` — whether the documented limitation is stated
+   accurately, and whether any other response path reveals account existence.
+5. Unchanged from round 1 and still worth confirming: the two refusal shapes in
+   `002_..._test.sql`, the three changed assertions in the TASK-008 test file,
+   and `resolveAuthGate` ordering in `gate.ts`.

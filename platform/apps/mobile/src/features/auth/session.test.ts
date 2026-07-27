@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { identityChanged, readAuthenticatedIdentity } from "./session";
+import { identityChanged, readSessionCandidate } from "./session";
 
 const VALID_SESSION = {
   access_token: "synthetic-access-token",
@@ -8,87 +8,90 @@ const VALID_SESSION = {
   user: { id: "00000000-0000-4000-9000-000000000001" },
 };
 
-describe("readAuthenticatedIdentity", () => {
-  it("reads the user id from a well-formed session", () => {
-    expect(readAuthenticatedIdentity(VALID_SESSION)).toEqual({
-      userId: "00000000-0000-4000-9000-000000000001",
+describe("readSessionCandidate", () => {
+  it("reads the unverified user id from a well-formed session", () => {
+    expect(readSessionCandidate(VALID_SESSION)).toEqual({
+      unverifiedUserId: "00000000-0000-4000-9000-000000000001",
     });
   });
 
-  it("never returns the access or refresh token", () => {
-    const identity = readAuthenticatedIdentity(VALID_SESSION);
+  it("names the value as unverified so it cannot be used as an identity", () => {
+    const candidate = readSessionCandidate(VALID_SESSION);
 
-    expect(identity).not.toBeNull();
-    expect(Object.keys(identity ?? {})).toEqual(["userId"]);
+    // The field is deliberately not called userId: a stored session proves
+    // nothing about the JWT, so this must not be assignable where a verified
+    // AuthenticatedIdentity is expected.
+    expect(Object.keys(candidate ?? {})).toEqual(["unverifiedUserId"]);
+  });
+
+  it("never returns the access or refresh token", () => {
+    const serialized = JSON.stringify(readSessionCandidate(VALID_SESSION));
+
+    expect(serialized).not.toContain("synthetic-access-token");
+    expect(serialized).not.toContain("synthetic-refresh-token");
   });
 
   it("fails closed for null", () => {
-    expect(readAuthenticatedIdentity(null)).toBeNull();
+    expect(readSessionCandidate(null)).toBeNull();
   });
 
   it("fails closed for undefined", () => {
-    expect(readAuthenticatedIdentity(undefined)).toBeNull();
+    expect(readSessionCandidate(undefined)).toBeNull();
   });
 
   it("fails closed for a primitive", () => {
-    expect(readAuthenticatedIdentity("a string")).toBeNull();
-    expect(readAuthenticatedIdentity(42)).toBeNull();
-    expect(readAuthenticatedIdentity(true)).toBeNull();
+    expect(readSessionCandidate("a string")).toBeNull();
+    expect(readSessionCandidate(42)).toBeNull();
+    expect(readSessionCandidate(true)).toBeNull();
   });
 
   it("fails closed for an empty object", () => {
-    expect(readAuthenticatedIdentity({})).toBeNull();
+    expect(readSessionCandidate({})).toBeNull();
   });
 
   it("fails closed when the access token is missing", () => {
-    expect(readAuthenticatedIdentity({ user: { id: "user-1" } })).toBeNull();
+    expect(readSessionCandidate({ user: { id: "user-1" } })).toBeNull();
   });
 
   it("fails closed when the access token is blank", () => {
     expect(
-      readAuthenticatedIdentity({ ...VALID_SESSION, access_token: "   " }),
+      readSessionCandidate({ ...VALID_SESSION, access_token: "   " }),
     ).toBeNull();
   });
 
   it("fails closed when the user object is missing", () => {
     expect(
-      readAuthenticatedIdentity({ access_token: "synthetic-access-token" }),
+      readSessionCandidate({ access_token: "synthetic-access-token" }),
     ).toBeNull();
   });
 
   it("fails closed when the user object is null", () => {
-    expect(
-      readAuthenticatedIdentity({ ...VALID_SESSION, user: null }),
-    ).toBeNull();
+    expect(readSessionCandidate({ ...VALID_SESSION, user: null })).toBeNull();
   });
 
   it("fails closed when the user id is missing", () => {
-    expect(
-      readAuthenticatedIdentity({ ...VALID_SESSION, user: {} }),
-    ).toBeNull();
+    expect(readSessionCandidate({ ...VALID_SESSION, user: {} })).toBeNull();
   });
 
   it("fails closed when the user id is blank", () => {
     expect(
-      readAuthenticatedIdentity({ ...VALID_SESSION, user: { id: "  " } }),
+      readSessionCandidate({ ...VALID_SESSION, user: { id: "  " } }),
     ).toBeNull();
   });
 
   it("fails closed when the user id is not a string", () => {
     expect(
-      readAuthenticatedIdentity({ ...VALID_SESSION, user: { id: 12345 } }),
+      readSessionCandidate({ ...VALID_SESSION, user: { id: 12345 } }),
     ).toBeNull();
   });
 
   it("fails closed for an array", () => {
-    expect(readAuthenticatedIdentity([VALID_SESSION])).toBeNull();
+    expect(readSessionCandidate([VALID_SESSION])).toBeNull();
   });
 
   it("fails closed for a truncated stored blob", () => {
     // What a half-written AsyncStorage entry actually looks like.
-    expect(
-      readAuthenticatedIdentity({ access_token: "synthetic-acce" }),
-    ).toBeNull();
+    expect(readSessionCandidate({ access_token: "synthetic-acce" })).toBeNull();
   });
 });
 

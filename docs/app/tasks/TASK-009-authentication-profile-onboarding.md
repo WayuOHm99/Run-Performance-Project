@@ -183,6 +183,21 @@ TASK-005 against the authorization foundation created in TASK-008.
 - Clean up auth event subscriptions.
 - Avoid async re-entrant Supabase Auth calls inside auth-state callbacks.
 
+### Added after the Codex review (M1, M2)
+
+- An existing-email sign-up response must not produce an outcome observably
+  different from the generic check-email outcome. Where the server makes a
+  distinction unavoidable, document it precisely instead of claiming complete
+  enumeration resistance.
+- The restored JWT must be validated with `getClaims()` before an authenticated
+  identity is exposed. The identity comes from the verified `sub` claim, never
+  from the stored `user.id`.
+- A malformed, expired, unverifiable, or mismatched session fails closed.
+- No protected route may render while validation is pending.
+- Validation is scheduled outside `onAuthStateChange`, and a stale
+  restore/validation result must never overwrite a newer auth event or a
+  sign-out.
+
 ## Database requirements
 
 - Create one new migration; do not edit the TASK-008 migration.
@@ -239,12 +254,20 @@ TASK-005 against the authorization foundation created in TASK-008.
 - [x] A profile or membership load failure shows a retry state, is not treated
       as "no membership", and does not sign the user out.
 - [x] Sign-out uses `signOut({ scope: "global" })` and returns to sign-in.
-- [x] Auth failures show a generic Thai message that does not reveal whether an
-      email is registered, and no credential, token, payload, or server error
-      value is exposed or logged.
-- [x] A corrupt or unreadable restored session fails closed to signed-out.
-- [x] Auth event subscriptions are cleaned up, and the auth-state callback makes
-      no async re-entrant Supabase Auth call.
+- [x] Auth failures show a generic Thai message, and no credential, token,
+      payload, or server error value is exposed or logged.
+- [x] An existing-email sign-up produces the same generic check-email outcome as
+      a null-session sign-up, and never an error. Complete enumeration
+      resistance holds only while email confirmation is enabled; the residual
+      distinction is stated exactly in "Known limitations".
+- [x] The restored JWT is verified with `getClaims()` before an authenticated
+      identity exists, and the identity is taken from the verified `sub`.
+- [x] A malformed, expired, unverifiable, role-mismatched, or subject-mismatched
+      session fails closed to signed-out.
+- [x] No protected route renders while validation is pending.
+- [x] Auth event subscriptions are cleaned up, the auth-state callback makes no
+      async re-entrant Supabase Auth call, and a stale restore result cannot
+      overwrite a newer auth event or a sign-out.
 - [x] Every auth-bound query key includes the authenticated user id.
 - [x] Auth-bound cached data is removed when the user changes or signs out, and
       the query cache is never persisted to disk.
@@ -373,6 +396,27 @@ command with `--linked` or a remote database URL.
 
 ## Known limitations
 
+- **Sign-up enumeration resistance is not complete while email confirmation is
+  disabled.** The Codex M1 finding — an existing address producing an *error*
+  while a new one produced the check-email state — is fixed: both now produce
+  the identical generic outcome, and no error is shown. What remains is
+  structural rather than a code defect:
+
+  | `enable_confirmations` | New address | Existing address | Distinguishable? |
+  | --- | --- | --- | --- |
+  | `true` | null session → check-email | obfuscated user, null session → check-email | **No** |
+  | `false` | session returned → app enters | `user_already_exists` → check-email | **Yes** |
+
+  With confirmations disabled, a successful sign-up necessarily signs the user
+  in, and that can only happen for a new address. Hiding it would mean
+  discarding a valid session and breaking approved outcome 3 ("session returned
+  immediately"). Closing this properly requires enabling email confirmation,
+  which is a hosted Auth configuration change and is explicitly out of scope for
+  this task. `platform/supabase/config.toml` currently has
+  `enable_confirmations = false`, so **the local stack is in the distinguishable
+  row.** This should be revisited before pilot.
+
+  A timing side channel also remains in both rows and is not addressed here.
 - **SecureStore hardening is mandatory before pilot release or before health
   data is added.** Supabase session tokens currently persist in AsyncStorage,
   which is not encrypted at rest on device. This is accepted only because
@@ -385,6 +429,16 @@ command with `--linked` or a remote database URL.
   revocation takes effect in the database immediately but in the UI on the next
   successful load. This is safe because RLS, not the client, is the
   authorization boundary.
+- **JWT verification may cost a network round trip.** `getClaims()` verifies
+  locally against the cached JWKS only for an asymmetric signing key. If the
+  project still uses a symmetric secret, it validates at the Auth server, so
+  session restore requires connectivity and an offline launch fails closed to
+  signed-out rather than restoring. That is the correct direction to fail, but
+  it is a usability cost, and moving the project to asymmetric signing keys
+  would remove it.
+- If sign-in succeeds but the resulting JWT then fails verification, the user
+  returns to the sign-in screen without an error message. This fails closed
+  correctly but is opaque; it should be revisited if it is ever observed.
 - Verification is mock-and-local-database only, so there is no end-to-end
   evidence against the hosted project and no hosted account was created.
 - The role shells themselves remain empty-state placeholders. This task delivers
@@ -437,9 +491,13 @@ Mobile pure logic (all unit-tested):
 
 - `src/features/auth/roles.ts` — role resolution
 - `src/features/auth/gate.ts` — the gate state machine and route authorization
-- `src/features/auth/session.ts` — fail-closed session reading
+- `src/features/auth/session.ts` — fail-closed reading of an *unverified*
+  stored session candidate
+- `src/features/auth/claims.ts` — verified-claims validation (M2)
+- `src/features/auth/sequence.ts` — monotonic async ordering guard (M2)
 - `src/features/auth/credentials.ts`, `display-name.ts`, `submission.ts`
-- `src/features/auth/errors.ts` — error sanitization
+- `src/features/auth/errors.ts` — error sanitization and
+  `isExistingAccountError` (M1)
 - `src/lib/query/keys.ts`, `client.ts`
 
 Mobile integration:
@@ -515,6 +573,71 @@ three places: the repository raises instead of returning `[]`; `useAuthGate`
 maps `isError` to `{ kind: "error" }`; and `resolveAuthGate` checks for an error
 before it counts memberships. Four gate tests assert specifically that a failed
 load never reports `no-active-team`, `onboarding`, or `ready`.
+
+### Post-review fixes (Codex Medium findings M1 and M2)
+
+Both findings were accepted as correct and fixed on the same branch.
+
+#### M1 — sign-up account enumeration
+
+The original code threw for `user_already_exists`, so an existing address showed
+an error while a new one showed check-email. That contradicted the packet's
+enumeration-resistance claim.
+
+`resolveSignUpResponse` is now a pure function that collapses a null session, an
+obfuscated user with no session, and every existing-account code into the single
+`confirmation-required` outcome. A genuine failure — weak password, rate limit,
+transport error — still raises. `isExistingAccountError` in `errors.ts` is the
+pure predicate that decides.
+
+The residual distinction when `enable_confirmations = false` is documented
+exactly in "Known limitations" with a table rather than papered over. Auth
+configuration was not changed.
+
+#### M2 — restored session trusted without verifying the JWT
+
+`getSession()` reads on-device storage and proves nothing about authenticity.
+The old `readAuthenticatedIdentity` accepted any non-empty token plus user id,
+so a writable-storage attacker could mint an identity.
+
+The session type was split so the two cannot be confused at a call site:
+
+- `readSessionCandidate` returns `SessionCandidate { unverifiedUserId }` — a
+  cheap structural pre-check, explicitly untrusted, accepted nowhere that an
+  identity is required;
+- `readVerifiedIdentity` in the new `claims.ts` returns
+  `AuthenticatedIdentity { userId }` from a **verified** `sub`, and additionally
+  rejects a missing/blank/non-string `sub`, an expired or non-finite `exp`, a
+  `role` other than `authenticated`, and `is_anonymous`.
+
+`resolveVerifiedIdentity` runs structural check → `getClaims()` → subject
+cross-check. A mismatch between the stored user id and the verified `sub` fails
+closed, which catches a session whose user was swapped while the token was left
+intact. Every failure returns `null`; no verification error is ever propagated
+to a caller that might display it.
+
+`signInWithPassword` now returns `void`. Returning an identity from the sign-in
+response would have created a second, weaker source of truth alongside verified
+claims.
+
+#### Ordering, which is where this kind of fix usually breaks
+
+Validation is asynchronous, so results can arrive out of order — a restore
+started at launch can resolve *after* a sign-out observed later. Applying it
+would resurrect a signed-out session.
+
+`sequence.ts` is a pure monotonic guard. `onAuthStateChange` stays synchronous
+and only records the observation with a freshly claimed token; a second effect
+performs verification outside the callback, so no async re-entrant Auth call is
+made and the auth lock cannot deadlock. The restore path claims its token
+*before* the read starts, not when it resolves, so a slow restore carries the
+older token and is discarded. `restored` stays `false` until the first result is
+applied, so the gate reports `restoring` and no protected route can render while
+validation is pending. Both effects also guard on an `active` flag, so nothing
+is applied after unmount.
+
+`shouldApplyResult` is strictly greater-than, not greater-or-equal, so a
+replayed result cannot re-apply an outcome a newer signal already superseded.
 
 ### Deliberate non-goals reconfirmed
 

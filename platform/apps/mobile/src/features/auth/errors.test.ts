@@ -5,7 +5,43 @@ import {
   classifyAuthError,
   classifyDataError,
   dataErrorMessage,
+  isExistingAccountError,
 } from "./errors";
+
+describe("isExistingAccountError", () => {
+  it("recognises every existing-account code", () => {
+    for (const code of [
+      "user_already_exists",
+      "email_exists",
+      "user_already_registered",
+    ]) {
+      expect(isExistingAccountError({ code })).toBe(true);
+    }
+  });
+
+  it("does not recognise an unrelated failure", () => {
+    for (const code of [
+      "invalid_credentials",
+      "weak_password",
+      "over_email_send_rate_limit",
+      "email_not_confirmed",
+    ]) {
+      expect(isExistingAccountError({ code })).toBe(false);
+    }
+  });
+
+  it("does not recognise a transport failure", () => {
+    expect(
+      isExistingAccountError(new TypeError("Network request failed")),
+    ).toBe(false);
+  });
+
+  it("is safe for a non-error value", () => {
+    for (const input of [null, undefined, "a string", 42, {}]) {
+      expect(isExistingAccountError(input)).toBe(false);
+    }
+  });
+});
 
 describe("classifyAuthError", () => {
   it("classifies a wrong password as invalid credentials", () => {

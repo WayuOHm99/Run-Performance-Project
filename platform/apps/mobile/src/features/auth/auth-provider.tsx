@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   useCallback,
@@ -8,18 +9,23 @@ import {
   useState,
   type PropsWithChildren,
 } from "react";
-import { useQueryClient } from "@tanstack/react-query";
 
+import type { AppSupabaseClient } from "@/features/profile/account-repository";
 import { clearAuthScopedQueries } from "@/lib/query/client";
 import { getSupabaseClient } from "@/lib/supabase/client";
-import type { AppSupabaseClient } from "@/features/profile/account-repository";
 
-import { restoreIdentity, signOutGlobally } from "./auth-repository";
 import {
-  identityChanged,
-  readAuthenticatedIdentity,
-  type AuthenticatedIdentity,
-} from "./session";
+  readStoredSession,
+  resolveVerifiedIdentity,
+  signOutGlobally,
+} from "./auth-repository";
+import {
+  INITIAL_SEQUENCE_TOKEN,
+  nextSequenceToken,
+  shouldApplyResult,
+  type SequenceToken,
+} from "./sequence";
+import { identityChanged, type AuthenticatedIdentity } from "./session";
 
 type AuthContextValue = {
   readonly client: AppSupabaseClient;
@@ -31,6 +37,12 @@ type AuthContextValue = {
   readonly signOut: () => Promise<void>;
 };
 
+/** A raw auth observation, tagged with the order in which it was seen. */
+type AuthSignal = {
+  readonly token: SequenceToken;
+  readonly session: unknown;
+};
+
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: PropsWithChildren) {
@@ -39,6 +51,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const [restored, setRestored] = useState(false);
   const [identity, setIdentity] = useState<AuthenticatedIdentity | null>(null);
+  const [signal, setSignal] = useState<AuthSignal | null>(null);
   const [emailConfirmationRequested, setEmailConfirmationRequested] =
     useState(false);
 
@@ -47,36 +60,49 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const awaitingEmailConfirmation =
     identity === null && emailConfirmationRequested;
 
+  // Monotonic ordering for asynchronous auth work. `issued` hands out tokens,
+  // `emitted` drops an observation that a newer one already superseded, and
+  // `applied` drops a validation result that finished too late to matter.
+  const issuedToken = useRef<SequenceToken>(INITIAL_SEQUENCE_TOKEN);
+  const emittedToken = useRef<SequenceToken>(INITIAL_SEQUENCE_TOKEN);
+  const appliedToken = useRef<SequenceToken>(INITIAL_SEQUENCE_TOKEN);
+
   // Tracks the identity the cache currently belongs to, so a change can be
-  // detected without adding the identity to an effect dependency and
-  // re-running the clear on every unrelated render.
+  // detected without adding the identity to an effect dependency.
   const cachedIdentity = useRef<AuthenticatedIdentity | null>(null);
 
   useEffect(() => {
     let active = true;
 
-    // Restoration is explicit rather than inferred from the INITIAL_SESSION
-    // event, so `restored` flips exactly once and the loading state has a
-    // single, testable owner. restoreIdentity already fails closed.
-    void restoreIdentity(client).then((restoredIdentity) => {
-      if (!active) {
+    const claimToken = (): SequenceToken => {
+      issuedToken.current = nextSequenceToken(issuedToken.current);
+      return issuedToken.current;
+    };
+
+    const emit = (token: SequenceToken, session: unknown) => {
+      if (!active || !shouldApplyResult(token, emittedToken.current)) {
         return;
       }
 
-      setIdentity(restoredIdentity);
-      setRestored(true);
-    });
+      emittedToken.current = token;
+      setSignal({ token, session });
+    };
 
     const { data } = client.auth.onAuthStateChange((_event, session) => {
-      if (!active) {
-        return;
-      }
-
       // Synchronous by design. Calling another Supabase Auth method from
       // inside this callback can re-enter the auth lock and deadlock, so this
-      // only moves local state; every fetch is left to TanStack Query.
-      setIdentity(readAuthenticatedIdentity(session));
-      setRestored(true);
+      // only records the observation. Verification is scheduled by the effect
+      // below, outside the callback.
+      emit(claimToken(), session);
+    });
+
+    // The token is claimed *before* the read starts, not when it resolves, so
+    // a restore that finishes after a later sign-out carries the older token
+    // and is discarded instead of resurrecting the session.
+    const restoreToken = claimToken();
+
+    void readStoredSession(client).then((session) => {
+      emit(restoreToken, session);
     });
 
     return () => {
@@ -84,6 +110,32 @@ export function AuthProvider({ children }: PropsWithChildren) {
       data.subscription.unsubscribe();
     };
   }, [client]);
+
+  useEffect(() => {
+    if (signal === null) {
+      return undefined;
+    }
+
+    let active = true;
+
+    // A stored session is only a claim. The identity below comes from the
+    // verified JWT `sub`, and any failure resolves to null, which the gate
+    // reads as signed out. `restored` stays false until the first result is
+    // applied, so no protected route can render while this is pending.
+    void resolveVerifiedIdentity(client, signal.session).then((verified) => {
+      if (!active || !shouldApplyResult(signal.token, appliedToken.current)) {
+        return;
+      }
+
+      appliedToken.current = signal.token;
+      setIdentity(verified);
+      setRestored(true);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [signal, client]);
 
   useEffect(() => {
     if (!identityChanged(cachedIdentity.current, identity)) {
