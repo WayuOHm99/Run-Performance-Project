@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type PropsWithChildren,
@@ -16,16 +17,21 @@ import { getSupabaseClient } from "@/lib/supabase/client";
 
 import {
   readStoredSession,
-  resolveVerifiedIdentity,
   signOutGlobally,
+  verifyStoredIdentity,
 } from "./auth-repository";
 import {
-  INITIAL_SEQUENCE_TOKEN,
-  nextSequenceToken,
-  shouldApplyResult,
-  type SequenceToken,
-} from "./sequence";
-import { identityChanged, type AuthenticatedIdentity } from "./session";
+  INITIAL_AUTH_STATE,
+  authIdentity,
+  authReducer,
+  isAuthSettled,
+} from "./auth-state";
+import { nextSequenceToken, type SequenceToken } from "./sequence";
+import {
+  identityChanged,
+  readSessionCandidate,
+  type AuthenticatedIdentity,
+} from "./session";
 
 type AuthContextValue = {
   readonly client: AppSupabaseClient;
@@ -37,35 +43,34 @@ type AuthContextValue = {
   readonly signOut: () => Promise<void>;
 };
 
-/** A raw auth observation, tagged with the order in which it was seen. */
-type AuthSignal = {
-  readonly token: SequenceToken;
-  readonly session: unknown;
-};
-
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/**
+ * Owns the Supabase client, the auth state machine, and the auth-bound cache.
+ *
+ * All ordering and exposure rules live in `auth-state.ts`. This component only
+ * issues tokens, performs I/O, and dispatches, so the behaviour Codex flagged is
+ * tested directly against the reducer rather than through a rendered tree.
+ */
 export function AuthProvider({ children }: PropsWithChildren) {
   const queryClient = useQueryClient();
   const client = useMemo(() => getSupabaseClient(), []);
 
-  const [restored, setRestored] = useState(false);
-  const [identity, setIdentity] = useState<AuthenticatedIdentity | null>(null);
-  const [signal, setSignal] = useState<AuthSignal | null>(null);
+  const [authState, dispatch] = useReducer(authReducer, INITIAL_AUTH_STATE);
   const [emailConfirmationRequested, setEmailConfirmationRequested] =
     useState(false);
+
+  // Both guarded on the phase, so no identity is readable while a newer signal
+  // is still being validated.
+  const identity = authIdentity(authState);
+  const restored = isAuthSettled(authState);
 
   // Derived rather than stored, so signing in never leaves a stale
   // check-email state behind and no effect has to reset it.
   const awaitingEmailConfirmation =
     identity === null && emailConfirmationRequested;
 
-  // Monotonic ordering for asynchronous auth work. `issued` hands out tokens,
-  // `emitted` drops an observation that a newer one already superseded, and
-  // `applied` drops a validation result that finished too late to matter.
-  const issuedToken = useRef<SequenceToken>(INITIAL_SEQUENCE_TOKEN);
-  const emittedToken = useRef<SequenceToken>(INITIAL_SEQUENCE_TOKEN);
-  const appliedToken = useRef<SequenceToken>(INITIAL_SEQUENCE_TOKEN);
+  const issuedToken = useRef<SequenceToken>(INITIAL_AUTH_STATE.latestToken);
 
   // Tracks the identity the cache currently belongs to, so a change can be
   // detected without adding the identity to an effect dependency.
@@ -79,13 +84,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
       return issuedToken.current;
     };
 
-    const emit = (token: SequenceToken, session: unknown) => {
-      if (!active || !shouldApplyResult(token, emittedToken.current)) {
+    const observe = (token: SequenceToken, session: unknown) => {
+      if (!active) {
         return;
       }
 
-      emittedToken.current = token;
-      setSignal({ token, session });
+      // readSessionCandidate is pure and synchronous, so calling it here is
+      // safe even inside the auth-state callback. Reducing to a candidate also
+      // keeps the access and refresh tokens out of React state entirely.
+      dispatch({
+        type: "signal-observed",
+        token,
+        candidate: readSessionCandidate(session),
+      });
     };
 
     const { data } = client.auth.onAuthStateChange((_event, session) => {
@@ -93,16 +104,16 @@ export function AuthProvider({ children }: PropsWithChildren) {
       // inside this callback can re-enter the auth lock and deadlock, so this
       // only records the observation. Verification is scheduled by the effect
       // below, outside the callback.
-      emit(claimToken(), session);
+      observe(claimToken(), session);
     });
 
     // The token is claimed *before* the read starts, not when it resolves, so
     // a restore that finishes after a later sign-out carries the older token
-    // and is discarded instead of resurrecting the session.
+    // and the reducer discards it.
     const restoreToken = claimToken();
 
     void readStoredSession(client).then((session) => {
-      emit(restoreToken, session);
+      observe(restoreToken, session);
     });
 
     return () => {
@@ -111,39 +122,45 @@ export function AuthProvider({ children }: PropsWithChildren) {
     };
   }, [client]);
 
+  const { phase, latestToken, candidate } = authState;
+
   useEffect(() => {
-    if (signal === null) {
+    if (phase !== "verifying") {
       return undefined;
     }
 
     let active = true;
 
-    // A stored session is only a claim. The identity below comes from the
-    // verified JWT `sub`, and any failure resolves to null, which the gate
-    // reads as signed out. `restored` stays false until the first result is
-    // applied, so no protected route can render while this is pending.
-    void resolveVerifiedIdentity(client, signal.session).then((verified) => {
-      if (!active || !shouldApplyResult(signal.token, appliedToken.current)) {
+    // The identity below comes from the verified JWT `sub`; any failure
+    // resolves to null, which the gate reads as signed out. The result is
+    // dispatched with the token it was started for, and the reducer applies it
+    // only if that token is still the latest observed signal.
+    void verifyStoredIdentity(client, candidate).then((verified) => {
+      if (!active) {
         return;
       }
 
-      appliedToken.current = signal.token;
-      setIdentity(verified);
-      setRestored(true);
+      dispatch({
+        type: "validation-settled",
+        token: latestToken,
+        identity: verified,
+      });
     });
 
     return () => {
+      // Covers unmount and any newer signal that supersedes this validation.
       active = false;
     };
-  }, [signal, client]);
+  }, [phase, latestToken, candidate, client]);
 
   useEffect(() => {
     if (!identityChanged(cachedIdentity.current, identity)) {
       return;
     }
 
-    // The user changed, or signed out. Drop every auth-bound entry before the
-    // next render can read one that belonged to the previous account.
+    // Runs the moment a new signal clears the identity, not when validation
+    // finishes, so auth-scoped data for the previous user stops being readable
+    // at the signal boundary rather than a round trip later.
     clearAuthScopedQueries(queryClient);
     cachedIdentity.current = identity;
   }, [identity, queryClient]);

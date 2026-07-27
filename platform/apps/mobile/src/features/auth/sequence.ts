@@ -1,20 +1,22 @@
 /**
- * Ordering guard for asynchronous auth results.
+ * Token issuing for asynchronous auth work.
  *
  * Session validation is asynchronous, so results can arrive out of order: a
- * restore started at app launch can resolve *after* a sign-out event that was
- * emitted later. Applying it would resurrect a signed-out session, which is the
- * worst possible ordering bug in this file's neighbourhood.
+ * restore started at app launch can resolve *after* a sign-out that was
+ * observed later. Each auth signal takes the next token at the moment it is
+ * observed, which gives the reducer in `auth-state.ts` a total order to reason
+ * about.
  *
- * The rule is monotonic. Each auth signal takes the next token at the moment it
- * is observed, and a result may only be applied if its token is newer than the
- * last one applied. Kept pure so the ordering can be tested exhaustively
- * without React, timers, or a Supabase client.
+ * Whether a *result* may be applied is decided by `canApplyValidation` in
+ * `auth-state.ts`, not here. That predicate needs the latest observed token as
+ * well as the last applied one, and an earlier revision of this file exported a
+ * two-argument "is it newer than what we applied" helper that looked sufficient
+ * and was not. It is deliberately gone rather than deprecated.
  */
 
 export type SequenceToken = number;
 
-/** No result has been applied yet. Every real token is greater than this. */
+/** No signal has been observed yet. Every issued token is greater than this. */
 export const INITIAL_SEQUENCE_TOKEN: SequenceToken = 0;
 
 export function nextSequenceToken(current: SequenceToken): SequenceToken {
@@ -22,15 +24,14 @@ export function nextSequenceToken(current: SequenceToken): SequenceToken {
 }
 
 /**
- * Whether a result that carries `resultToken` may overwrite what is applied.
+ * Whether an observed signal is newer than the newest one seen so far.
  *
- * Strictly greater, not greater-or-equal: a token is applied at most once, so a
- * repeated or replayed result cannot re-apply an outcome that a newer signal
- * has already superseded.
+ * Used only to order *observations*. Applying a validation result is a
+ * different and stricter question.
  */
-export function shouldApplyResult(
-  resultToken: SequenceToken,
-  lastAppliedToken: SequenceToken,
+export function isNewerSignal(
+  token: SequenceToken,
+  latestToken: SequenceToken,
 ): boolean {
-  return resultToken > lastAppliedToken;
+  return token > latestToken;
 }

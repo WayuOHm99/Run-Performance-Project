@@ -14,13 +14,14 @@ Base commit:     d8857c7a145e78aac2c6db48d169dbf4c430197b
 
 Round 1 implementation:  d78ccb91fd09f0a380a497a1310c16b39c24087f
 Round 1 handoff:         75bdfeeb5ccf28d49534fb2fb54044f930c9a7ce
-Round 2 fix (M1, M2):    see "Reviewer findings" below; this is the head
+Round 2 fix (M1, M2):    05ac6ad37cde868bf1daf5c077475fd4f941b571
+Round 3 fix (M2 ordering): see "Reviewer findings" below; this is the head
 ```
 
-Round 2 fixes the two Codex Medium findings on the same branch. The file list
-and results below are cumulative for the whole task unless a section says
-otherwise. Nothing has been merged or pushed, and the worktree is still in
-place.
+Round 3 fixes the async ordering half of M2, which Codex correctly kept open
+after round 2. The file list and results below are cumulative for the whole task
+unless a section says otherwise. Nothing has been merged or pushed, and the
+worktree is still in place.
 
 ## Changed files
 
@@ -35,15 +36,19 @@ place.
 The TASK-008 **migration** was not edited. Only its test file changed, and only
 where TASK-009 intentionally made an assertion obsolete.
 
-### Mobile — pure logic, fully unit-tested (11)
+### Mobile — pure logic, fully unit-tested (12)
 
 `src/features/auth/`: `roles.ts`, `gate.ts`, `session.ts`, `credentials.ts`,
 `display-name.ts`, `submission.ts`, `errors.ts`, **`claims.ts`** (round 2),
-**`sequence.ts`** (round 2)
+**`sequence.ts`** (round 2), **`auth-state.ts`** (round 3)
 `src/lib/query/`: `keys.ts`, `client.ts`
 
 Round 2 changed `session.ts` (candidate/identity split), `errors.ts`
 (`isExistingAccountError`), `auth-repository.ts`, and `auth-provider.tsx`.
+
+Round 3 added `auth-state.ts` + test, rewrote `sequence.ts` + test (removing
+`shouldApplyResult`), rewrote `auth-provider.tsx` onto the reducer, and renamed
+`resolveVerifiedIdentity` to `verifyStoredIdentity` in `auth-repository.ts`.
 
 ### Mobile — integration (6)
 
@@ -59,7 +64,7 @@ Round 2 changed `session.ts` (candidate/identity split), `errors.ts`
 `src/components/`: `text-field.tsx`, `primary-button.tsx`, `screen-heading.tsx`,
 `notice.tsx`
 
-### Tests (14 files, 244 assertions)
+### Tests (15 files, 265 assertions)
 
 Alongside each pure module, plus `auth-repository.test.ts`,
 `account-repository.test.ts`, `query/keys.test.ts`, `query/client.test.ts`, and
@@ -80,20 +85,21 @@ Alongside each pure module, plus `auth-repository.test.ts`,
 
 ## Acceptance criteria
 
-All 26 criteria in the task packet are met and checked. The security-relevant
+All 33 criteria in the task packet are met and checked. The security-relevant
 ones:
 
 | Criterion | Where it is enforced and proved |
 | --- | --- |
-| The restored JWT is verified before an identity exists | `resolveVerifiedIdentity` calls `getClaims()`; identity comes from the verified `sub` |
+| The restored JWT is verified before an identity exists | `verifyStoredIdentity` calls `getClaims()`; identity comes from the verified `sub` |
 | A stored `user.id` can no longer mint an identity | `SessionCandidate` is a distinct type accepted nowhere an identity is required |
-| A stale restore cannot resurrect a signed-out session | `sequence.ts`, with an explicit out-of-order ordering test |
+| A stale result cannot resurrect a signed-out session or a previous user | `canApplyValidation` requires equality with the latest observed token |
+| No protected route uses the old identity while a newer signal validates | the reducer clears `identity` and enters `verifying` on every accepted signal |
 | An existing address shows no distinct error | `resolveSignUpResponse` normalizes to the generic outcome |
 | `/athlete` and `/coach` fail closed in every non-ready state | `canEnterRoleArea` returns true only for `ready`; gate test iterates all 7 non-ready states |
 | Roles come only from active membership rows | `resolveAuthorizedRoles`; never from metadata, JWT, storage, or the chooser |
 | A revoked membership disappears on the next load | `resolveAuthorizedRoles` filters `status !== 'active'`; gate test asserts before/after |
 | An error is never treated as "no membership" | repository raises instead of returning `[]`; gate checks error before counting; 4 dedicated tests |
-| A corrupt session fails closed | `readAuthenticatedIdentity` returns `null` for 12 malformed shapes |
+| A corrupt session fails closed | `readSessionCandidate` returns `null` for 12 malformed shapes |
 | Sign-up sends no role or metadata | test pins the payload keys to exactly `["email", "password"]` |
 | Errors cannot enumerate accounts | unknown account, wrong password, and already-registered all map to one category |
 | Query keys are user-scoped, cache never on disk | `keys.ts`, `client.ts`, and their tests |
@@ -113,7 +119,7 @@ Local database only. No `--linked`, no remote URL, no hosted Auth.
 | `pnpm format:check` | exit 0 |
 | `pnpm lint` | exit 0 |
 | `pnpm typecheck` | exit 0 |
-| `pnpm test` | **244 passed, 14 files** |
+| `pnpm test` | **265 passed, 15 files** |
 | `expo-doctor@latest` | **21/21 checks passed** |
 | `expo export --platform web` | exit 0, 13 static routes |
 | `pnpm db:stop *> $null` | exit 0, no container remains |
@@ -218,8 +224,56 @@ name.
 
 ## Reviewer findings
 
-Codex round 1 raised two Medium findings. Both were accepted as correct and are
-fixed. **No finding remains open.**
+| Round | Finding | Status |
+| --- | --- | --- |
+| 1 | M1 — sign-up account enumeration | **Closed** in round 2 |
+| 1 | M2 — JWT verification (cryptographic half) | **Closed** in round 2 |
+| 2 | M2 — async event/result ordering | **Fixed in round 3**, below |
+
+Every finding was accepted as correct. None was disputed. **No finding remains
+open.**
+
+### Round 2 M2 — async event/result ordering — fixed in round 3
+
+Codex rejected the round-2 ordering fix on two counts. Both were genuine
+defects, not documentation gaps.
+
+**Defect 1 — the result guard was too weak.** Round 2 applied a result when
+`resultToken > lastAppliedToken`, which admits:
+
+```text
+applied = 1 (user A)      validation for token 2 in flight
+signal 3 observed         (sign-out, or user B) -- token 3 not settled yet
+token 2 resolves          2 > 1 passes  ->  user A reapplied
+```
+
+A stale identity could be applied *after* a newer signal had already been
+observed. `canApplyValidation` now requires `token === latestToken`, keeping
+`token > appliedToken` only so a duplicated result cannot re-apply. Equality is
+the load-bearing half.
+
+**Defect 2 — the old identity stayed live during revalidation.** Round 2
+recorded a newer signal but left the verified `identity` and `restored = true`
+in place until the new validation settled, so for the length of a round trip a
+protected route and the previous user's auth-scoped queries stayed readable
+after a sign-out or user switch had been observed. The reducer now clears
+`identity` and enters `verifying` on every accepted signal, *before* validation
+starts, so the gate reports `restoring` and routing closes at once. Because the
+identity clears at the signal boundary, the existing `identityChanged` effect
+also clears the auth-scoped cache there rather than a round trip later.
+
+**Where the logic lives.** Both rules moved into a pure reducer,
+`auth-state.ts`. `AuthProvider` is now a thin shell that issues tokens, performs
+I/O, and dispatches — it consumes the same tested functions rather than
+reimplementing them, so there is no second copy to drift.
+`onAuthStateChange` remains synchronous: it reduces the session to a candidate
+with the pure `readSessionCandidate` and dispatches; validation stays in a
+separate effect.
+
+`shouldApplyResult` was **deleted, not deprecated** — it read as sufficient and
+was not. `resolveVerifiedIdentity(client, session)` became
+`verifyStoredIdentity(client, candidate)`, which additionally keeps access and
+refresh tokens out of React state entirely.
 
 ### M1 — sign-up account enumeration — fixed
 
@@ -258,7 +312,7 @@ The session type was split so the two can no longer be confused at a call site:
   `sub`, an expired or non-finite `exp`, a `role` other than `authenticated`,
   and `is_anonymous`.
 
-`resolveVerifiedIdentity` runs structural check → `getClaims()` → subject
+`verifyStoredIdentity` runs structural check → `getClaims()` → subject
 cross-check, and returns `null` on any failure. The cross-check catches a stored
 session whose user was swapped while the token was left intact.
 `signInWithPassword` now returns `void`, so verified claims are the only source
@@ -273,27 +327,48 @@ sign-out. `restored` stays `false` until the first result applies, so the gate
 reports `restoring` and no protected route renders while validation is pending.
 Both effects guard on an `active` flag, so nothing is applied after unmount.
 
-### Security impact of the fix round
+**Tests.** `auth-state.test.ts` covers the reported interleaving step by step,
+the user-A → user-B late-resolution case, an exposure trace asserting user A
+never reappears after the user-B signal, older/newer/repeated/out-of-order
+results, cancelled results, and that a rejected event returns the identical
+state object so it cannot trigger a re-render. Two tests drive the real
+`resolveAuthGate` from reducer output to prove the gate is closed while pending.
+All pure logic; no renderer dependency was added.
 
-Strictly a tightening. An attacker with writable device storage can no longer
-mint an identity by editing a stored session, since the identity now comes from
-a signature-verified `sub` rather than a stored `user.id`. Expired, wrong-role,
-anonymous, and subject-mismatched tokens are refused. The sign-up flow no longer
-returns a distinct response for a registered address at the point the server
-lets us hide it. No authorization was widened, no database object changed, and
-RLS remains the enforcement boundary throughout.
+### Security impact across rounds 2 and 3
+
+Strictly a tightening throughout.
+
+- An attacker with writable device storage can no longer mint an identity by
+  editing a stored session: the identity comes from a signature-verified `sub`.
+  Expired, wrong-role, anonymous, and subject-mismatched tokens are refused.
+- A stale in-flight validation can no longer resurrect a signed-out session or
+  reapply a previous user after a newer signal was observed.
+- The previous user's identity and auth-scoped cached data stop being readable
+  the moment a newer signal is observed, not a round trip later, so the
+  transient exposure window during a sign-out or user switch is closed.
+- The sign-up flow returns no distinct response for a registered address at the
+  point the server lets us hide it.
+
+No authorization was widened, no database object changed, and RLS remains the
+enforcement boundary throughout.
 
 ### Suggested focus for re-review
 
-1. `claims.ts` — whether any accepted claim shape could still yield an identity
+1. `auth-state.ts` — whether any event sequence can leave `phase: "settled"`
+   with an identity that is not the latest verified one, or expose an identity
+   while a newer signal is pending.
+2. `canApplyValidation` — that equality with `latestToken` plus
+   `> appliedToken` is exactly the right pair, with no case the two miss.
+3. The two effects in `auth-provider.tsx` — that token issuance, dispatch, and
+   cleanup line up with the reducer's assumptions, and that no ordering rule was
+   re-implemented outside the reducer.
+4. The cache boundary: whether any auth-scoped read can still resolve for the
+   previous identity during a pending transition.
+5. `claims.ts` — whether any accepted claim shape could still yield an identity
    from an unverified or unintended token.
-2. `resolveVerifiedIdentity` — the ordering of the structural check, `getClaims()`,
-   and the subject cross-check, and that no error escapes.
-3. `sequence.ts` plus the two effects in `auth-provider.tsx` — whether any
-   interleaving of restore, sign-in, sign-out, and unmount can apply a stale
-   result or leave `restored` true with an unverified identity.
-4. `resolveSignUpResponse` — whether the documented limitation is stated
+6. `resolveSignUpResponse` — whether the documented M1 limitation is stated
    accurately, and whether any other response path reveals account existence.
-5. Unchanged from round 1 and still worth confirming: the two refusal shapes in
+7. Unchanged from round 1 and still worth confirming: the two refusal shapes in
    `002_..._test.sql`, the three changed assertions in the TASK-008 test file,
    and `resolveAuthGate` ordering in `gate.ts`.

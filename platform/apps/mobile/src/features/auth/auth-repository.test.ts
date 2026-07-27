@@ -7,12 +7,13 @@ import {
   classifySignUpResult,
   readStoredSession,
   resolveSignUpResponse,
-  resolveVerifiedIdentity,
+  verifyStoredIdentity,
   signInWithPassword,
   signOutGlobally,
   signUpWithPassword,
   type AuthClient,
 } from "./auth-repository";
+import { readSessionCandidate } from "./session";
 
 const CREDENTIALS = {
   email: "athlete-a@example.test",
@@ -25,6 +26,9 @@ const SESSION = {
   access_token: "synthetic-access-token",
   user: { id: USER_ID },
 };
+
+/** What readSessionCandidate produces for SESSION. Explicitly unverified. */
+const CANDIDATE = { unverifiedUserId: USER_ID };
 
 function validClaims(sub = USER_ID) {
   return {
@@ -377,11 +381,11 @@ describe("readStoredSession", () => {
  * M2: a stored session is only a claim. The identity must come from a verified
  * JWT, never from the stored user id.
  */
-describe("resolveVerifiedIdentity", () => {
+describe("verifyStoredIdentity", () => {
   it("returns the identity when the JWT verifies", async () => {
     const { client } = createAuthDouble();
 
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toEqual({
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toEqual({
       userId: USER_ID,
     });
   });
@@ -389,7 +393,7 @@ describe("resolveVerifiedIdentity", () => {
   it("verifies the JWT rather than trusting the stored session", async () => {
     const { auth, client } = createAuthDouble();
 
-    await resolveVerifiedIdentity(client, SESSION);
+    await verifyStoredIdentity(client, CANDIDATE);
 
     expect(auth.getClaims).toHaveBeenCalledTimes(1);
   });
@@ -400,7 +404,7 @@ describe("resolveVerifiedIdentity", () => {
       getClaims: vi.fn(async () => validClaims(USER_ID)),
     });
 
-    const identity = await resolveVerifiedIdentity(client, SESSION);
+    const identity = await verifyStoredIdentity(client, CANDIDATE);
 
     expect(identity).toEqual({ userId: USER_ID });
   });
@@ -408,16 +412,19 @@ describe("resolveVerifiedIdentity", () => {
   it("skips verification entirely when nothing usable is stored", async () => {
     const { auth, client } = createAuthDouble();
 
-    await expect(resolveVerifiedIdentity(client, null)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, null)).resolves.toBeNull();
     expect(auth.getClaims).not.toHaveBeenCalled();
   });
 
   it("fails closed for a corrupt stored session without a round trip", async () => {
     const { auth, client } = createAuthDouble();
 
-    await expect(
-      resolveVerifiedIdentity(client, { access_token: "trunc" }),
-    ).resolves.toBeNull();
+    // The structural check runs synchronously in the caller, so a truncated
+    // blob reduces to a null candidate and never reaches verification.
+    const corrupt = readSessionCandidate({ access_token: "trunc" });
+
+    expect(corrupt).toBeNull();
+    await expect(verifyStoredIdentity(client, corrupt)).resolves.toBeNull();
     expect(auth.getClaims).not.toHaveBeenCalled();
   });
 
@@ -429,7 +436,7 @@ describe("resolveVerifiedIdentity", () => {
       })),
     });
 
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toBeNull();
   });
 
   it("fails closed when the JWT has expired", async () => {
@@ -441,7 +448,7 @@ describe("resolveVerifiedIdentity", () => {
       getClaims: vi.fn(async () => expired),
     });
 
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toBeNull();
   });
 
   it("fails closed when the claims carry no sub", async () => {
@@ -453,7 +460,7 @@ describe("resolveVerifiedIdentity", () => {
       getClaims: vi.fn(async () => noSub),
     });
 
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toBeNull();
   });
 
   it("fails closed when the verified subject does not match the stored user", async () => {
@@ -464,7 +471,7 @@ describe("resolveVerifiedIdentity", () => {
       ),
     });
 
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toBeNull();
   });
 
   it("fails closed when verification throws", async () => {
@@ -474,7 +481,7 @@ describe("resolveVerifiedIdentity", () => {
       }),
     });
 
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toBeNull();
   });
 
   it("fails closed when verification rejects", async () => {
@@ -484,7 +491,7 @@ describe("resolveVerifiedIdentity", () => {
       }),
     });
 
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toBeNull();
   });
 
   it("never propagates a verification error to the caller", async () => {
@@ -499,6 +506,6 @@ describe("resolveVerifiedIdentity", () => {
     });
 
     // Returns null rather than raising, so no raw error can reach a screen.
-    await expect(resolveVerifiedIdentity(client, SESSION)).resolves.toBeNull();
+    await expect(verifyStoredIdentity(client, CANDIDATE)).resolves.toBeNull();
   });
 });

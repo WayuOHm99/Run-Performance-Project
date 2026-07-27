@@ -21,7 +21,11 @@ import {
   isExistingAccountError,
   type AuthFailure,
 } from "./errors";
-import { readSessionCandidate, type AuthenticatedIdentity } from "./session";
+import {
+  readSessionCandidate,
+  type AuthenticatedIdentity,
+  type SessionCandidate,
+} from "./session";
 
 export type AuthClient = Pick<SupabaseClient, "auth">;
 
@@ -110,7 +114,7 @@ export async function signUpWithPassword(
  * Signs in, and fails closed on any response that is not a usable session.
  *
  * Deliberately returns nothing. The authoritative identity is produced by
- * `resolveVerifiedIdentity` in the provider, from verified JWT claims; returning
+ * `verifyStoredIdentity` in the provider, from verified JWT claims; returning
  * an identity from here would create a second, weaker source of truth.
  */
 export async function signInWithPassword(
@@ -159,16 +163,22 @@ export async function readStoredSession(client: AuthClient): Promise<unknown> {
 }
 
 /**
- * Turns a stored session into a **verified** identity, or into `null`.
+ * Turns an unverified session candidate into a **verified** identity, or into
+ * `null`.
  *
- * This is the only function in the app that produces an `AuthenticatedIdentity`
- * from storage, and it does so from the JWT's verified `sub` claim rather than
- * from the stored `user.id`.
+ * This is the only function in the app that produces an `AuthenticatedIdentity`,
+ * and it does so from the JWT's verified `sub` claim rather than from the stored
+ * `user.id`.
+ *
+ * It takes a candidate rather than a session so the caller can run the cheap
+ * structural check synchronously — inside `onAuthStateChange`, where an async
+ * Auth call is forbidden — and so the access and refresh tokens never travel
+ * into React state.
  *
  * Order matters:
  *
- *   1. a cheap structural check, so a missing or truncated blob costs no round
- *      trip;
+ *   1. a null candidate short-circuits, so a missing or truncated blob costs no
+ *      round trip;
  *   2. `getClaims()`, which verifies the signature and expiry;
  *   3. a cross-check that the verified subject matches what storage claimed.
  *
@@ -176,12 +186,10 @@ export async function readStoredSession(client: AuthClient): Promise<unknown> {
  * left intact. Any failure at any step returns `null`; there is no partially
  * trusted result and no error is propagated to a caller that might display it.
  */
-export async function resolveVerifiedIdentity(
+export async function verifyStoredIdentity(
   client: AuthClient,
-  session: unknown,
+  candidate: SessionCandidate | null,
 ): Promise<AuthenticatedIdentity | null> {
-  const candidate = readSessionCandidate(session);
-
   if (candidate === null) {
     return null;
   }

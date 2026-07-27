@@ -264,10 +264,22 @@ TASK-005 against the authorization foundation created in TASK-008.
       identity exists, and the identity is taken from the verified `sub`.
 - [x] A malformed, expired, unverifiable, role-mismatched, or subject-mismatched
       session fails closed to signed-out.
-- [x] No protected route renders while validation is pending.
+- [x] No protected route renders while validation is pending, including while a
+      *newer* signal is being validated after an identity was already verified.
+- [x] Observing a newer auth signal invalidates the previous identity
+      immediately, before its validation starts.
+- [x] A validation result applies only when its token is still the latest
+      observed signal. Being newer than the last applied result is explicitly
+      not sufficient.
+- [x] A sign-out signal blocks protected routing immediately and does not wait
+      for an older verification to settle.
+- [x] A user-A → user-B transition never reapplies or exposes user A once the
+      user-B signal has been observed.
+- [x] Auth-scoped query data is cleared at the signal boundary, so it cannot be
+      read for the previous identity during a pending transition.
 - [x] Auth event subscriptions are cleaned up, the auth-state callback makes no
-      async re-entrant Supabase Auth call, and a stale restore result cannot
-      overwrite a newer auth event or a sign-out.
+      async re-entrant Supabase Auth call, and unmounted or cancelled results
+      are ignored.
 - [x] Every auth-bound query key includes the authenticated user id.
 - [x] Auth-bound cached data is removed when the user changes or signs out, and
       the query cache is never persisted to disk.
@@ -294,7 +306,8 @@ Rules applied:
 
 - Passwords, access tokens, refresh tokens, and session objects are never
   logged, never placed in error messages, and never written outside the Supabase
-  auth storage adapter. `readAuthenticatedIdentity` lifts out the user id alone.
+  auth storage adapter. Only the verified `sub` is lifted out, and the access
+  and refresh tokens never enter React state at all.
 - Auth error text shown to the user is a fixed generic Thai string chosen from a
   closed set. An unknown account, a wrong password, and an already-registered
   address all collapse to the same category, so the response cannot be used to
@@ -429,6 +442,15 @@ command with `--linked` or a remote database URL.
   revocation takes effect in the database immediately but in the UI on the next
   successful load. This is safe because RLS, not the client, is the
   authorization boundary.
+- **Every auth signal now briefly shows the neutral loading state.** Because a
+  newer signal clears the identity immediately, a `TOKEN_REFRESHED` event —
+  roughly hourly while the app is foregrounded — drops the user to the loading
+  screen for the duration of one verification, and the auth-scoped cache is
+  cleared and refetched. This is the deliberate cost of closing the exposure
+  window, and the refetch has the side benefit of surfacing a revocation sooner.
+  If the flash proves noticeable in use, the fix is a UI one (hold the previous
+  screen's chrome while pending); it must **not** be fixed by keeping the
+  previous identity live, which is exactly the defect that was corrected.
 - **JWT verification may cost a network round trip.** `getClaims()` verifies
   locally against the cached JWKS only for an asymmetric signing key. If the
   project still uses a symmetric secret, it validates at the Auth server, so
@@ -494,7 +516,9 @@ Mobile pure logic (all unit-tested):
 - `src/features/auth/session.ts` — fail-closed reading of an *unverified*
   stored session candidate
 - `src/features/auth/claims.ts` — verified-claims validation (M2)
-- `src/features/auth/sequence.ts` — monotonic async ordering guard (M2)
+- `src/features/auth/sequence.ts` — token issuing and observation ordering (M2)
+- `src/features/auth/auth-state.ts` — the auth state machine: pending state,
+  identity exposure, and result-application rules (M2 round 3)
 - `src/features/auth/credentials.ts`, `display-name.ts`, `submission.ts`
 - `src/features/auth/errors.ts` — error sanitization and
   `isExistingAccountError` (M1)
@@ -610,7 +634,7 @@ The session type was split so the two cannot be confused at a call site:
   rejects a missing/blank/non-string `sub`, an expired or non-finite `exp`, a
   `role` other than `authenticated`, and `is_anonymous`.
 
-`resolveVerifiedIdentity` runs structural check → `getClaims()` → subject
+`verifyStoredIdentity` runs structural check → `getClaims()` → subject
 cross-check. A mismatch between the stored user id and the verified `sub` fails
 closed, which catches a session whose user was swapped while the token was left
 intact. Every failure returns `null`; no verification error is ever propagated
@@ -620,24 +644,82 @@ to a caller that might display it.
 response would have created a second, weaker source of truth alongside verified
 claims.
 
-#### Ordering, which is where this kind of fix usually breaks
+#### Ordering — corrected again in round 3
+
+The round-2 ordering fix was **insufficient and Codex was right to reject it.**
+The current design is described under "Round 3" below; this section records only
+the parts that survived unchanged.
 
 Validation is asynchronous, so results can arrive out of order — a restore
 started at launch can resolve *after* a sign-out observed later. Applying it
 would resurrect a signed-out session.
 
-`sequence.ts` is a pure monotonic guard. `onAuthStateChange` stays synchronous
-and only records the observation with a freshly claimed token; a second effect
-performs verification outside the callback, so no async re-entrant Auth call is
-made and the auth lock cannot deadlock. The restore path claims its token
-*before* the read starts, not when it resolves, so a slow restore carries the
-older token and is discarded. `restored` stays `false` until the first result is
-applied, so the gate reports `restoring` and no protected route can render while
-validation is pending. Both effects also guard on an `active` flag, so nothing
-is applied after unmount.
+Each auth signal takes the next token from `sequence.ts` at the moment it is
+observed. `onAuthStateChange` stays synchronous and only records the
+observation; a second effect performs verification outside the callback, so no
+async re-entrant Auth call is made and the auth lock cannot deadlock. The
+restore path claims its token *before* the read starts, not when it resolves, so
+a slow restore carries the older token and is discarded. Both effects guard on
+an `active` flag, so nothing is applied after unmount.
 
-`shouldApplyResult` is strictly greater-than, not greater-or-equal, so a
-replayed result cannot re-apply an outcome a newer signal already superseded.
+What was wrong — the result-application predicate, and leaving the previous
+identity exposed while a newer signal validated — is described next.
+
+### Round 3 — the M2 ordering fix Codex rejected, and what replaced it
+
+Codex closed M1 and accepted the cryptographic half of M2, but kept the
+**async event/result ordering** at Medium. The rejection was correct on two
+counts, and both were genuine defects rather than documentation gaps.
+
+**Defect 1 — the guard was too weak.** Round 2 applied a result when
+`resultToken > lastAppliedToken`. That admits this interleaving:
+
+```text
+applied = 1 (user A)      validation for token 2 in flight
+signal 3 observed         (sign-out, or user B)  -- token 3 not settled yet
+token 2 resolves          2 > 1 passes  ->  user A reapplied
+```
+
+so a stale identity could be applied *after* a newer signal had already been
+observed. The fix is `canApplyValidation`, which requires
+`token === latestToken` and keeps `token > appliedToken` only so a duplicated
+result cannot re-apply. Equality is the load-bearing half.
+
+**Defect 2 — the old identity stayed live during revalidation.** Round 2
+recorded a newer signal but left the previously verified `identity` in place
+with `restored = true` until the new validation settled. For the length of a
+round trip, a protected route and the previous user's auth-scoped queries stayed
+readable after a sign-out or a user switch had been observed. The reducer now
+clears `identity` and enters `verifying` on every accepted signal, before any
+validation runs, so the gate reports `restoring` and routing closes at once.
+
+**Where the logic lives.** Both rules moved into a pure reducer,
+`auth-state.ts`, with `authReducer`, `canApplyValidation`, `authIdentity`, and
+`isAuthSettled`. `AuthProvider` is now a thin shell that issues tokens, performs
+I/O, and dispatches — it consumes the same tested functions rather than
+reimplementing them, so there is no second copy of the rules to drift.
+`onAuthStateChange` stays synchronous: it reduces the session to a candidate
+with the pure `readSessionCandidate` and dispatches, and validation still runs
+in a separate effect.
+
+`shouldApplyResult` was deleted rather than deprecated. It read as sufficient
+and was not, and leaving it exported invited the same mistake again.
+`resolveVerifiedIdentity(client, session)` became
+`verifyStoredIdentity(client, candidate)`, which additionally keeps the access
+and refresh tokens out of React state entirely — only the candidate user id is
+carried.
+
+**Cache boundary.** Because the identity is cleared when the signal is observed,
+the existing `identityChanged` effect now clears auth-scoped queries at the
+*signal* boundary rather than a round trip later, which is what requirement 6
+asked for.
+
+**Tests.** `auth-state.test.ts` covers the reported interleaving step by step,
+the user-A → user-B late-resolution case, an exposure trace asserting user A
+never reappears after the user-B signal, older/newer/repeated/out-of-order
+results, cancelled results, and that a rejected event returns the identical
+state object so it cannot even trigger a re-render. Two tests drive the real
+`resolveAuthGate` from reducer output to prove the gate is closed while pending.
 
 ### Deliberate non-goals reconfirmed
 
