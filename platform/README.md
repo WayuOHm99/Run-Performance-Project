@@ -60,3 +60,61 @@ corepack pnpm --filter @run-performance/mobile start
 The first mobile shell is a development preview only. It has no authentication,
 backend, wearable connection, production data, deployment configuration, or store
 identifier.
+
+## Local Supabase stack
+
+The Supabase CLI is pinned as a `platform/` development dependency. Do not install
+a global CLI; the pinned version is the only supported one.
+
+`platform/supabase/` is the new app's backend. The repository-root `supabase/`
+directory is a different, live legacy system and is never touched by these
+commands.
+
+### Windows prerequisites
+
+- Docker Desktop with the WSL 2 backend, running before any stack command.
+- Node.js 22–24 with Corepack enabled.
+- No user Linux distribution is required. Docker Desktop provides its own WSL 2
+  backend and exposes `docker` to Windows.
+
+Confirm Docker is up and using a Linux engine:
+
+```powershell
+docker version --format '{{.Server.Os}}'
+```
+
+The value must be `linux`.
+
+### Safe local commands
+
+Run from `platform/`:
+
+```powershell
+corepack pnpm db:start
+corepack pnpm db:status
+corepack pnpm db:stop
+```
+
+The stack is entirely local. It never links, logs in to, or migrates the hosted
+Supabase project. `supabase login`, `supabase link`, `supabase db push`, and any
+other remote command are out of bounds for local development work.
+
+### Credential hygiene
+
+`supabase start` and `supabase status` print development-only API keys and a
+database URL to the terminal. Those values are generated locally and are not
+hosted-project secrets, but they must not be pasted into an AI chat, a task
+packet, a review artifact, a screenshot, or a committed log.
+
+When a command's output could be captured, suppress it and check the exit code
+and container health instead:
+
+```powershell
+corepack pnpm db:start *> $null
+$LASTEXITCODE
+docker ps
+```
+
+Generated local runtime state is ignored through `platform/supabase/.gitignore`;
+Docker volumes live outside the repository. Nothing produced by the local stack
+belongs in a commit.

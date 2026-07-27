@@ -1,6 +1,6 @@
 # TASK-007: Supabase local development foundation
 
-Status: In Progress
+Status: In Progress — implementation complete, awaiting final read-only review
 
 Writer: Claude Code
 
@@ -75,15 +75,15 @@ protected athlete data is introduced.
 
 ## Acceptance criteria
 
-- [ ] Supabase CLI is pinned in `platform/package.json` and the pnpm lockfile.
-- [ ] `platform/supabase/config.toml` exists and belongs only to the new app.
-- [ ] Local runtime state is ignored and no credential is committed.
-- [ ] Docker Desktop reports a Linux engine.
-- [ ] The local Supabase stack starts successfully without linking a hosted
+- [x] Supabase CLI is pinned in `platform/package.json` and the pnpm lockfile.
+- [x] `platform/supabase/config.toml` exists and belongs only to the new app.
+- [x] Local runtime state is ignored and no credential is committed.
+- [x] Docker Desktop reports a Linux engine.
+- [x] The local Supabase stack starts successfully without linking a hosted
       project.
-- [ ] The local stack can be stopped cleanly.
-- [ ] Existing format, lint, typecheck, and unit tests pass.
-- [ ] No protected legacy path, real athlete data, or remote Supabase resource is
+- [x] The local stack can be stopped cleanly.
+- [x] Existing format, lint, typecheck, and unit tests pass.
+- [x] No protected legacy path, real athlete data, or remote Supabase resource is
       read or modified.
 - [ ] ChatGPT/Codex returns no blocker, high, or medium finding in the final
       read-only review.
@@ -140,6 +140,50 @@ git diff --name-only
 - Claude Code is the sole writer for all work after this checkpoint.
 - ChatGPT/Codex becomes read-only for review after the transfer. Any accepted
   finding must be fixed by Claude Code.
+
+## Implementation notes
+
+- Pinned CLI verified at `supabase 2.109.1` via `corepack pnpm exec supabase
+  --version`.
+- Added `db:start`, `db:stop`, and `db:status` scripts to `platform/package.json`.
+  They resolve the pinned local CLI; no global install is used.
+- `platform/README.md` documents the Windows prerequisites, the safe local
+  commands, and the credential-suppression pattern.
+- Local-stack verification used exit codes and `docker ps` health only. No
+  `supabase start` or `supabase status` credential output was printed or
+  persisted.
+- `git status --short` while the stack was running showed only the intended file
+  modifications, confirming no local runtime state reaches the repository.
+- Added `platform/.prettierignore`. Running the stack generates
+  `platform/supabase/.temp/`, which Git already ignores through
+  `platform/supabase/.gitignore`, but Prettier reads only top-level ignore files
+  and therefore failed `format:check` after every `supabase start`. This file is
+  outside the literal owned-path list; it was required to keep the in-scope item
+  "keep generated local runtime state ignored" true for the formatter as well as
+  for Git.
+
+### Pre-existing formatting defect fixed
+
+`corepack pnpm format:check` failed on all 26 workspace files before any change in
+this task. The cause was line endings only: the repository sets
+`core.autocrlf=true`, so the Windows checkout holds CRLF, while Prettier defaults
+to `endOfLine: "lf"`. `prettier --check --end-of-line auto .` passed cleanly,
+confirming no file had a real style problem.
+
+The minimal fix was a `prettier` config block in the owned `platform/package.json`
+setting `endOfLine: "auto"`. This is scoped to the platform workspace and avoids a
+repository-root `.gitattributes` change, which would renormalize legacy files and
+is out of scope here.
+
+### Known limitation
+
+`supabase_vector_platform`, the log-collector sidecar, enters a restart loop on
+this Windows/WSL 2 host (repeated exit code 0). `supabase start` still returns exit
+0, and every service required for database and authorization work —
+`db`, `auth`, `rest`, `kong`, `storage`, `realtime`, `pg_meta`, `studio`,
+`analytics`, `inbucket` — reports healthy. This affects local log aggregation
+only. Container logs were not dumped, because the vector configuration carries a
+generated local analytics key.
 
 ## Required handoff
 

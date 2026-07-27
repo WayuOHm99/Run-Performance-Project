@@ -11,7 +11,13 @@
     "format:check": "prettier --check .",
     "lint": "corepack pnpm --filter @run-performance/mobile lint",
     "typecheck": "corepack pnpm --filter @run-performance/mobile typecheck",
-    "test": "corepack pnpm --filter @run-performance/mobile test"
+    "test": "corepack pnpm --filter @run-performance/mobile test",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:status": "supabase status"
+  },
+  "prettier": {
+    "endOfLine": "auto"
   },
   "devDependencies": {
     "prettier": "3.9.6",
