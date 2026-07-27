@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "anthropic.claude-code",
+    "davidanson.vscode-markdownlint",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "expo.vscode-expo-tools",
+    "google.geminicodeassist",
+    "openai.chatgpt"
+  ],
+  "unwantedRecommendations": ["ritwickdey.liveserver"]
+}
