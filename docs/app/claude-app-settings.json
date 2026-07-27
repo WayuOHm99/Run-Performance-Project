@@ -5,9 +5,8 @@
     "defaultMode": "default",
     "disableBypassPermissionsMode": "disable",
     "deny": [
-      "Read(/docs/app/permission-canary/CANARY.md)",
-      "Read(//d/Run-Performance-Project/docs/app/permission-canary/CANARY.md)",
-      "Read(//d/Run-Performance-Project/.claude/worktrees/*/docs/app/permission-canary/CANARY.md)",
+      "Read(//d/Run-Performance-Project/docs/app/permission-canary/MAIN-CANARY.md)",
+      "Read(//d/Run-Performance-Project/.claude/worktrees/*/docs/app/permission-canary/WORKTREE-CANARY.md)",
       "Read(/CLAUDE.md)",
       "Read(//d/Run-Performance-Project/CLAUDE.md)",
       "Read(//d/Run-Performance-Project/.claude/worktrees/*/CLAUDE.md)",

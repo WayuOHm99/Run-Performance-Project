@@ -107,32 +107,80 @@ In the Claude Code session:
    deployment rules appear under Deny.
 6. Confirm the deny list contains `worktrees/*/` entries, and that they name the
    current worktree's location.
-7. Ask Claude to read `docs/app/permission-canary/CANARY.md`. It must report
-   that the operation is denied without revealing file contents.
+7. Run the canary check for the kind of session you are in — see below. Claude
+   must report that the operation is denied **before any content is returned**.
 
-If the canary can be read, stop the session without working and correct the
-launch command. If `/memory` shows the root `CLAUDE.md`, stop as well.
+If a canary can be read, stop the session without working and correct the launch
+command. If `/memory` shows the root `CLAUDE.md`, stop as well.
 
-### Verify with the canary, never with a real protected file
+### Verify with a canary, never with a real protected file
 
 Step 7 deliberately targets a **synthetic** file. The old procedure asked Claude
 to read the root `CLAUDE.md`, which has an obvious flaw: when the rules are
 wrong, the check itself exposes the content it exists to protect. That is
 precisely how the TASK-010 incident happened.
 
-`docs/app/permission-canary/CANARY.md` holds no athlete data, no coaching
-context, and no secret, and its deny rules are written in the **same shape** as
-the protected ones — including the `worktrees/*/` wildcard. A denial therefore
-proves three things at once:
+Neither canary holds athlete data, coaching context, or any secret.
 
-1. the settings file is actually loaded in this session;
-2. the absolute-path rule syntax is correct for this machine;
-3. the `worktrees/*/` wildcard resolves as the protected-path rules assume.
+#### One canary per rule shape, one rule per canary
 
-Because the shapes match, a denied canary means the `CLAUDE.md` rules are denied
-too — established without ever requesting a protected file. Never delete the
-canary or its rules, and if the rule shape for protected paths changes, change
-the canary's rules the same way or it stops proving anything.
+There are **two** canaries, and each is matched by **exactly one** deny rule:
+
+| Session kind    | File to request                                | The only rule that can deny it                                                                     |
+| --------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Main repository | `docs/app/permission-canary/MAIN-CANARY.md`    | `Read(//d/Run-Performance-Project/docs/app/permission-canary/MAIN-CANARY.md)`                       |
+| Worktree        | `docs/app/permission-canary/WORKTREE-CANARY.md` | `Read(//d/Run-Performance-Project/.claude/worktrees/*/docs/app/permission-canary/WORKTREE-CANARY.md)` |
+
+**This isolation is the entire design, and it must not be eroded.** An earlier
+single `CANARY.md` carried three overlapping rules at once — project-relative,
+repository-root absolute, and the worktree wildcard. A denial proved only that
+*some* rule had fired. In particular, a worktree session requesting it by a
+project-relative path could have been denied by the project-relative rule, so
+the check could not demonstrate that the `worktrees/*/` wildcard resolved at all
+— which was the one thing the TASK-010 incident made it necessary to prove.
+
+So: **never add a project-relative or second absolute rule for either canary.**
+A denial must remain attributable to exactly one pattern.
+
+**Expected consequence — do not mistake this for a failure.** Because each
+canary has only its own rule, each is *readable from the other kind of session*:
+a worktree session can read `MAIN-CANARY.md`, and a main-repository session can
+read `WORKTREE-CANARY.md`. That is the design working correctly, not a hole. Run
+only the row that matches your session, and judge the result on that row alone.
+
+#### How to run the check
+
+Ask Claude to read the file **by its exact absolute path**, not a
+project-relative one, so the request cannot be satisfied by a rule you did not
+intend to test:
+
+```text
+Main repository session:
+  D:\Run-Performance-Project\docs\app\permission-canary\MAIN-CANARY.md
+
+Worktree session (substitute the current worktree name):
+  D:\Run-Performance-Project\.claude\worktrees\<name>\docs\app\permission-canary\WORKTREE-CANARY.md
+```
+
+Constraints on the check itself:
+
+- **Built-in `Read` tool only.**
+- **No Bash, PowerShell, `grep`, `cat`, or any other fallback**, and no retry
+  through a different path form. A fallback that succeeds tells you nothing
+  about the Read rules and defeats the check.
+- A **pass** is a denial returned **before any file content**. Partial content
+  followed by a refusal is a **failure**.
+
+A denied worktree canary shows that the settings file is loaded, that the
+absolute-path syntax is right for this machine, and that the `worktrees/*/`
+wildcard resolves. Because the protected paths use the identical rule shape,
+that is evidence for them — established without ever requesting a protected
+file. It remains shape evidence, not a per-path test: the real protected paths
+are deliberately never requested.
+
+Never delete either canary or its rule, and if the rule shape for protected
+paths changes, change the canary rules the same way or they stop proving
+anything.
 
 ## Claude chat without Claude Code
 
