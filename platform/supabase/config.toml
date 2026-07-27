@@ -385,8 +385,12 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# Local Analytics (Logflare + Vector) is not required for database or RLS work and
+# its Vector container restart-loops on Docker Desktop's WSL 2 backend. Disabled so
+# the local stack comes up fully clean. Re-enable only in a task that needs local
+# log aggregation.
 [analytics]
-enabled = true
+enabled = false
 port = 54327
 # Configure one of the supported backends: `postgres`, `bigquery`.
 backend = "postgres"

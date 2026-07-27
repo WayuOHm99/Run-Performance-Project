@@ -117,11 +117,33 @@ Local-stack checks run with Docker Desktop active. Suppress `supabase start` and
 health only:
 
 ```powershell
-docker version
-corepack pnpm exec supabase start
-docker ps
-corepack pnpm exec supabase stop
+docker version --format '{{.Server.Os}}'
+
+corepack pnpm db:start *> $null
+"start exit: $LASTEXITCODE"
+
+docker ps --format '{{.Names}} {{.Status}}'
+
+corepack pnpm db:stop *> $null
+"stop exit: $LASTEXITCODE"
+
+docker ps -a --filter 'name=supabase_' --format '{{.Names}} {{.Status}}'
 ```
+
+`*> $null` redirects every PowerShell stream, so the API URL, anon key,
+service-role key, JWT secret, and database URL printed by `supabase start` and
+`supabase stop` never reach the terminal, the session transcript, or a log.
+
+Judge success only by the reported exit codes and by the container names and
+status from `docker ps`. Every listed container must read `Up` and, where the
+image defines a health check, `(healthy)`. No container may read `Restarting` or
+`(unhealthy)`. The final `docker ps -a` must return nothing, confirming a clean
+stop.
+
+Never run bare `supabase start`, `supabase stop`, or `supabase status` while an AI
+session or any transcript is capturing terminal output. `corepack pnpm db:status`
+is for local human inspection only; its output is credential-bearing and must not
+be pasted into a task packet, review artifact, commit, or AI prompt.
 
 Repository checks:
 
@@ -155,8 +177,14 @@ git diff --name-only
 - `platform/README.md` documents the Windows prerequisites, the safe local
   commands, and the credential-suppression pattern.
 - Local-stack verification used exit codes and `docker ps` health only. No
-  `supabase start` or `supabase status` credential output was printed or
-  persisted.
+  `supabase start`, `supabase stop`, or `supabase status` credential output was
+  printed or persisted.
+- Local Analytics is disabled in `platform/supabase/config.toml`
+  (`[analytics] enabled = false`). Logflare and its Vector log collector are not
+  required for TASK-007 or for future database and RLS tests, and the Vector
+  container restart-looped on Docker Desktop's WSL 2 backend. With Analytics off,
+  the stack starts fully clean. Re-enable only in a task that actually needs local
+  log aggregation.
 - `git status --short` while the stack was running showed only the intended file
   modifications, confirming no local runtime state reaches the repository.
 - Added `platform/.prettierignore`. Running the stack generates
@@ -181,15 +209,39 @@ setting `endOfLine: "auto"`. This is scoped to the platform workspace and avoids
 repository-root `.gitattributes` change, which would renormalize legacy files and
 is out of scope here.
 
+### Resolved review finding M1 — Vector restart loop
+
+Codex independently reproduced `supabase_vector_platform` sitting in
+`Restarting (0)` on this Windows/WSL 2 host while every other service was healthy
+and start/stop both exited 0.
+
+Fixed by setting `[analytics] enabled = false` in `platform/supabase/config.toml`,
+which removes the Logflare and Vector containers from the local stack entirely
+rather than tolerating a restart loop.
+
+After the change the stack starts with ten containers — `db`, `auth`, `rest`,
+`kong`, `storage`, `realtime`, `pg_meta`, `studio`, `edge_runtime`, `inbucket` —
+all reporting `Up`, with `(healthy)` on every image that defines a health check.
+No container reports `Restarting` or `(unhealthy)`. `rest` and `edge_runtime`
+expose no health check, which is normal for those images. Container logs were
+never dumped, because the Vector configuration carries a generated local analytics
+key.
+
+### Resolved review finding M2 — unsafe verification example
+
+The Verification block previously showed bare `supabase start` and `supabase stop`,
+which would print the API URL, anon key, service-role key, JWT secret, and database
+URL into any capturing terminal or transcript. The block now redirects both with
+`*> $null`, checks `$LASTEXITCODE`, and judges health from `docker ps` container
+names and status. It also states explicitly that `db:status` output is
+credential-bearing and must never be pasted into a packet, review artifact, commit,
+or AI prompt.
+
 ### Known limitation
 
-`supabase_vector_platform`, the log-collector sidecar, enters a restart loop on
-this Windows/WSL 2 host (repeated exit code 0). `supabase start` still returns exit
-0, and every service required for database and authorization work —
-`db`, `auth`, `rest`, `kong`, `storage`, `realtime`, `pg_meta`, `studio`,
-`analytics`, `inbucket` — reports healthy. This affects local log aggregation
-only. Container logs were not dumped, because the vector configuration carries a
-generated local analytics key.
+Local log aggregation is unavailable while Analytics is disabled. Supabase Studio's
+Logs section will be empty locally. This does not affect the hosted project, and
+nothing in TASK-007 or the planned schema/RLS work depends on it.
 
 ## Required handoff
 

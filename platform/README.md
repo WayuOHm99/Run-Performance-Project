@@ -115,6 +115,14 @@ $LASTEXITCODE
 docker ps
 ```
 
-Generated local runtime state is ignored through `platform/supabase/.gitignore`;
-Docker volumes live outside the repository. Nothing produced by the local stack
-belongs in a commit.
+Generated local runtime state is ignored through `platform/supabase/.gitignore`
+and `platform/.prettierignore`; Docker volumes live outside the repository.
+Nothing produced by the local stack belongs in a commit.
+
+### Disabled local services
+
+`[analytics] enabled = false` in `platform/supabase/config.toml`. Logflare and its
+Vector log collector are not needed for database or authorization work, and the
+Vector container restart-loops on Docker Desktop's WSL 2 backend. The trade-off is
+that Studio's local Logs section stays empty. Re-enable it only in a task that
+genuinely needs local log aggregation.
