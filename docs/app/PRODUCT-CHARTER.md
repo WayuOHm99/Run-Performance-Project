@@ -89,6 +89,25 @@ Sleep exclusions:
 - HRV, resting HR, SpO2, respiration, and temperature;
 - diagnosis or a red flag derived from sleep alone.
 
+## Garmin restriction
+
+Approved Product Owner decision, recorded 2026-07-28 (TASK-010). This is the
+source of truth and overrides any earlier wording that read as a mere MVP
+deferral.
+
+- The app **does not use** the Garmin Developer Program or any Garmin API.
+- There is **no** Garmin OAuth, token, webhook, SDK, or direct Garmin Connect
+  integration, and none will be added.
+- The new app **must not reuse** the protected legacy Garmin system or its data.
+  The legacy system remains a separate live coaching operation.
+- Wearable integration is limited to **Apple HealthKit and Android Health
+  Connect**.
+- Garmin compatibility **must not be marketed** or relied upon, in store
+  listings, onboarding copy, screenshots, or support material.
+
+This restriction is binding and remains in force unless the Product Owner
+explicitly changes it in a future approved decision.
+
 ## MVP data categories
 
 - Profile and role
@@ -107,7 +126,7 @@ Sleep exclusions:
 - Live GPS tracking
 - Direct Bluetooth watch pairing
 - Raw GPS routes or raw heart-rate series
-- Direct Garmin integration in the MVP
+- Any Garmin integration, in the MVP or after it — see "Garmin restriction"
 - Strava data in the coach dashboard
 - Writing planned workouts back to a watch
 - Meal plans, medical diagnosis, or automated coaching decisions

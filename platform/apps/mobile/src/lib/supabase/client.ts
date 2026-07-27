@@ -1,15 +1,21 @@
 import "react-native-url-polyfill/auto";
 
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createClient, processLock } from "@supabase/supabase-js";
 import { AppState, Platform, type NativeEventSubscription } from "react-native";
 
 import type { AppSupabaseClient } from "./app-client";
+import { createAuthPersistenceOptions } from "./auth-options";
 import type { Database } from "./database.types";
 import {
   readPublicSupabaseEnvironment,
   type PublicSupabaseEnvironment,
 } from "./environment";
+import {
+  nativeCiphertextStore,
+  nativeSessionCrypto,
+  nativeSessionKeyStore,
+} from "./native-session-storage";
+import { createSecureSessionStorage } from "./secure-session-storage";
 
 // The client carries the generated schema types, so a typo in a column name or
 // a table this app holds no grant on fails at typecheck rather than at runtime.
@@ -21,12 +27,21 @@ let appStateSubscription: NativeEventSubscription | undefined;
 function createConfiguredClient(
   environment: PublicSupabaseEnvironment,
 ): AppSupabaseClient {
+  // Native stores an AES-256-GCM envelope; the session never reaches
+  // AsyncStorage in readable form. Web persists nothing. See `auth-options.ts`.
+  const persistence = createAuthPersistenceOptions({
+    isWeb: Platform.OS === "web",
+    createStorage: () =>
+      createSecureSessionStorage({
+        keys: nativeSessionKeyStore,
+        ciphertexts: nativeCiphertextStore,
+        crypto: nativeSessionCrypto,
+      }),
+  });
+
   return createClient<Database>(environment.url, environment.publishableKey, {
     auth: {
-      ...(Platform.OS === "web" ? {} : { storage: AsyncStorage }),
-      autoRefreshToken: true,
-      persistSession: true,
-      detectSessionInUrl: false,
+      ...persistence,
       lock: processLock,
     },
   });

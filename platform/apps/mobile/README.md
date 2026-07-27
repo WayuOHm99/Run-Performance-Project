@@ -111,11 +111,67 @@ Never put a secret or legacy service-role key in this mobile project. Every
 `EXPO_PUBLIC_` value is bundled into the application and is readable by end
 users. See `docs/app/SUPABASE-ENVIRONMENT.md` for the complete boundary.
 
-The client uses AsyncStorage for native session persistence, browser storage on
-web, and foreground-only native token refresh.
+## Session storage
 
-> **SecureStore hardening is required before pilot release, and mandatory before
-> any health data is added.** Supabase session tokens currently persist in
-> AsyncStorage, which is not encrypted at rest on device. This is acceptable only
-> while the app holds no health data. Carrying it into a build that touches RPE,
-> pain/injury, sleep, heart rate, or workout data would be a privacy regression.
+Native session persistence is **encrypted**. TASK-010 replaced the plaintext
+AsyncStorage adapter that TASK-009 shipped.
+
+| Where            | What is stored                                                |
+| ---------------- | ------------------------------------------------------------- |
+| Expo SecureStore | the AES-256 key, and nothing else                             |
+| AsyncStorage     | a versioned AES-256-GCM ciphertext envelope, and nothing else |
+
+The session JSON, the access and refresh tokens, the email, the user id, and the
+claims are never written to either backend in readable form.
+
+- `secure-session-storage.ts` — the `SupportedStorage` adapter. Platform-free:
+  the keystore, the ciphertext store, and the AES-GCM primitive are injected as
+  ports, which is what lets the whole failure matrix be tested in plain Node.
+- `native-session-storage.ts` — the thin binding onto Expo SecureStore, Expo
+  Crypto, and AsyncStorage.
+- `auth-options.ts` — the web/native persistence decision.
+
+Expo SDK 56's `expo-crypto` provides authenticated AES-GCM natively, so no
+third-party AES library is used. **Never substitute an unauthenticated mode such
+as AES-CTR**: tamper detection is the point, not merely confidentiality.
+
+### Fail closed, never fall back
+
+A missing key, a missing ciphertext, a legacy plaintext value, a malformed
+envelope, an unknown version, a failed authentication tag, and a backend that
+throws all resolve to "no session", which the gate reads as signed-out. There is
+no code path that returns a session GCM did not authenticate.
+
+A leftover TASK-009 plaintext session is **deleted, never migrated**, and the
+user signs in again. Its value is never parsed for content, displayed, logged,
+or included in an error.
+
+Errors leaving the adapter are `SessionStorageError` with a message from a
+closed set and no `cause`, so a raw native error, a storage value, a key, a
+token, an email, or a user id cannot escape through something a caller renders.
+
+### Web
+
+Web sets `persistSession: false` and supplies no storage at all, so a refresh
+requires signing in again. Web is an export and smoke-test target here, not a
+production dashboard.
+
+### Device configuration
+
+The SecureStore key uses `WHEN_UNLOCKED_THIS_DEVICE_ONLY` and one stable
+`keychainService` across read, write, and delete. `requireAuthentication` is
+deliberately **off** — biometric prompts are out of scope — and the config
+plugin is set with `faceIDPermission: false` so no Face ID usage string is
+added.
+
+`configureAndroidBackup` keeps the SecureStore entry out of Android cloud backup
+and device transfer. AsyncStorage is still backed up, so a restored device
+carries an envelope with no key; that decrypts to nothing and fails closed to
+sign-in, which is the intended outcome.
+
+> **Not yet proven on a real device.** The unit tests use injected ports. No
+> claim is made about real iOS Keychain or Android Keystore behaviour.
+> On-device SecureStore verification is a mandatory pre-pilot quality gate.
+
+> App Store export-compliance for encryption has **not** been declared. Treat it
+> as a required release check before any store submission.
