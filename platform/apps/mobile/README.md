@@ -48,3 +48,13 @@ also distinguish:
 No state library is installed yet. Local React state is sufficient until a real
 flow requires shared client state; TanStack Query will be evaluated when the
 backend integration begins.
+
+## Supabase environment
+
+The hosted project identity is documented, but this app does not initialize a
+Supabase client yet. Before the later integration task, copy `.env.example` to
+`.env.local` and enter only the current publishable key.
+
+Never put a secret or legacy service-role key in this mobile project. Every
+`EXPO_PUBLIC_` value is bundled into the application and is readable by end
+users. See `docs/app/SUPABASE-ENVIRONMENT.md` for the complete boundary.
