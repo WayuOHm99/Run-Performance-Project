@@ -11,8 +11,10 @@ Reviewer:        ChatGPT/Codex (read-only). No AGY reviewer.
 Branch:          feat/TASK-010-secure-session-storage
 Worktree:        isolated, based on feat/mobile-foundation
 Base commit:     8a6c3ab57326df4b68932d045e7d4d3ae04fdca6
-Implementation:  b6fe9b2eff5cd4e08b105f0209f1919c245e60da
-Handoff commit:  documentation-only follow-up to the above
+Round 1 implementation:  b6fe9b2eff5cd4e08b105f0209f1919c245e60da
+Round 1 handoff:         ac415e4c306d6c90b5ac9fca635b458bd52e633b
+Round 2 fix (F1, F2):    8dd6ae717814b57e392658c09be29ac4d584f3d0
+Round 2 handoff:         documentation-only follow-up; this is the head
 ```
 
 Nothing has been merged, pushed, deployed, linked, or migrated. The branch and
@@ -22,10 +24,10 @@ worktree are left in place.
 
 Both findings were accepted as correct. Neither was disputed.
 
-| Finding | Severity | Status |
-| --- | --- | --- |
-| 1 — protected-path deny rules do not cover worktrees | High | **Fixed**, but the rules are **unverified in-session**; see below |
-| 2 — partial storage removal may leave protected routing open in memory | Medium | **Fixed** and proved by mutation testing |
+| Finding                                                                | Severity | Status                                                            |
+| ---------------------------------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| 1 — protected-path deny rules do not cover worktrees                   | High     | **Fixed**, but the rules are **unverified in-session**; see below |
+| 2 — partial storage removal may leave protected routing open in memory | Medium   | **Fixed** and proved by mutation testing                          |
 
 Finding 1's remediation carries an important caveat: Claude Code reads its
 settings at launch, so a session cannot validate its own settings edits. The
@@ -116,21 +118,21 @@ never written to either backend in readable form.
 
 ### Round 2 — Finding 1 (deny rules)
 
-| File | Change |
-| --- | --- |
-| `docs/app/claude-app-settings.json` | worktree deny rules for all nine protected paths; canary rules. 34 → 63 rules, none removed or weakened |
-| `docs/app/permission-canary/CANARY.md` | **new** synthetic verification fixture |
-| `docs/app/CLAUDE-CODE-SETUP.md` | worktree rule explanation; canary-based verification; settings-load-at-launch warning |
+| File                                   | Change                                                                                                  |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `docs/app/claude-app-settings.json`    | worktree deny rules for all nine protected paths; canary rules. 34 → 63 rules, none removed or weakened |
+| `docs/app/permission-canary/CANARY.md` | **new** synthetic verification fixture                                                                  |
+| `docs/app/CLAUDE-CODE-SETUP.md`        | worktree rule explanation; canary-based verification; settings-load-at-launch warning                   |
 
 ### Round 2 — Finding 2 (sign-out)
 
-| File | Change |
-| --- | --- |
-| `src/features/auth/sign-out.ts` | **new** — `performSignOut`, closes locally before any I/O |
-| `src/features/auth/sign-out.test.ts` | **new** — 12 integration-oriented tests |
-| `src/features/auth/auth-state.ts` | new `sign-out-initiated` event |
-| `src/features/auth/auth-state.test.ts` | 4 tests for the new event |
-| `src/features/auth/auth-provider.tsx` | hoisted `claimToken`; `signOut` delegates to `performSignOut` |
+| File                                   | Change                                                        |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `src/features/auth/sign-out.ts`        | **new** — `performSignOut`, closes locally before any I/O     |
+| `src/features/auth/sign-out.test.ts`   | **new** — 12 integration-oriented tests                       |
+| `src/features/auth/auth-state.ts`      | new `sign-out-initiated` event                                |
+| `src/features/auth/auth-state.test.ts` | 4 tests for the new event                                     |
+| `src/features/auth/auth-provider.tsx`  | hoisted `claimToken`; `signOut` delegates to `performSignOut` |
 
 `auth-provider.tsx` and `auth-state.ts` are TASK-009 files. The task packet
 allows "narrowly required TASK-009 auth integration/tests only if necessary to
@@ -253,6 +255,31 @@ change, so no pgTAP rerun was required, and none was performed.
 | `expo export --platform web`              | exit 0, 13 static routes                 |
 | `git diff --check`                        | clean                                    |
 | `git status --short`                      | owned paths only                         |
+
+### Round 2 re-run
+
+| Command                                   | Result                                                      |
+| ----------------------------------------- | ----------------------------------------------------------- |
+| `corepack pnpm install --frozen-lockfile` | exit 0, already up to date                                  |
+| `corepack pnpm format:check`              | exit 0                                                      |
+| `corepack pnpm lint`                      | exit 0                                                      |
+| `corepack pnpm typecheck`                 | exit 0                                                      |
+| `corepack pnpm test`                      | **327 passed, 18 files** (+16)                              |
+| `corepack pnpm dlx expo-doctor@latest`    | **21/21 checks passed**                                     |
+| `expo export --platform web`              | exit 0, 13 static routes                                    |
+| `git diff --check`                        | clean                                                       |
+| `git status --short`                      | owned paths only; **no database or migration file changed** |
+
+The round-2 web export used a **fully synthetic** project URL
+(`https://synthetic-local.supabase.co`) rather than the real project identifier,
+together with `EXPO_NO_DOTENV=1` and a synthetic publishable key. The export
+succeeds without any hosted-project identifier, so no real value was needed.
+
+**Mutation test.** Reverting `performSignOut` to the old await-first ordering
+fails 4 tests — both routing cases, the ordering case, and the exposure trace —
+confirming the new tests encode the reported defect rather than passing
+alongside it. The implementation was restored immediately and the full suite
+re-run.
 
 The web export ran with `EXPO_NO_DOTENV=1` plus synthetic public values, so the
 local `.env.local` never entered the process and no real key could reach a build
@@ -391,7 +418,7 @@ decision text came from the Product Owner's instruction, not from reading
 protected-read verification step of `docs/app/CLAUDE-CODE-SETUP.md`. This
 handoff previously described the episode only as an "environment finding" and
 stated elsewhere that "No protected legacy path was accessed". **That claim was
-wrong and has been removed.** A protected legacy path *was* read.
+wrong and has been removed.** A protected legacy path _was_ read.
 
 Precisely what occurred:
 
@@ -412,7 +439,7 @@ project-relative paths and repository-root absolute paths
 checkout at `.claude/worktrees/<name>/` with **its own copy of every protected
 file**, and no rule matched that location. The read rule therefore never fired.
 
-The failure was confined to the *read* rule. `claudeMdExcludes: ["**/CLAUDE.md"]`
+The failure was confined to the _read_ rule. `claudeMdExcludes: ["**/CLAUDE.md"]`
 is a recursive glob and did match, so auto-loading was correctly prevented and
 the coaching context was never loaded into the session's memory.
 
@@ -465,7 +492,7 @@ Deliberately **not** done: the real `CLAUDE.md` was not read again as part of
 this verification. Doing so would have re-exposed protected content and proved
 nothing that the canary had not already established.
 
-What *was* validated statically: the JSON parses, all 63 rules are well-formed,
+What _was_ validated statically: the JSON parses, all 63 rules are well-formed,
 there are no duplicates, all nine protected paths have worktree coverage, and
 the worktree pattern mirrors the shape of the existing rules.
 
@@ -498,7 +525,7 @@ used. `.env.local` was not read and no credential-bearing output was printed. No
 branch or worktree was deleted, and no force Git operation was used.
 
 **Protected legacy paths — corrected statement.** One protected legacy path
-*was* accessed: five lines of the worktree copy of `CLAUDE.md`, during the
+_was_ accessed: five lines of the worktree copy of `CLAUDE.md`, during the
 documented protected-read verification step, before the deny rules covered
 worktrees. Reading stopped immediately, nothing was copied onward, and no
 protected legacy path has been modified at any point in this task. No other
