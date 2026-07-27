@@ -18,6 +18,59 @@ Handoff commit:  documentation-only follow-up to the above
 Nothing has been merged, pushed, deployed, linked, or migrated. The branch and
 worktree are left in place.
 
+## Round 2 — Codex findings 1 and 2
+
+Both findings were accepted as correct. Neither was disputed.
+
+| Finding | Severity | Status |
+| --- | --- | --- |
+| 1 — protected-path deny rules do not cover worktrees | High | **Fixed**, but the rules are **unverified in-session**; see below |
+| 2 — partial storage removal may leave protected routing open in memory | Medium | **Fixed** and proved by mutation testing |
+
+Finding 1's remediation carries an important caveat: Claude Code reads its
+settings at launch, so a session cannot validate its own settings edits. The
+rules are written and statically validated but **must be confirmed in a fresh
+session** before being trusted. Details in "Protected-path incident and
+remediation".
+
+### Finding 2 — how it was fixed
+
+Codex was exactly right about the mechanism. `AuthProvider.signOut` awaited
+`signOutGlobally()` and only then cleared the identity and cache. Supabase's
+`_removeSession` stops before emitting `SIGNED_OUT` when `storage.removeItem()`
+throws, and TASK-010's adapter throws by design when either backend fails to
+remove its half. So on precisely the failure that matters, no `SIGNED_OUT`
+arrived, the awaited call rejected, and the previous identity plus its protected
+routes stayed live until the app restarted.
+
+The fix inverts the order: **close locally first, then talk to the server.**
+
+- A new `sign-out-initiated` event in `auth-state.ts` settles the reducer
+  straight to signed-out — identity `null`, candidate `null` — and advances
+  `appliedToken` to the newly claimed token. That second part is load-bearing:
+  every in-flight validation carries an older token, so `canApplyValidation`
+  rejects it on the equality check and a late result cannot resurrect the
+  identity that was just closed.
+- It settles to `settled`, not `verifying`, deliberately. `verifying` would have
+  stranded the user on the loading screen for as long as Supabase withheld its
+  event — which, when storage removal throws, is forever. `settled` makes the
+  gate report `signed-out` and route to sign-in at once.
+- `performSignOut` in the new `sign-out.ts` dispatches that event and clears the
+  auth-scoped cache **before any `await`**, so there is no suspension point at
+  which the old identity is still readable. The remote call still runs, and its
+  failure is still reported, but only after local access is already closed.
+- The adapter's behaviour is unchanged: it still attempts both backends and
+  still reports a sanitized failure.
+
+The orchestration was extracted out of the component specifically so this
+ordering is testable against the real reducer and the real gate without adding a
+renderer dependency.
+
+**Mutation-tested.** Reverting `performSignOut` to the old await-first order
+fails 4 of the new tests, including "closes athlete and coach routing when
+sign-out throws and no SIGNED_OUT arrives". The tests encode the reported defect
+rather than merely passing alongside it.
+
 ## What changed and why
 
 TASK-009 persisted the Supabase session as plaintext JSON in AsyncStorage, and
@@ -60,6 +113,29 @@ never written to either backend in readable form.
 ### New — documentation (2)
 
 `docs/app/tasks/TASK-010-secure-session-storage.md`, `docs/app/handoffs/TASK-010.md`
+
+### Round 2 — Finding 1 (deny rules)
+
+| File | Change |
+| --- | --- |
+| `docs/app/claude-app-settings.json` | worktree deny rules for all nine protected paths; canary rules. 34 → 63 rules, none removed or weakened |
+| `docs/app/permission-canary/CANARY.md` | **new** synthetic verification fixture |
+| `docs/app/CLAUDE-CODE-SETUP.md` | worktree rule explanation; canary-based verification; settings-load-at-launch warning |
+
+### Round 2 — Finding 2 (sign-out)
+
+| File | Change |
+| --- | --- |
+| `src/features/auth/sign-out.ts` | **new** — `performSignOut`, closes locally before any I/O |
+| `src/features/auth/sign-out.test.ts` | **new** — 12 integration-oriented tests |
+| `src/features/auth/auth-state.ts` | new `sign-out-initiated` event |
+| `src/features/auth/auth-state.test.ts` | 4 tests for the new event |
+| `src/features/auth/auth-provider.tsx` | hoisted `claimToken`; `signOut` delegates to `performSignOut` |
+
+`auth-provider.tsx` and `auth-state.ts` are TASK-009 files. The task packet
+allows "narrowly required TASK-009 auth integration/tests only if necessary to
+enforce fail-closed storage behaviour", which is exactly what Finding 2 is. No
+TASK-009 behaviour was otherwise altered, and all 265 original tests still pass.
 
 **No database file changed.** TASK-010 owns no database change, and no
 migration, pgTAP test, or generated type was touched. No TASK-009 auth file
@@ -307,25 +383,98 @@ decision text came from the Product Owner's instruction, not from reading
    enumeration resistance while email confirmation is disabled, and the possible
    network round trip in `getClaims()`.
 
-## Environment finding, outside the task's owned paths
+## Protected-path incident and remediation (Codex Finding 1, High)
 
-Reported for follow-up; **not fixed here**, because
-`docs/app/claude-app-settings.json` is not an owned path for this task.
+### What happened
 
-The deny rules in that file use repository-root absolute paths
-(`//d/Run-Performance-Project/CLAUDE.md`). A Claude Code worktree session runs
-from `.claude/worktrees/<name>/`, which contains its own copy of `CLAUDE.md`
-that those rules do not match, so the protected-read check in
-`docs/app/CLAUDE-CODE-SETUP.md` step 6 did **not** deny as documented.
+**Five lines of the worktree copy of `CLAUDE.md` were accessed** during the
+protected-read verification step of `docs/app/CLAUDE-CODE-SETUP.md`. This
+handoff previously described the episode only as an "environment finding" and
+stated elsewhere that "No protected legacy path was accessed". **That claim was
+wrong and has been removed.** A protected legacy path *was* read.
 
-What still held: `claudeMdExcludes: ["**/CLAUDE.md"]` is a glob and did prevent
-auto-loading, so the coaching brain was never loaded into the session's memory.
-Five lines were read during the documented verification step and reading stopped
-immediately; the Product Owner was informed and directed the task to continue.
+Precisely what occurred:
 
-Suggested fix: add worktree-covering entries, for example
-`Read(//d/Run-Performance-Project/.claude/worktrees/**/CLAUDE.md)`, alongside the
-existing root entries, and likewise for the other protected paths.
+- The read returned the first five lines of the worktree copy of `CLAUDE.md`.
+- Reading **stopped immediately**. No further read of that file was made.
+- **No content was copied onward** — not into any committed file, task packet,
+  handoff, commit message, test fixture, or review artifact. Nothing from it is
+  quoted anywhere in this repository.
+- **No protected file was modified.** The access was read-only, and no protected
+  legacy path has been edited at any point in TASK-010.
+- The Product Owner was informed immediately and directed the task to continue.
+
+### Root cause
+
+The deny rules in `docs/app/claude-app-settings.json` were written only as
+project-relative paths and repository-root absolute paths
+(`//d/Run-Performance-Project/CLAUDE.md`). A Claude Code worktree is a full
+checkout at `.claude/worktrees/<name>/` with **its own copy of every protected
+file**, and no rule matched that location. The read rule therefore never fired.
+
+The failure was confined to the *read* rule. `claudeMdExcludes: ["**/CLAUDE.md"]`
+is a recursive glob and did match, so auto-loading was correctly prevented and
+the coaching context was never loaded into the session's memory.
+
+The deeper problem was the verification procedure itself: it asked Claude to
+read the real `CLAUDE.md`, so when the rules were wrong, **the check exposed the
+very content it existed to protect.**
+
+### Remediation
+
+1. **Worktree coverage.** Every protected path now carries three deny entries —
+   project-relative, repository-root absolute, and a worktree form:
+   `//d/Run-Performance-Project/.claude/worktrees/*/<path>`. All nine paths named
+   in the finding are covered (`CLAUDE.md`, `athletes/**`, `team_data/**`,
+   `garmin/**`, `scripts/**`, root `supabase/**`, `.agents/AGENTS.md`,
+   `.claude/settings.json`, `.claude/settings.local.json`), for Read and Edit at
+   each path's existing protection level. **No existing rule was weakened or
+   removed**; 63 rules, no duplicates, no malformed entries.
+2. **A single `*`, not `**`.** The worktree wildcard is anchored at the worktree
+   root so it matches root `supabase/` and `scripts/` without also matching
+   `platform/supabase/`, which app tasks legitimately own and must be able to
+   edit. A `**` form would have silently broken every future app task.
+3. **A synthetic canary replaces the dangerous check.**
+   `docs/app/permission-canary/CANARY.md` contains no athlete data, coaching
+   context, or secret, and its deny rules are written in the **same shape** as
+   the protected ones, including the `worktrees/*/` wildcard. Verification now
+   reads the canary, so a misconfiguration is detected without ever requesting a
+   protected file.
+4. **`CLAUDE-CODE-SETUP.md` updated** with the worktree explanation, the canary
+   procedure, and the fact that settings are read at launch.
+
+### Sanitized verification result — read this before trusting the rules
+
+**The new rules could not be verified inside this session, and are therefore
+NOT yet proven to work.**
+
+Claude Code loads `--settings` at launch. Editing the settings file mid-session
+does not change that session's permissions, so a session cannot validate its own
+settings edits.
+
+This was established without touching any protected file. The canary was read
+and returned content, which alone is ambiguous — it could mean the rules are not
+loaded, or that the `worktrees/*/` glob is wrong. To isolate the variable, a
+temporary deny rule was added for a **harmless** file
+(`docs/app/README.md`) using an **exact absolute path with no wildcard**. That
+rule did not deny either. Since a wildcard-free exact-path rule also failed, the
+cause is conclusively that **settings are not hot-reloaded**, not that the glob
+syntax is wrong. The temporary rule was then removed.
+
+Deliberately **not** done: the real `CLAUDE.md` was not read again as part of
+this verification. Doing so would have re-exposed protected content and proved
+nothing that the canary had not already established.
+
+What *was* validated statically: the JSON parses, all 63 rules are well-formed,
+there are no duplicates, all nine protected paths have worktree coverage, and
+the worktree pattern mirrors the shape of the existing rules.
+
+**Required next step, for the Product Owner or Codex:** relaunch a Claude Code
+worktree session with the updated settings and run step 7 of
+`CLAUDE-CODE-SETUP.md` — ask it to read
+`docs/app/permission-canary/CANARY.md`. A denial confirms the identically-shaped
+`CLAUDE.md` rules are live. **Treat the deny rules as unproven until that check
+passes.**
 
 ## Rollback
 
@@ -346,8 +495,18 @@ Nothing was merged, pushed, deployed, linked, or migrated. No local or remote
 migration was run and no database stack was started. No hosted Supabase project
 was linked or contacted, no hosted user was created, and no service-role key was
 used. `.env.local` was not read and no credential-bearing output was printed. No
-protected legacy path was accessed or changed. No branch or worktree was
-deleted, and no force Git operation was used.
+branch or worktree was deleted, and no force Git operation was used.
+
+**Protected legacy paths — corrected statement.** One protected legacy path
+*was* accessed: five lines of the worktree copy of `CLAUDE.md`, during the
+documented protected-read verification step, before the deny rules covered
+worktrees. Reading stopped immediately, nothing was copied onward, and no
+protected legacy path has been modified at any point in this task. No other
+protected legacy path (`athletes/`, `team_data/`, `garmin/`, `scripts/`, root
+`supabase/`) was read or changed. The full incident, root cause, and remediation
+are in "Protected-path incident and remediation" above. During the round-2 fix
+itself, no protected file was read at all — verification used the synthetic
+canary and a harmless `docs/app/README.md` probe instead.
 
 ## Suggested focus for review
 

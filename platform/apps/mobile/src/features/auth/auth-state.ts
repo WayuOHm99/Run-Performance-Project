@@ -74,6 +74,20 @@ export type AuthEvent =
       readonly type: "validation-settled";
       readonly token: SequenceToken;
       readonly identity: AuthenticatedIdentity | null;
+    }
+  /**
+   * The user asked to sign out. Dispatched *before* any I/O runs.
+   *
+   * Supabase stops short of emitting `SIGNED_OUT` when the storage adapter
+   * throws while removing the session, and TASK-010's adapter throws by design
+   * when either backend fails. Waiting for that event would leave the previous
+   * identity and its protected routes live until the app restarted. A sign-out
+   * the user initiated is authoritative about the *local* identity, so it is
+   * applied locally without waiting for anything.
+   */
+  | {
+      readonly type: "sign-out-initiated";
+      readonly token: SequenceToken;
     };
 
 /**
@@ -126,6 +140,29 @@ export function authReducer(state: AuthState, event: AuthEvent): AuthState {
         appliedToken: event.token,
         identity: event.identity,
         candidate: state.candidate,
+      };
+    }
+
+    case "sign-out-initiated": {
+      if (!isNewerSignal(event.token, state.latestToken)) {
+        return state;
+      }
+
+      return {
+        // `settled`, not `verifying`: there is nothing left to verify, and
+        // settling here means the gate reports `signed-out` and routes to
+        // sign-in immediately. Entering `verifying` would strand the user on
+        // the loading screen for as long as Supabase withheld its event —
+        // which, when storage removal throws, is forever.
+        phase: "settled",
+        latestToken: event.token,
+        // Advancing `appliedToken` to the same token is the load-bearing half.
+        // Every in-flight validation carries an older token, so
+        // `canApplyValidation` rejects it on the equality check and a late
+        // result cannot resurrect the identity we just closed.
+        appliedToken: event.token,
+        identity: null,
+        candidate: null,
       };
     }
   }

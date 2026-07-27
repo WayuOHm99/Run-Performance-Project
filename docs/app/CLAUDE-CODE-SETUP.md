@@ -27,6 +27,38 @@ starting Claude Code, then repeat the protected-read check below.
 native Windows paths such as `D:\...` to POSIX form and requires a double slash
 for a filesystem-root absolute rule.
 
+### Worktrees need their own rules
+
+**A worktree is a full checkout, so it has its own copy of every protected
+file**, including `CLAUDE.md`, at
+`.claude/worktrees/<name>/CLAUDE.md`. An absolute rule written for the
+repository root does **not** match that path.
+
+This was a real incident, not a hypothetical: during TASK-010 the protected-read
+check returned five lines of the worktree copy of `CLAUDE.md` because only
+repository-root paths were denied. Auto-loading was still prevented — the
+`claudeMdExcludes` glob covers every copy — but the read rule did not fire.
+
+Every protected path therefore has three deny entries: the project-relative
+form, the repository-root absolute form, and a worktree form using a single
+wildcard for the worktree name:
+
+```text
+Read(//d/Run-Performance-Project/.claude/worktrees/*/CLAUDE.md)
+```
+
+The wildcard is deliberately `*` and not `**`. A worktree rule must be anchored
+at the worktree root so it matches root `supabase/` and `scripts/` without also
+matching the legitimate `platform/supabase/`, which app tasks own and must be
+able to edit.
+
+### Settings are read at launch, not live
+
+Claude Code loads `--settings` when the session starts. **Editing the settings
+file during a session does not change that session's permissions.** After any
+change to the deny list, exit and relaunch before relying on it, and re-run the
+check below. A session cannot validate its own settings edits.
+
 On native Windows these rules protect Claude's built-in Read and Edit tools, but
 Claude Code's OS-level shell sandbox is unavailable. Review every proposed shell
 command before approval. For unattended or higher-assurance sessions, run the
@@ -73,11 +105,34 @@ In the Claude Code session:
 4. Run `/permissions`.
 5. Confirm sensitive `Read(...)`, legacy `Edit(...)`, production MCP, push, and
    deployment rules appear under Deny.
-6. Ask Claude to read the protected root `CLAUDE.md`. It must report that the
-   operation is denied without revealing file contents.
+6. Confirm the deny list contains `worktrees/*/` entries, and that they name the
+   current worktree's location.
+7. Ask Claude to read `docs/app/permission-canary/CANARY.md`. It must report
+   that the operation is denied without revealing file contents.
 
-If the root `CLAUDE.md` appears, stop the session without working and correct the
-launch command.
+If the canary can be read, stop the session without working and correct the
+launch command. If `/memory` shows the root `CLAUDE.md`, stop as well.
+
+### Verify with the canary, never with a real protected file
+
+Step 7 deliberately targets a **synthetic** file. The old procedure asked Claude
+to read the root `CLAUDE.md`, which has an obvious flaw: when the rules are
+wrong, the check itself exposes the content it exists to protect. That is
+precisely how the TASK-010 incident happened.
+
+`docs/app/permission-canary/CANARY.md` holds no athlete data, no coaching
+context, and no secret, and its deny rules are written in the **same shape** as
+the protected ones — including the `worktrees/*/` wildcard. A denial therefore
+proves three things at once:
+
+1. the settings file is actually loaded in this session;
+2. the absolute-path rule syntax is correct for this machine;
+3. the `worktrees/*/` wildcard resolves as the protected-path rules assume.
+
+Because the shapes match, a denied canary means the `CLAUDE.md` rules are denied
+too — established without ever requesting a protected file. Never delete the
+canary or its rules, and if the rule shape for protected paths changes, change
+the canary's rules the same way or it stops proving anything.
 
 ## Claude chat without Claude Code
 

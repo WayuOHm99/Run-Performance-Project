@@ -57,6 +57,16 @@ anything that can read the app's files.
 - `platform/apps/mobile/app.json`
 - `platform/apps/mobile/README.md`
 - `platform/apps/mobile/src/lib/supabase/`
+- narrowly required TASK-009 auth integration and tests, only where necessary to
+  enforce fail-closed storage behaviour
+
+Expanded by Product Owner authorization during round 2, to resolve Codex
+Finding 1:
+
+- `docs/app/claude-app-settings.json`
+- `docs/app/CLAUDE-CODE-SETUP.md`
+- verification helpers under `docs/app/` only
+  (`docs/app/permission-canary/CANARY.md`)
 
 ## Forbidden paths
 
@@ -149,7 +159,10 @@ that is provably unusable is destroyed.
       failure returns no session.
 - [x] Legacy plaintext is deleted and results in signed-out.
 - [x] Storage read/write/remove failures do not open protected routing or reuse
-      an old identity.
+      an old identity. **Extended in round 2:** an initiated sign-out closes the
+      local identity, protected routing, and the auth-scoped cache before any
+      I/O, so a removal failure that stops Supabase emitting `SIGNED_OUT` cannot
+      leave the previous user's routes open.
 - [x] Partial writes are cleaned up; plaintext fallback is impossible.
 - [x] Removal attempts both storage backends even if one operation fails.
 - [x] No token, key, ciphertext, storage value, raw native error, email, or user
@@ -193,6 +206,25 @@ All present in `secure-session-storage.test.ts` unless noted.
 - sanitized errors carrying no `cause` and no marker
 - web configuration cannot persist a session (`auth-options.test.ts`)
 - storage failure cannot authorize athlete or coach routing
+
+Added in round 2 for Codex Finding 2, in `sign-out.test.ts` and
+`auth-state.test.ts`. These drive the real reducer and the real gate rather than
+asserting on ports:
+
+- a successful sign-out closes the identity and clears the cache
+- a sign-out that throws, with no `SIGNED_OUT` emitted, still closes athlete and
+  coach routing
+- a partial storage removal does not reuse the old identity
+- the cache is cleared before the remote call is awaited, not after
+- a delayed stale validation for the previous user cannot reopen a route
+- a delayed stale auth event observed before the sign-out cannot reopen a route
+- an exposure trace proving user A never reappears after sign-out
+- a genuine later sign-in still works, so sign-out fails closed without latching
+- repeated sign-outs are idempotent
+- the reported error carries no token, key, email, user id, or native error text
+- nothing is logged on either the success or the failure path
+- reducer-level: settles immediately, advances `appliedToken`, is ignored when a
+  newer signal was already observed, and leaves both role areas closed
 
 ## Privacy classification
 
@@ -248,7 +280,18 @@ If any database file changes unexpectedly, stop.
   attempted. Removing the key alone already renders a surviving envelope
   undecryptable, so the realistic single-side failure still ends in signed-out.
   Only a simultaneous failure of both removals leaves a restorable session, and
-  that session must still pass TASK-009 JWT verification.
+  that session must still pass TASK-009 JWT verification. Since round 2, local
+  access is closed regardless: the identity, protected routing, and auth-scoped
+  cache are dropped before any removal is attempted, so a failure here can leave
+  bytes on disk but cannot keep a route open.
+- **A failed global sign-out is reported but not retried.** The user is signed
+  out locally and sees a sanitized error; other devices may still hold a valid
+  session until their own tokens expire. There is no retry queue in this task.
+- **The deny-rule fix is unverified in-session.** Claude Code reads its settings
+  at launch, so the worktree rules added in round 2 could not be exercised from
+  the session that wrote them. They are statically validated only. Confirm with
+  the canary check in `CLAUDE-CODE-SETUP.md` from a fresh session before relying
+  on them.
 - **A write failure signs the user out.** When the ciphertext write fails, the
   key is purged too, which makes any previous envelope unreadable. This is
   deliberate — an inconsistent key/ciphertext pair is worse — but it means a

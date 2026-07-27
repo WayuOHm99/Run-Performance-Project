@@ -360,6 +360,76 @@ describe("cancelled and unmounted results", () => {
   });
 });
 
+describe("sign-out-initiated", () => {
+  it("settles immediately as signed out rather than waiting to verify", () => {
+    const signedIn = settledAs(1, USER_A);
+
+    const after = authReducer(signedIn, {
+      type: "sign-out-initiated",
+      token: 2,
+    });
+
+    expect(after.identity).toBeNull();
+    expect(after.candidate).toBeNull();
+    // Settled, so the gate reports signed-out instead of stranding the user on
+    // the loading screen when Supabase never emits SIGNED_OUT.
+    expect(isAuthSettled(after)).toBe(true);
+    expect(isVerificationPending(after)).toBe(false);
+  });
+
+  it("advances appliedToken so an in-flight validation cannot reapply", () => {
+    const signedIn = settledAs(1, USER_A);
+
+    const after = authReducer(signedIn, {
+      type: "sign-out-initiated",
+      token: 3,
+    });
+
+    expect(after.latestToken).toBe(3);
+    expect(after.appliedToken).toBe(3);
+    // Token 2's validation was in flight across the sign-out.
+    expect(canApplyValidation(2, after)).toBe(false);
+    // And the sign-out's own token cannot be reused to apply an identity.
+    expect(canApplyValidation(3, after)).toBe(false);
+  });
+
+  it("is ignored when a newer signal has already been observed", () => {
+    const newer = run([
+      { type: "signal-observed", token: 5, candidate: candidate("user-b") },
+    ]);
+
+    // A stale sign-out must not outrank a newer observation.
+    expect(authReducer(newer, { type: "sign-out-initiated", token: 4 })).toBe(
+      newer,
+    );
+  });
+
+  it("keeps both role areas closed afterwards", () => {
+    const after = authReducer(settledAs(1, USER_A), {
+      type: "sign-out-initiated",
+      token: 2,
+    });
+
+    const gate = resolveAuthGate({
+      sessionRestored: isAuthSettled(after),
+      identity: authIdentity(after),
+      awaitingEmailConfirmation: false,
+      account: {
+        kind: "loaded",
+        displayName: "Athlete A",
+        memberships: [
+          { team_id: "t1", role: "athlete", status: "active" },
+          { team_id: "t2", role: "coach", status: "active" },
+        ],
+      },
+    });
+
+    expect(gate.status).toBe("signed-out");
+    expect(canEnterRoleArea(gate, "athlete")).toBe(false);
+    expect(canEnterRoleArea(gate, "coach")).toBe(false);
+  });
+});
+
 describe("identity exposure is guarded by the phase", () => {
   it("never exposes an identity while restoring", () => {
     expect(

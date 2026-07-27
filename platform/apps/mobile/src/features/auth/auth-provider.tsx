@@ -32,6 +32,7 @@ import {
   readSessionCandidate,
   type AuthenticatedIdentity,
 } from "./session";
+import { performSignOut } from "./sign-out";
 
 type AuthContextValue = {
   readonly client: AppSupabaseClient;
@@ -72,17 +73,21 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const issuedToken = useRef<SequenceToken>(INITIAL_AUTH_STATE.latestToken);
 
+  // Hoisted so sign-out draws from the same sequence as the auth listener and
+  // the restore. A sign-out that claimed a token from anywhere else could be
+  // outranked by an event observed before it.
+  const claimToken = useCallback((): SequenceToken => {
+    issuedToken.current = nextSequenceToken(issuedToken.current);
+
+    return issuedToken.current;
+  }, []);
+
   // Tracks the identity the cache currently belongs to, so a change can be
   // detected without adding the identity to an effect dependency.
   const cachedIdentity = useRef<AuthenticatedIdentity | null>(null);
 
   useEffect(() => {
     let active = true;
-
-    const claimToken = (): SequenceToken => {
-      issuedToken.current = nextSequenceToken(issuedToken.current);
-      return issuedToken.current;
-    };
 
     const observe = (token: SequenceToken, session: unknown) => {
       if (!active) {
@@ -120,7 +125,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       active = false;
       data.subscription.unsubscribe();
     };
-  }, [client]);
+  }, [client, claimToken]);
 
   const { phase, latestToken, candidate } = authState;
 
@@ -165,13 +170,23 @@ export function AuthProvider({ children }: PropsWithChildren) {
     cachedIdentity.current = identity;
   }, [identity, queryClient]);
 
-  const signOut = useCallback(async () => {
-    await signOutGlobally(client);
-    // onAuthStateChange clears the cache on the resulting identity change; this
-    // is belt and braces for the case where the event is delayed.
-    clearAuthScopedQueries(queryClient);
-    setEmailConfirmationRequested(false);
-  }, [client, queryClient]);
+  // Closes the local identity, protected routing, and the auth-scoped cache
+  // before any I/O, so a storage-removal failure — which stops Supabase from
+  // emitting SIGNED_OUT — cannot leave the previous user's routes open. See
+  // `sign-out.ts` for why waiting on the remote call was the wrong order.
+  const signOut = useCallback(
+    () =>
+      performSignOut({
+        claimToken,
+        dispatch,
+        clearAuthScopedCache: () => {
+          clearAuthScopedQueries(queryClient);
+          setEmailConfirmationRequested(false);
+        },
+        signOutGlobally: () => signOutGlobally(client),
+      }),
+    [claimToken, client, queryClient],
+  );
 
   const beginEmailConfirmation = useCallback(() => {
     setEmailConfirmationRequested(true);
