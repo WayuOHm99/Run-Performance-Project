@@ -27,6 +27,41 @@ export type Database = {
         };
         Relationships: [];
       };
+      sharing_grants: {
+        Row: {
+          athlete_profile_id: string;
+          data_category: string;
+          granted_at: string;
+          id: string;
+          revoked_at: string | null;
+          team_id: string;
+        };
+        Insert: {
+          athlete_profile_id: string;
+          data_category: string;
+          granted_at?: string;
+          id?: string;
+          revoked_at?: string | null;
+          team_id: string;
+        };
+        Update: {
+          athlete_profile_id?: string;
+          data_category?: string;
+          granted_at?: string;
+          id?: string;
+          revoked_at?: string | null;
+          team_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "sharing_grants_membership_fkey";
+            columns: ["team_id", "athlete_profile_id"];
+            isOneToOne: false;
+            referencedRelation: "team_memberships";
+            referencedColumns: ["team_id", "profile_id"];
+          },
+        ];
+      };
       team_memberships: {
         Row: {
           created_at: string;
@@ -95,7 +130,14 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
-      [_ in never]: never;
+      grant_team_data_sharing: {
+        Args: { p_data_category: string; p_team_id: string };
+        Returns: string;
+      };
+      revoke_team_data_sharing: {
+        Args: { p_data_category: string; p_team_id: string };
+        Returns: string;
+      };
     };
     Enums: {
       [_ in never]: never;

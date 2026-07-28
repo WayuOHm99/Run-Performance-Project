@@ -999,14 +999,14 @@ select is(
   (select count(*)::int from pg_catalog.pg_proc p
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'private'),
-  4,
-  'all four helpers live in the private schema'
+  7,
+  'every private function lives in the private schema: four from TASK-008 and three from TASK-011'
 );
 select is(
   (select count(*)::int from pg_catalog.pg_proc p
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'private' and p.prosecdef),
-  4,
+  7,
   'every private helper is SECURITY DEFINER'
 );
 select is(
@@ -1014,7 +1014,7 @@ select is(
     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'private'
       and coalesce(array_to_string(p.proconfig, ','), '') like '%search_path=%'),
-  4,
+  7,
   'every private helper pins a search_path'
 );
 select is(
@@ -1025,7 +1025,7 @@ select is(
         select 1 from unnest(p.proconfig) as cfg
         -- PostgreSQL stores an empty search_path canonically as search_path=""
         where cfg in ('search_path=""', 'search_path='))),
-  4,
+  7,
   'every private helper pins an empty search_path'
 );
 select is(
