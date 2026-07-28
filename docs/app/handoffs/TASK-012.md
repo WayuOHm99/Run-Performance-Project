@@ -124,9 +124,13 @@ Two independent layers, in this order:
    `search_path = ''`, `before insert or update`. On insert it overwrites
    `created_at` and `updated_at` with `pg_catalog.now()`, so a row cannot be
    backdated. On update it restores `id`, `athlete_profile_id`,
-   `check_in_date`, and `created_at` from the old row and re-stamps
-   `updated_at`. This keeps decision 4 true for any future writer inside the
-   trusted boundary, not merely for clients.
+   `check_in_date`, and `created_at` from the old row, and sets `updated_at` to
+   `greatest(clock_timestamp(), old.updated_at + interval '1 microsecond')` so
+   it strictly advances while staying database-controlled (Round 2, M2). This
+   keeps decision 4 true for any future writer inside the trusted boundary, not
+   merely for clients. The same trigger also rejects every invalid
+   client-supplied field with one sanitized `22023` error before PostgreSQL can
+   emit a failing-row `DETAIL` (Round 2, M1).
 
 The function name deliberately contains no `health` substring, so the TASK-008
 assertion that no broad health-data authorization helper exists in `private`
@@ -429,7 +433,7 @@ GPT/Codex reviewed Round 1 read-only and raised one high and three medium
 findings. The Product Owner approved all four. No other change was made, no
 approved decision was altered, and AGY was not used.
 
-Round 2 commit: `<recorded below after the commit exists>`
+Round 2 fix commit: `9d6acd3006049cda4d7d6b894baad7026f1b463f` (the commit that applied all four fixes). The branch HEAD is the follow-up documentation-only commit that records this SHA in place of the forward reference. Verify with `git log --oneline`.
 
 ### H1 — the UPDATE tests could not fail
 
