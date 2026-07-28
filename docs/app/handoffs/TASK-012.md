@@ -22,8 +22,10 @@ Status: Implemented and verified locally. Awaiting GPT/Codex read-only review.
   `1f4c4c2a71d8b10d8b3c24a482fd2bdd12225b28`
 - Implementation commit:
   `ec2b72b99d9068c84ce85e96f2cd8d0e53fc5702`
-- Handoff commit: recorded in the commit that adds this file; it is the branch
-  HEAD. Verify with `git rev-parse HEAD` and `git log --oneline`.
+- Handoff commit: `26ca8a98dd0f4301f76abf4bc9044fa0a6cedfec` (the commit that
+  first added this file). The branch HEAD is the follow-up documentation-only
+  commit that records this SHA in place of the forward reference. Verify with
+  `git rev-parse HEAD` and `git log --oneline`.
 - Worktree clean at handoff.
 
 ### Pre-flight
