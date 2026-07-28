@@ -16,7 +16,7 @@ Status: Implemented, awaiting Codex read-only review.
 - Branch: `feat/TASK-011-consent-sharing-grants-rls`
 - Base SHA: `642c3b4faaac5acbb4a63d4fc8caedaf6f35377b`
 - Packet checkpoint commit (documentation only): `5b8eef2`
-- Final commit SHA: see "Commits" below
+- Final commit SHA: `7fe9ad2c9b78db5d78433e355e6384ccca76caba`
 - Worktree clean at handoff.
 
 ### Pre-flight
