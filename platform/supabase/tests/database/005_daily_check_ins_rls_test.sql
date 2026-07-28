@@ -7,9 +7,11 @@
 -- This is the first table in the product that stores protected health data, so
 -- this file is deliberately written not to disclose any. No assertion
 -- description names an RPE, an overall feeling, or a pain status, and no
--- assertion echoes one: every check compares a row count, a column name, an
--- error code, or a snapshot join. A failure therefore reports which
--- authorization rule broke, never a measurement.
+-- assertion echoes one: every check compares a row count, a constant sentinel,
+-- a column name, an error code, a boolean, or a snapshot join. Synthetic
+-- fixture values appear only inside statement text, never in a value an
+-- assertion returns. A failure therefore reports which authorization rule
+-- broke, never a measurement and never a timestamp.
 --
 -- Fixture setup runs as the local database owner. Every authorization assertion
 -- switches to the anon or authenticated role with synthetic JWT claims, so Row
@@ -24,7 +26,7 @@ create extension if not exists pgtap with schema extensions;
 
 set local search_path = public, extensions, pg_catalog;
 
-select plan(166);
+select plan(181);
 
 -- ---------------------------------------------------------------------------
 -- Synthetic fixtures
@@ -246,13 +248,20 @@ select has_trigger('public', 'daily_check_ins', 'daily_check_ins_enforce_columns
 -- These probes use athlete-b and are removed at the end of the section, so the
 -- authorization sections below start from a known state. The out-of-range
 -- literals here are synthetic boundary probes, not anybody's measurements.
+--
+-- Every invalid value is refused with 22023, the sanitized error the trigger
+-- raises, rather than with the native 23514 of the CHECK constraint behind it.
+-- That is the point of the trigger: a native constraint failure would carry a
+-- 'Failing row contains (...)' DETAIL holding the whole protected-health row.
+-- The constraints are still present and still enforce the same rules; section
+-- 3b proves the error a client actually receives discloses nothing.
 
 select throws_ok(
   $$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
              -1, 3, 'none') $$,
-  '23514', null,
+  '22023', null,
   'an rpe below the allowed range is rejected'
 );
 select throws_ok(
@@ -260,7 +269,7 @@ select throws_ok(
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
              11, 3, 'none') $$,
-  '23514', null,
+  '22023', null,
   'an rpe above the allowed range is rejected'
 );
 select throws_ok(
@@ -268,7 +277,7 @@ select throws_ok(
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
              5, 0, 'none') $$,
-  '23514', null,
+  '22023', null,
   'an overall_feeling below the allowed range is rejected'
 );
 select throws_ok(
@@ -276,7 +285,7 @@ select throws_ok(
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
              5, 6, 'none') $$,
-  '23514', null,
+  '22023', null,
   'an overall_feeling above the allowed range is rejected'
 );
 select throws_ok(
@@ -284,7 +293,7 @@ select throws_ok(
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
              5, 3, 'mild') $$,
-  '23514', null,
+  '22023', null,
   'a pain_status outside the two approved values is rejected'
 );
 select throws_ok(
@@ -292,7 +301,7 @@ select throws_ok(
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
              5, 3, '') $$,
-  '23514', null,
+  '22023', null,
   'an empty pain_status is rejected, so there is no free-text escape hatch'
 );
 select throws_ok(
@@ -300,7 +309,7 @@ select throws_ok(
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
              5, 3, 'NONE') $$,
-  '23514', null,
+  '22023', null,
   'pain_status is case-sensitive, so only the two exact approved values pass'
 );
 
@@ -375,12 +384,171 @@ select is(
   0,
   'the row id is immutable after insert'
 );
-select is(
-  (select updated_at from public.daily_check_ins
+-- A forged updated_at is discarded, and the replacement is strictly later than
+-- the value the row already held. created_at is the row's insert-time
+-- updated_at, so comparing against it proves advancement without capturing or
+-- printing either timestamp.
+select ok(
+  (select updated_at > created_at from public.daily_check_ins
     where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
       and check_in_date = date '2026-07-22'),
-  now(),
-  'a supplied updated_at is overwritten with database time on update'
+  'a supplied updated_at is discarded and replaced with a strictly later database time'
+);
+select ok(
+  (select updated_at > now() from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+      and check_in_date = date '2026-07-22'),
+  'the replacement does not come from transaction-stable now(), so it advances inside one transaction'
+);
+
+-- A second update in the same transaction must advance the timestamp again.
+-- Under transaction-stable now() both updates would stamp the same instant.
+create temporary table trusted_update_clock as
+select updated_at
+from public.daily_check_ins
+where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+  and check_in_date = date '2026-07-22';
+
+update public.daily_check_ins
+set rpe = 7
+where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+  and check_in_date = date '2026-07-22';
+
+select ok(
+  (select c.updated_at > k.updated_at
+     from public.daily_check_ins as c
+     cross join trusted_update_clock as k
+    where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+      and c.check_in_date = date '2026-07-22'),
+  'a second update inside the same transaction advances updated_at again'
+);
+select ok(
+  (select c.created_at = now()
+     from public.daily_check_ins as c
+    where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+      and c.check_in_date = date '2026-07-22'),
+  'created_at is unaffected by the advancing updated_at'
+);
+
+-- ---------------------------------------------------------------------------
+-- 3b. A rejected write discloses nothing
+-- ---------------------------------------------------------------------------
+--
+-- The concern is not that an invalid write is refused; it is what the refusal
+-- says. A native NOT NULL or CHECK failure carries a DETAIL naming the failing
+-- column and reproducing the whole row, and that string reaches PostgREST error
+-- objects and logs. These probes capture the four diagnostic fields a client or
+-- a log line can actually observe and assert that all of them are inert.
+--
+-- The helper lives in pg_temp, so it adds no schema surface and no RPC, and it
+-- disappears with the transaction.
+
+create function pg_temp.probe_error(p_sql text)
+returns table (err_state text, err_message text, err_detail text, err_hint text)
+language plpgsql
+as $probe$
+begin
+  execute p_sql;
+  err_state := '<no error>';
+  err_message := '<no error>';
+  err_detail := '';
+  err_hint := '';
+  return next;
+exception when others then
+  get stacked diagnostics
+    err_state = returned_sqlstate,
+    err_message = message_text,
+    err_detail = pg_exception_detail,
+    err_hint = pg_exception_hint;
+  return next;
+end;
+$probe$;
+
+create temporary table rejection_probe as
+select 'out of range' as probe, p.*
+from pg_temp.probe_error(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-28',
+             11, 3, 'none') $$) as p
+union all
+select 'unapproved pain status', p.*
+from pg_temp.probe_error(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-28',
+             5, 3, 'mild') $$) as p
+union all
+select 'null required health field', p.*
+from pg_temp.probe_error(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-28',
+             null, 3, 'none') $$) as p
+union all
+select 'null required identity field', p.*
+from pg_temp.probe_error(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values (null, date '2026-07-28', 5, 3, 'none') $$) as p
+union all
+select 'null required date field', p.*
+from pg_temp.probe_error(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', null, 5, 3, 'none') $$) as p
+union all
+select 'invalid update', p.*
+from pg_temp.probe_error(
+  $$ update public.daily_check_ins set rpe = 11
+      where athlete_profile_id = '00000000-0000-4000-8000-00000000000c' $$) as p;
+
+select is(
+  (select count(*)::int from rejection_probe),
+  6,
+  'six rejection paths were probed, covering range, status, and every required field'
+);
+select is(
+  (select count(distinct err_state)::int from rejection_probe),
+  1,
+  'every rejection path returns the same SQLSTATE, so the error cannot be used to probe which field was wrong'
+);
+select is(
+  (select min(err_state) from rejection_probe),
+  '22023',
+  'that SQLSTATE is the documented sanitized code'
+);
+select is(
+  (select count(distinct err_message)::int from rejection_probe),
+  1,
+  'every rejection path returns the same message text'
+);
+select is(
+  (select min(err_message) from rejection_probe),
+  'daily check-in rejected: invalid input',
+  'that message is the fixed generic one'
+);
+select is(
+  (select count(*)::int from rejection_probe where coalesce(err_detail, '') <> ''),
+  0,
+  'no rejection carries a DETAIL'
+);
+select is(
+  (select count(*)::int from rejection_probe where coalesce(err_hint, '') <> ''),
+  0,
+  'no rejection carries a HINT'
+);
+select is(
+  (select count(*)::int from rejection_probe
+    where err_message like '%Failing row%'
+       or err_message like '%daily_check_ins_%_valid%'
+       or err_message like '%rpe%'
+       or err_message like '%overall_feeling%'
+       or err_message like '%pain_status%'
+       or err_message like '%00000000-0000-4000-8000%'
+       or err_message like '%2026-07-28%'),
+  0,
+  'no rejection message names a column, a constraint, a row representation, an identifier, or a date'
 );
 
 delete from public.daily_check_ins
@@ -509,20 +677,69 @@ select throws_ok(
 );
 
 -- Decision 5: the data subject may change exactly the three health fields.
-select lives_ok(
-  $$ update public.daily_check_ins
-        set rpe = 8, overall_feeling = 4, pain_status = 'present'
-      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$,
-  'the data subject updates their own three health fields'
+--
+-- Round 2, high finding. lives_ok cannot distinguish a successful update from
+-- one that matched no row, because RLS filters rather than errors, so an
+-- update that reaches nothing still succeeds. Every update path in this file
+-- therefore counts the rows the statement actually affected. RETURNING yields a
+-- constant sentinel, never a column, so no protected value reaches the output.
+--
+-- The attempted values differ from the stored ones: the fixture inserted one
+-- triple and this update writes a different one, so the assertions below fail
+-- if the write silently reached zero rows.
+--
+-- The clock snapshot is taken as the table owner, because a temporary table is
+-- not readable by the authenticated role.
+reset role;
+create temporary table owner_update_clock as
+select updated_at
+from public.daily_check_ins
+where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+  and check_in_date = date '2026-07-20';
+set local role authenticated;
+
+with owner_update as (
+  update public.daily_check_ins
+     set rpe = 8, overall_feeling = 4, pain_status = 'present'
+   where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+  returning 1 as touched
+)
+select is(
+  (select count(*)::int from owner_update),
+  1,
+  'the data subject''s own update affects exactly one row'
+);
+
+reset role;
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+      and check_in_date = date '2026-07-20'
+      and rpe = 8
+      and overall_feeling = 4
+      and pain_status = 'present'),
+  1,
+  'the post-image holds the attempted values, so the update landed on the row'
+);
+select ok(
+  (select c.updated_at > k.updated_at
+     from public.daily_check_ins as c
+     cross join owner_update_clock as k
+    where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+      and c.check_in_date = date '2026-07-20'),
+  'the update advanced updated_at strictly past the value captured before it'
 );
 select is(
   (select count(*)::int from public.daily_check_ins
     where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
       and check_in_date = date '2026-07-20'
-      and updated_at = now()),
+      and created_at = now()),
   1,
-  'the updated row keeps its owner and date, and updated_at stays under database control'
+  'the updated row keeps its owner and date, and created_at is untouched'
 );
+
+set local role authenticated;
 
 select throws_ok(
   $$ update public.daily_check_ins
@@ -627,8 +844,12 @@ reset role;
 -- A snapshot of every stored row. Later sections assert against this join to
 -- prove that a refused mutation changed nothing, without ever echoing a health
 -- value into the test output.
+-- updated_at is part of the snapshot on purpose. Without it a refused mutation
+-- that nevertheless fired the trigger would leave the health columns equal and
+-- still pass the join, so the timestamp is the tell-tale.
 create temporary table check_in_snapshot as
-select id, athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status
+select id, athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
+       updated_at
 from public.daily_check_ins;
 
 select is(
@@ -656,11 +877,21 @@ select is(
   'that athlete sees only their own row and nothing else at all'
 );
 
--- The update matches no row through the policy rather than erroring. The
--- snapshot join below is what proves nothing changed.
-update public.daily_check_ins as c
-set rpe = c.rpe, overall_feeling = c.overall_feeling, pain_status = c.pain_status
-where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b';
+-- The update matches no row through the policy rather than erroring, so the
+-- affected-row count is the assertion that has teeth. The attempted values are
+-- deliberately different from the stored ones, and the snapshot join below is
+-- kept as defence in depth.
+with cross_athlete_update as (
+  update public.daily_check_ins as c
+     set rpe = 1, overall_feeling = 1, pain_status = 'none'
+   where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+  returning 1 as touched
+)
+select is(
+  (select count(*)::int from cross_athlete_update),
+  0,
+  'another athlete''s update of a check-in affects exactly zero rows'
+);
 
 select throws_ok(
   $$ delete from public.daily_check_ins
@@ -680,7 +911,8 @@ select is(
       and s.check_in_date = c.check_in_date
       and s.rpe = c.rpe
       and s.overall_feeling = c.overall_feeling
-      and s.pain_status = c.pain_status),
+      and s.pain_status = c.pain_status
+      and s.updated_at = c.updated_at),
   6,
   'every stored row is unchanged after another athlete attempted an update'
 );
@@ -808,9 +1040,19 @@ select throws_ok(
   '42501', null,
   'a coach cannot insert a check-in for an athlete who shares with them'
 );
-update public.daily_check_ins as c
-set rpe = c.rpe, overall_feeling = c.overall_feeling, pain_status = c.pain_status
-where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b';
+-- Readable is not writable. The coach can see this row, so a widened UPDATE
+-- policy would silently modify it; the affected-row count is what catches that.
+with coach_update as (
+  update public.daily_check_ins as c
+     set rpe = 2, overall_feeling = 2, pain_status = 'none'
+   where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+  returning 1 as touched
+)
+select is(
+  (select count(*)::int from coach_update),
+  0,
+  'a coach''s update of a check-in they may read affects exactly zero rows'
+);
 select throws_ok(
   $$ delete from public.daily_check_ins
       where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$,
@@ -829,7 +1071,8 @@ select is(
       and s.check_in_date = c.check_in_date
       and s.rpe = c.rpe
       and s.overall_feeling = c.overall_feeling
-      and s.pain_status = c.pain_status),
+      and s.pain_status = c.pain_status
+      and s.updated_at = c.updated_at),
   6,
   'every stored row is unchanged after a coach attempted an update'
 );

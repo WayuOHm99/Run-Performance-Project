@@ -69,7 +69,7 @@ comment on column public.daily_check_ins.created_at is
   'Database-controlled and immutable after insert. Never supplied by a client.';
 
 comment on column public.daily_check_ins.updated_at is
-  'Database-controlled. Never supplied by a client.';
+  'Database-controlled and never supplied by a client. Strictly greater after every update, including two updates inside one transaction.';
 
 -- No index is created here.
 --
@@ -94,6 +94,23 @@ comment on column public.daily_check_ins.updated_at is
 -- The name deliberately contains no 'health' substring, so the TASK-008
 -- assertion that no broad health-data authorization helper exists in the
 -- private schema stays meaningful.
+--
+-- The trigger also validates every client-supplied required field before
+-- PostgreSQL can reach the declarative NOT NULL and CHECK constraints below.
+-- That is a disclosure control, not a correctness control. A native constraint
+-- failure carries
+--
+--   DETAIL: Failing row contains (<id>, <athlete>, <date>, <rpe>, ...)
+--
+-- and that detail travels into PostgREST error objects and observability logs,
+-- which would put a complete protected-health row somewhere it was never
+-- authorized to be. The generic exception raised here carries a fixed message,
+-- no field name, no supplied value, no identifier, no DETAIL, and no HINT, so a
+-- rejected write reveals only that it was rejected.
+--
+-- The declarative constraints are deliberately kept. They remain the actual
+-- guarantee for any writer that could ever bypass this trigger; the trigger
+-- only ensures a client never reaches them.
 
 create function private.enforce_daily_check_in_columns()
 returns trigger
@@ -102,6 +119,24 @@ security definer
 set search_path = ''
 as $$
 begin
+  -- Sanitized validation. One branch and one message for every failure mode, so
+  -- the error itself cannot be used to probe which field or value was wrong.
+  if new.athlete_profile_id is null
+     or new.check_in_date is null
+     or new.rpe is null
+     or new.rpe < 0
+     or new.rpe > 10
+     or new.overall_feeling is null
+     or new.overall_feeling < 1
+     or new.overall_feeling > 5
+     or new.pain_status is null
+     or new.pain_status not in ('none', 'present')
+  then
+    raise exception using
+      errcode = '22023',
+      message = 'daily check-in rejected: invalid input';
+  end if;
+
   if tg_op = 'INSERT' then
     -- A row can never be backdated, even by a trusted writer.
     new.created_at := pg_catalog.now();
@@ -117,14 +152,25 @@ begin
   new.check_in_date := old.check_in_date;
   new.created_at := old.created_at;
 
-  new.updated_at := pg_catalog.now();
+  -- updated_at must strictly advance on every real update, and must stay
+  -- entirely database-controlled.
+  --
+  -- now() is transaction time, so two updates in one transaction would both
+  -- stamp the same value and 'was this row modified' would become unanswerable
+  -- from the row itself. clock_timestamp() advances within a transaction, and
+  -- the greatest() floor guarantees a strict increase deterministically, with
+  -- no sleep, even if the clock does not appear to move between two statements.
+  new.updated_at := greatest(
+    pg_catalog.clock_timestamp(),
+    old.updated_at + interval '1 microsecond'
+  );
 
   return new;
 end;
 $$;
 
 comment on function private.enforce_daily_check_in_columns() is
-  'Forces created_at and updated_at to database time and keeps id, athlete_profile_id, check_in_date, and created_at immutable after insert.';
+  'Rejects invalid client input with a single sanitized 22023 error that discloses no field, value, or row, before PostgreSQL can emit a failing-row DETAIL. Forces created_at to database time, keeps id, athlete_profile_id, check_in_date, and created_at immutable after insert, and strictly advances updated_at on every update.';
 
 create trigger daily_check_ins_enforce_columns
 before insert or update on public.daily_check_ins

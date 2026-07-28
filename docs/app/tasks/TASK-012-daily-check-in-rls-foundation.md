@@ -1,6 +1,11 @@
 # TASK-012: Daily Check-In RLS Foundation
 
-Status: Approved
+Status: Implemented and verified locally. Round 1 Codex findings H1, M1, M2, and
+M3 are fixed and re-verified. Awaiting GPT/Codex Round 2 read-only review.
+
+The approved scope and decisions 1–10 below are unchanged. Round 2 altered only
+how the boundary is enforced and proved, never what it is; the changes are
+recorded in `docs/app/handoffs/TASK-012.md`.
 
 Writer: Claude Code (sole writer)
 
@@ -264,12 +269,24 @@ protected-health table are cost without benefit.
 `search_path = ''`, `before insert or update on public.daily_check_ins for each
 row`:
 
+- validates every client-supplied required field — presence of
+  `athlete_profile_id` and `check_in_date`, and the presence, range, and allowed
+  values of `rpe`, `overall_feeling`, and `pain_status` — and rejects any
+  violation with a single sanitized `22023` exception carrying a fixed message
+  and no field, value, identifier, date, `DETAIL`, or `HINT` (Round 2, M1). The
+  declarative `NOT NULL` and `CHECK` constraints are unchanged and remain the
+  real guarantee; this branch only ensures a client never reaches them, because
+  their native failure would carry the whole protected-health row in a
+  `Failing row contains (...)` detail;
 - on insert, overwrites `created_at` and `updated_at` with `pg_catalog.now()`,
   so neither can be backdated even by a trusted writer;
 - on update, restores `id`, `athlete_profile_id`, `check_in_date`, and
   `created_at` from the old row, making decision 4 immutability a property of
   the table;
-- on update, overwrites `updated_at` with `pg_catalog.now()`.
+- on update, sets `updated_at` to
+  `greatest(clock_timestamp(), old.updated_at + interval '1 microsecond')`, so
+  it stays database-controlled and strictly advances on every update, including
+  two updates inside one transaction, with no sleep (Round 2, M2).
 
 The trigger is defence in depth **behind** the column privileges, not instead of
 them: no client role holds `INSERT` or `UPDATE` privilege on `id`, `created_at`,
@@ -360,56 +377,56 @@ require `athlete_profile_id = auth.uid()`.
 
 ## Acceptance criteria
 
-- [ ] `public.daily_check_ins` exists with exactly the approved columns, types,
+- [x] `public.daily_check_ins` exists with exactly the approved columns, types,
       nullability, check constraints, unique constraint, and cascading foreign
       key, and with no `team_id` and no free-text or attachment column.
-- [ ] Every approved decision 1–10 is enforced by PostgreSQL, not by client
+- [x] Every approved decision 1–10 is enforced by PostgreSQL, not by client
       code.
-- [ ] `rpe` outside 0–10, `overall_feeling` outside 1–5, and `pain_status`
+- [x] `rpe` outside 0–10, `overall_feeling` outside 1–5, and `pain_status`
       outside `none`/`present` are all rejected by the database.
-- [ ] A second row for the same athlete and the same `check_in_date` is
+- [x] A second row for the same athlete and the same `check_in_date` is
       rejected, and the uniqueness guarantee is asserted as a constraint, not
       merely observed once.
-- [ ] `id`, `created_at`, and `updated_at` are database-controlled and cannot be
+- [x] `id`, `created_at`, and `updated_at` are database-controlled and cannot be
       written by a client; `athlete_profile_id`, `check_in_date`, `id`, and
       `created_at` cannot be changed after insert.
-- [ ] `updated_at` advances only under database control.
-- [ ] `anon` holds no privilege and no policy; every anonymous `SELECT`,
+- [x] `updated_at` advances only under database control.
+- [x] `anon` holds no privilege and no policy; every anonymous `SELECT`,
       `INSERT`, `UPDATE`, and `DELETE` is denied.
-- [ ] `authenticated` holds `SELECT` plus exactly the two approved column-level
+- [x] `authenticated` holds `SELECT` plus exactly the two approved column-level
       write privileges, and no `DELETE`, `TRUNCATE`, `REFERENCES`, or `TRIGGER`
       privilege.
-- [ ] A `DELETE` by any client role is denied, and no `DELETE` policy exists.
-- [ ] The data subject inserts, reads, and updates their own row, and can update
+- [x] A `DELETE` by any client role is denied, and no `DELETE` policy exists.
+- [x] The data subject inserts, reads, and updates their own row, and can update
       only `rpe`, `overall_feeling`, and `pain_status`.
-- [ ] A user cannot insert a row for another profile, and cannot read or update
+- [x] A user cannot insert a row for another profile, and cannot read or update
       another user's row.
-- [ ] A coach with active same-team memberships but no `check_in` grant sees
+- [x] A coach with active same-team memberships but no `check_in` grant sees
       zero rows.
-- [ ] A `workout_summary` or `sleep_summary` grant does not authorize check-in
+- [x] A `workout_summary` or `sleep_summary` grant does not authorize check-in
       access.
-- [ ] An active `check_in` grant plus both active memberships allows coach
+- [x] An active `check_in` grant plus both active memberships allows coach
       `SELECT` only, and no coach `INSERT`, `UPDATE`, or `DELETE`.
-- [ ] A Team A coach cannot read an athlete who shares only through Team B.
-- [ ] Another athlete cannot use someone else's grant.
-- [ ] Revoking the sharing grant, the coach membership, or the athlete
+- [x] A Team A coach cannot read an athlete who shares only through Team B.
+- [x] Another athlete cannot use someone else's grant.
+- [x] Revoking the sharing grant, the coach membership, or the athlete
       membership each removes coach visibility on the next query, with no token
       refresh or sign-out.
-- [ ] Revoked grant history never authorizes a read.
-- [ ] The data subject continues to read their own row after grant or membership
+- [x] Revoked grant history never authorizes a read.
+- [x] The data subject continues to read their own row after grant or membership
       revocation.
-- [ ] The coach policy calls `private.can_current_user_read_shared_data` and
+- [x] The coach policy calls `private.can_current_user_read_shared_data` and
       neither duplicates nor weakens it; the TASK-011 migration is unedited.
-- [ ] The new pgTAP file passes, and the TASK-008, TASK-009, and TASK-011 pgTAP
+- [x] The new pgTAP file passes, and the TASK-008, TASK-009, and TASK-011 pgTAP
       files still pass.
-- [ ] `supabase db lint` reports no warning or error for `public` and `private`.
-- [ ] Generated types match the local database with zero drift.
-- [ ] Existing mobile format, lint, typecheck, and unit tests still pass.
-- [ ] Test fixtures are synthetic, and no health value appears in test output.
-- [ ] No secret, credential, API URL, JWT secret, database URL, real user, real
+- [x] `supabase db lint` reports no warning or error for `public` and `private`.
+- [x] Generated types match the local database with zero drift.
+- [x] Existing mobile format, lint, typecheck, and unit tests still pass.
+- [x] Test fixtures are synthetic, and no health value appears in test output.
+- [x] No secret, credential, API URL, JWT secret, database URL, real user, real
       athlete, Garmin data, or protected legacy data is introduced or printed,
       and no dependency or lockfile changes.
-- [ ] No forbidden path is modified, and no existing migration file is edited.
+- [x] No forbidden path is modified, and no existing migration file is edited.
 
 ## Required authorization-negative tests
 
@@ -428,9 +445,9 @@ Synthetic identities only, on the reserved `example.test` domain.
 | 9 | user inserts a row for another profile | denied, `42501` policy violation |
 | 10 | user reads another user's row | 0 rows |
 | 11 | user updates another user's row | 0 rows affected |
-| 12 | invalid `rpe` (`-1`, `11`) | rejected, `23514` |
-| 13 | invalid `overall_feeling` (`0`, `6`) | rejected, `23514` |
-| 14 | invalid `pain_status` (`mild`, `''`, `NONE`) | rejected, `23514` |
+| 12 | invalid `rpe` (`-1`, `11`) | rejected, sanitized `22023` (Round 2, M1; was `23514`) |
+| 13 | invalid `overall_feeling` (`0`, `6`) | rejected, sanitized `22023` (Round 2, M1; was `23514`) |
+| 14 | invalid `pain_status` (`mild`, `''`, `NONE`) | rejected, sanitized `22023` (Round 2, M1; was `23514`) |
 | 15 | duplicate athlete and date | rejected, `23505`, and the unique constraint is asserted in the catalog |
 | 16 | immutable owner, date, id, and `created_at` changed by a trusted writer | silently restored by the trigger |
 | 17 | client-supplied `created_at`/`updated_at` on a trusted insert | overwritten with database time |

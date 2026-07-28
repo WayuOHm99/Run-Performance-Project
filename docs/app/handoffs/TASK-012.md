@@ -1,6 +1,11 @@
 # TASK-012 Handoff — Daily Check-In RLS Foundation
 
-Status: Implemented and verified locally. Awaiting GPT/Codex read-only review.
+Status: Implemented, reviewed once by GPT/Codex, and Round 2 fixes applied and
+verified locally. Awaiting GPT/Codex Round 2 read-only review.
+
+Round 1 history below is retained unchanged. Everything Round 2 altered is
+recorded in "Round 2 — Codex findings and fixes", and figures that Round 2
+superseded are corrected in place with the Round 1 value noted.
 
 ## Task and writer
 
@@ -54,13 +59,20 @@ No protected legacy path and no root `CLAUDE.md` was read.
 | `docs/app/tasks/TASK-012-daily-check-in-rls-foundation.md` | new task packet, committed before implementation |
 | `docs/app/handoffs/TASK-012.md` | this handoff |
 | `platform/supabase/migrations/20260728140000_daily_check_ins_rls.sql` | new; the only migration added |
-| `platform/supabase/tests/database/005_daily_check_ins_rls_test.sql` | new; 166 assertions |
+| `platform/supabase/tests/database/005_daily_check_ins_rls_test.sql` | new; 181 assertions (166 in Round 1) |
 | `platform/apps/mobile/src/lib/supabase/database.types.ts` | regenerated from local Supabase (+41) |
 | `platform/supabase/tests/database/001_identity_teams_membership_rls_test.sql` | **four literal counts `7` → `9`** and one description reworded — the update the packet authorizes in advance |
 
-Five files, all inside the packet's owned paths. No existing migration was
-edited. No dependency manifest, lockfile, `config.toml`, `seed.sql`, mobile
-source file, architecture document, or legacy path changed.
+Six files, all inside the packet's owned paths. (Round 1 said "five" while
+listing six; the count was wrong, not the list.) No existing migration was
+edited. No dependency manifest, lockfile, `config.toml`, `seed.sql`,
+architecture document, or legacy path changed.
+
+No handwritten or behavioural mobile source changed. The generated
+`database.types.ts` did change: it is a build artifact regenerated from the
+local schema, it contains no logic, and its content is fully determined by the
+migration. No mobile screen, component, hook, repository, navigation entry, or
+test was added or edited.
 
 ## Implemented schema and authorization behaviour
 
@@ -202,10 +214,10 @@ All criteria met.
 | --- | --- |
 | Approved columns, types, constraints, FK; no `team_id`, no free-text column | pinned exact column set; `hasnt_column('team_id')`; only `pain_status` is free-form-capable |
 | Decisions 1–10 enforced by PostgreSQL, not client code | no application code was added at all |
-| `rpe`, `overall_feeling`, `pain_status` range and value rejection | seven `23514` assertions, including empty string and wrong case |
+| `rpe`, `overall_feeling`, `pain_status` range and value rejection | seven sanitized `22023` assertions, including empty string and wrong case; the `23514` constraints remain behind them |
 | Duplicate athlete/date rejected, uniqueness asserted as a constraint | `23505` at owner and client level; `contype = 'u'` and its exact column list asserted |
 | `id`, `created_at`, `updated_at` database-controlled; owner, date, id, `created_at` immutable | column privileges (`42501` ×8) plus trigger restoration asserted |
-| `updated_at` advances only under database control | forged value overwritten on both insert and update |
+| `updated_at` advances only under database control | forged value overwritten on both insert and update, and proved strictly increasing across two updates in one transaction |
 | `anon` holds nothing; all four verbs denied | `42501` ×4, plus zero table and zero column privileges asserted |
 | `authenticated` privileges are exactly the approved minimum | table-wide `SELECT` only; insert/update column lists pinned by `aclexplode` |
 | `DELETE` denied for every client role; no `DELETE` policy | `42501` for anon, data subject, teammate, and coach; zero `DELETE` policies |
@@ -220,31 +232,31 @@ All criteria met.
 | Revoked grant history never authorizes a read | history row retained and asserted; access stays 0 until an explicit new grant |
 | Data subject still reads their own row after revocation | asserted after grant revocation and after both membership revocations |
 | Coach policy reuses the TASK-011 helper | three body assertions plus the policy-delegation assertion; TASK-011 migration unedited |
-| New file passes; TASK-008/009/011 files still pass | 5 files, 559 assertions, PASS |
+| New file passes; TASK-008/009/011 files still pass | 5 files, 574 assertions, PASS |
 | `db lint` clean for `public` and `private` | exit 0, no schema errors |
 | Generated types match the local database, zero drift | `git diff --no-index` exit 0 against a fresh regeneration |
 | Mobile format, lint, typecheck, unit tests pass | all exit 0; 327 tests |
-| Fixtures synthetic; no health value in test output | `example.test` domain; every assertion compares a count, a column name, an error code, or a snapshot join |
+| Fixtures synthetic; no health value in test output | `example.test` domain; every assertion compares a count, a constant sentinel, a column name, an error code, a boolean, or a snapshot join |
 | No secret, credential, real user, Garmin, or legacy data; no dependency change | lockfile unchanged; nothing printed |
-| No forbidden path modified | five changed files, all owned |
+| No forbidden path modified | six changed files, all owned |
 
 ## Negative-test matrix and results
 
-All 37 packet cases pass. `005` contributes 166 assertions.
+All 37 packet cases pass. `005` contributes 181 assertions (166 in Round 1).
 
 | # | Case | Result |
 | --- | --- | --- |
 | 1–4 | anon `SELECT`/`INSERT`/`UPDATE`/`DELETE` | PASS — `42501` ×4, plus the read helper denied |
 | 5 | data subject inserts and reads own row | PASS — 1 row, both timestamps from the database |
-| 6 | data subject updates own three health fields | PASS |
+| 6 | data subject updates own three health fields | PASS — affects exactly 1 row, and the post-image holds the attempted values |
 | 7 | update naming owner, date, id, `created_at`, `updated_at` | PASS — `42501` ×5 |
 | 8 | insert naming id, `created_at`, `updated_at` | PASS — `42501` ×3 |
 | 9 | insert for another profile | PASS — `42501` |
 | 10 | read another user's row | PASS — 0 rows, both directions |
-| 11 | update another user's row | PASS — snapshot join unchanged at 6 rows |
-| 12 | invalid `rpe` | PASS — `23514` at both bounds |
-| 13 | invalid `overall_feeling` | PASS — `23514` at both bounds |
-| 14 | invalid `pain_status` | PASS — `23514` for a third word, empty string, and wrong case |
+| 11 | update another user's row | PASS — affects exactly 0 rows; snapshot join unchanged at 6 rows |
+| 12 | invalid `rpe` | PASS — sanitized `22023` at both bounds |
+| 13 | invalid `overall_feeling` | PASS — sanitized `22023` at both bounds |
+| 14 | invalid `pain_status` | PASS — sanitized `22023` for a third word, empty string, and wrong case |
 | 15 | duplicate athlete and date | PASS — `23505`; constraint and its column list asserted |
 | 16 | trusted writer moves owner, date, id, `created_at` | PASS — restored by the trigger |
 | 17 | client-supplied timestamps on a trusted insert | PASS — overwritten with database time |
@@ -345,10 +357,16 @@ attributable.
   reserved `example.test` domain. No real name, address, or measurement was
   used or read.
 - **No health value is printed in test output.** Every assertion compares a row
-  count, a column name, an error code, or a snapshot join, and no assertion
-  description names a measurement. Under both mutations the failure output named
-  only authorization rules. No health value appears in a commit message, this
-  handoff, or an AI prompt.
+  count, a constant sentinel, a column name, an error code, a boolean, or a
+  snapshot join, and no assertion description names a measurement. The Round 2
+  affected-row checks return the literal `1`, never a column. Under all four
+  mutations the failure output named only authorization rules. No health value
+  appears in a commit message, this handoff, or an AI prompt.
+- **A rejected write discloses nothing** (Round 2, M1). Every invalid client
+  write is refused with one fixed sanitized `22023` error carrying no field
+  name, value, identifier, date, row representation, `DETAIL`, or `HINT`, so a
+  protected-health row can no longer travel into a PostgREST error object or a
+  log line through a constraint failure.
 - No health value can reach an application log, analytics, a push payload, crash
   context, or session replay, because no application code was added.
 - No free text, body location, diagnosis, note, image, or attachment column
@@ -358,7 +376,10 @@ attributable.
   `check_in` grant. No authorization state lives in the token, so every
   revocation path takes effect on the next query.
 - No service-role key was used. No credential, API URL, JWT secret, database
-  URL, access token, email address, or real user id was printed or persisted.
+  URL, access token, real email address, or real user id was printed or
+  persisted. Synthetic `@example.test` fixture addresses are committed in the
+  test file, which is allowed and intended: `example.test` is a reserved,
+  non-routable domain and the addresses belong to nobody.
 - The security posture is strictly additive: `anon` gains nothing anywhere,
   `authenticated` gains `SELECT` plus two narrow column-level write grants on
   one new table and `EXECUTE` on one new helper, and no existing grant or policy
@@ -388,11 +409,171 @@ attributable.
   calls the TASK-011 helper once per candidate team. That is negligible at
   realistic team counts, but it is a per-row policy call and would deserve
   measurement before a large coach-side list view is built.
-- TASK-011 is still awaiting Codex round-2 review. This task builds on its
-  committed state at the base SHA; if that review changes the TASK-011 helper's
-  signature or semantics, this task's helper and tests must be re-verified.
+- TASK-011 was reviewed and merged before this task started, and its merged
+  state at the base SHA is what this task builds on. (Round 1 of this handoff
+  claimed TASK-011 was still awaiting Codex review; that was stale and is
+  withdrawn.) `private.can_current_user_read_shared_data` is therefore a settled
+  dependency, not a moving one.
+- A unique violation (`23505`) and a foreign-key violation (`23503`) still
+  return PostgreSQL's native error, whose DETAIL can name the athlete id and the
+  calendar date. Neither carries an `rpe`, `overall_feeling`, or `pain_status`,
+  so no health measurement leaks, but the fact that a given athlete checked in
+  on a given date can. M1 scoped the sanitized error to the required-field,
+  range, and status paths; narrowing these two is a follow-up decision.
 - Local Analytics remains disabled from TASK-007, so Studio's Logs section is
   empty locally.
+
+## Round 2 — Codex findings and fixes
+
+GPT/Codex reviewed Round 1 read-only and raised one high and three medium
+findings. The Product Owner approved all four. No other change was made, no
+approved decision was altered, and AGY was not used.
+
+Round 2 commit: `<recorded below after the commit exists>`
+
+### H1 — the UPDATE tests could not fail
+
+`lives_ok` cannot distinguish a successful update from one that matched no row,
+because RLS filters rows rather than raising, so an update that reaches nothing
+still succeeds. The Round 1 companion check was worse than neutral: it compared
+`updated_at` to `now()`, and `now()` is transaction time, so the value already
+matched from the insert earlier in the same transaction. The negative probes
+assigned each column to itself and their snapshots omitted `updated_at`, so a
+widened UPDATE policy could have modified those rows and still passed.
+
+Fixed by counting the rows every UPDATE actually affected, via
+`UPDATE ... RETURNING 1` consumed by a CTE, on all three paths:
+
+| Path | Asserted affected rows |
+| --- | --- |
+| the data subject updating their own row | exactly 1 |
+| another athlete updating the data subject's row | exactly 0 |
+| a coach updating a row they are authorized to read | exactly 0 |
+
+`RETURNING` yields a constant sentinel, never a column, so no protected value
+reaches the output. All three attempts now assign values that differ from the
+stored ones, the post-image is asserted against the attempted values, the
+snapshot joins are kept as defence in depth, and `updated_at` was added to the
+snapshot so a mutation that fired the trigger without changing the health
+columns is still caught.
+
+### M1 — a constraint failure could disclose the whole row
+
+A native `NOT NULL` or `CHECK` failure carries
+`DETAIL: Failing row contains (...)`, which reproduces the athlete id, the date,
+and all three health values, and that string reaches PostgREST error objects and
+observability logs.
+
+The existing `BEFORE` trigger now validates every client-supplied required field
+— `athlete_profile_id`, `check_in_date`, `rpe` and its range, `overall_feeling`
+and its range, and `pain_status` against the two approved values — and raises a
+single sanitized exception with SQLSTATE `22023` and the fixed message
+`daily check-in rejected: invalid input`. One branch and one message serve every
+failure mode, so the error cannot be used to probe which field was wrong. No
+field name, value, identifier, date, `DETAIL`, or `HINT` is emitted.
+
+Every declarative `NOT NULL` and `CHECK` constraint is kept unchanged. They
+remain the real guarantee for any writer that could bypass the trigger; the
+trigger only ensures a client never reaches them. No RPC and no new schema
+surface was added — the test helper lives in `pg_temp` and dies with the
+transaction.
+
+Six rejection paths are probed — out-of-range value, unapproved status, and a
+null in each required field, plus an invalid `UPDATE` — capturing
+`RETURNED_SQLSTATE`, `MESSAGE_TEXT`, `PG_EXCEPTION_DETAIL`, and
+`PG_EXCEPTION_HINT`. The tests assert one distinct SQLSTATE across all six, one
+distinct message, empty detail and hint everywhere, and that no message names a
+column, a constraint, a row representation, an identifier, or a date.
+
+### M2 — `updated_at` advancement was not proved
+
+The trigger stamped transaction-stable `now()`, and the whole pgTAP file runs in
+one transaction, so `updated_at = now()` held whether or not the timestamp ever
+moved.
+
+`updated_at` is now
+`greatest(clock_timestamp(), old.updated_at + interval '1 microsecond')` on
+update. `clock_timestamp()` advances inside a transaction, and the `greatest`
+floor makes the increase strict deterministically, with no sleep and no
+dependence on observable clock movement. It stays entirely database-controlled:
+no client role holds `UPDATE` on the column. `created_at` is untouched and still
+restored from `OLD` on every update, and inserts still stamp both columns with
+`now()`.
+
+The regression captures the timestamp into a temporary table before the update
+and asserts the post-update value is strictly greater, at both the trusted-writer
+and the data-subject level, and separately asserts that a second update in the
+same transaction advances it again — the case transaction-stable `now()` could
+never satisfy. Only booleans are compared, so no timestamp is printed.
+
+### M3 — documentation was internally inconsistent
+
+- The task packet status moved from `Approved` to implemented-and-verified,
+  awaiting Codex Round 2.
+- The changed-file count is corrected from five to six. Round 1 listed six files
+  and miscounted them in prose; the list was always right.
+- "No mobile source file changed" is replaced with "no handwritten or
+  behavioural mobile source changed". The generated `database.types.ts` did
+  change, and saying otherwise was wrong.
+- "No email address" is replaced with "no real email address". Synthetic
+  `@example.test` fixture addresses are committed and allowed.
+- The stale claim that TASK-011 was awaiting Codex review is withdrawn. TASK-011
+  was reviewed and merged and is this task's base.
+- Acceptance criteria and the negative-test matrix are re-checked against this
+  round's evidence only, and superseded figures carry their Round 1 value.
+
+### Round 2 mutation evidence
+
+Both mutations required by the finding were applied to the live local database
+and the suite re-run, then discarded with `supabase db reset --local --no-seed`:
+
+| Mutation | Result |
+| --- | --- |
+| UPDATE policy widened to `using (true) with check (true)` | **FAIL — 3 of 181**: the coach affected-row count, the coach snapshot join, and the pinned write-policy expression |
+| owner UPDATE policy denied while still containing `auth.uid()` — `using (athlete_profile_id = (select auth.uid()) and false)` | **FAIL — 3 of 181**: the owner affected-row count, the post-image check, and the `updated_at` advancement check |
+
+The second mutation is the direct proof that H1 is closed: under Round 1's
+assertions it would have passed silently, because `lives_ok` tolerates a
+zero-row update and `updated_at` already equalled `now()`.
+
+One honest detail about the first mutation. The cross-athlete affected-row
+assertion did **not** fail under it, and that is correct rather than vacuous:
+PostgreSQL also applies `SELECT` policies to an `UPDATE` that reads columns, so
+a non-coach still cannot reach the row even with the UPDATE policy wide open.
+The coach path is the one a widened UPDATE policy actually exposes, because the
+coach can legitimately read the row, and that is exactly what failed.
+
+### Round 2 verification
+
+Full approved suite, local stack only:
+
+| Command | Result |
+| --- | --- |
+| `corepack pnpm install --frozen-lockfile` | exit 0, lockfile unchanged |
+| `corepack pnpm exec supabase --version` | 2.109.1 |
+| `corepack pnpm db:start *> $null` | exit 0, 10 containers, 8 reporting a health check |
+| `corepack pnpm exec supabase db reset --local --no-seed` | exit 0 |
+| `corepack pnpm exec supabase test db --local` | **PASS — 5 files, 574 assertions** (`005` contributes 181) |
+| same, UPDATE policy widened | **FAIL — `005` fails 3/181** |
+| same, owner UPDATE policy denied | **FAIL — `005` fails 3/181** |
+| `corepack pnpm exec supabase db lint --local --schema public,private --level warning --fail-on warning` | exit 0, no schema errors |
+| `supabase gen types typescript --local --schema public` | exit 0 |
+| type drift: fresh regeneration compared with `git diff --no-index` | exit 0, identical, no drift |
+| `corepack pnpm format:check` | exit 0 |
+| `corepack pnpm lint` | exit 0 |
+| `corepack pnpm typecheck` | exit 0 |
+| `corepack pnpm test` | **327 passed, 18 files** |
+| `git diff --check` | clean |
+| `corepack pnpm db:stop *> $null` | exit 0, no Supabase container remains |
+
+The generated types are byte-identical to the committed file: M1 and M2 changed
+a trigger body, not a column, so the schema surface is unchanged.
+
+Two process notes, both mine and neither affecting the delivered code. The first
+plan count was one too low because I mis-added the assertion tally, and the
+runner caught it. The first drift check reported 28 added lines because I
+omitted `--schema public`, which is the canonical flag recorded in the packet and
+in `apps/mobile/README.md`; with the correct command the diff is empty.
 
 ## Rollback
 
@@ -411,10 +592,11 @@ needed. No dependency, lockfile, or configuration file was touched.
 
 ## Remaining reviewer findings
 
-None. This is the first review round for TASK-012; no Codex finding has been
-raised or is outstanding.
+None outstanding. All four Round 1 findings — H1, M1, M2, M3 — are implemented,
+tested, and verified above. No finding was deferred, partially applied, or
+reinterpreted.
 
-Two points are flagged for the reviewer's explicit attention:
+Three points are flagged for the reviewer's explicit attention:
 
 1. **The reading of decision 8** recorded in the task packet and above: a coach
    is denied any write path into another person's check-in, but is not
@@ -425,6 +607,13 @@ Two points are flagged for the reviewer's explicit attention:
    advance by this task's packet, following the precedent set by TASK-009 and
    TASK-011. The diff contains exactly four literals and one description and
    nothing else.
+3. **`23505` and `23503` still return native PostgreSQL errors.** M1 sanitized
+   the required-field, range, and status paths exactly as specified. A duplicate
+   or foreign-key violation still carries a `DETAIL` that can name the athlete
+   id and the calendar date — no health measurement, but it does reveal that a
+   given athlete checked in on a given date. I did not narrow those two
+   unilaterally, because doing so changes the error a client sees for a
+   legitimate duplicate-submission case and that is a product decision.
 
 ## Confirmation
 
