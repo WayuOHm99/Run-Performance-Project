@@ -179,6 +179,7 @@ set search_path = ''
 as $$
 declare
   v_actor uuid := (select auth.uid());
+  v_membership_id uuid;
   v_grant_id uuid;
 begin
   if v_actor is null then
@@ -195,14 +196,35 @@ begin
 
   -- Decision 9 in miniature: only an active athlete membership may consent. A
   -- coach-role membership in the same team is refused here.
-  if not exists (
-    select 1
-    from public.team_memberships as m
-    where m.team_id = p_team_id
-      and m.profile_id = v_actor
-      and m.status = 'active'
-      and m.role = 'athlete'
-  ) then
+  --
+  -- FOR UPDATE, not a bare EXISTS. An unlocked check is a
+  -- time-of-check-to-time-of-use race: a concurrent revocation could commit
+  -- between the check and the INSERT, run its trigger while no grant row yet
+  -- existed, and leave a revoked membership holding an active grant. A later
+  -- reactivation would then restore coach access with no new consent, breaking
+  -- decision 7.
+  --
+  -- The row lock closes it in both orderings:
+  --
+  --   * If this call locks first, a concurrent membership revocation blocks
+  --     until this transaction ends. Its trigger then runs after the new grant
+  --     is committed and visible, so the grant is revoked.
+  --   * If the revocation locks first, this statement blocks; on release
+  --     READ COMMITTED re-evaluates the predicate against the updated row,
+  --     which no longer satisfies status = 'active' and role = 'athlete', so no
+  --     row is returned and the call fails with the same sanitized 42501.
+  --
+  -- Lock order is membership row, then sharing_grants, in this function and in
+  -- the membership trigger alike, so the two cannot deadlock.
+  select m.id into v_membership_id
+  from public.team_memberships as m
+  where m.team_id = p_team_id
+    and m.profile_id = v_actor
+    and m.status = 'active'
+    and m.role = 'athlete'
+  for update;
+
+  if v_membership_id is null then
     raise exception 'active athlete membership required'
       using errcode = '42501';
   end if;
