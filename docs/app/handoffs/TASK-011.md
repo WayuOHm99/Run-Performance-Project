@@ -219,9 +219,14 @@ All round-1 limitations below still stand, plus:
 - Branch: `feat/TASK-011-consent-sharing-grants-rls`
 - Base SHA: `642c3b4faaac5acbb4a63d4fc8caedaf6f35377b`
 - Packet checkpoint commit (documentation only): `5b8eef2`
+- Round-1 packet checkpoint: `5b8eef2` (documentation only)
 - Round-1 implementation commit: `7fe9ad2c9b78db5d78433e355e6384ccca76caba`
+- Round-1 handoff commit: `cc687de7eee75c2140164ccb51591105c714fae2`
 - Round-2 fix commit: `896df66ae96ba4cc145ef74ce0ee3e73a46902db`
-- Final commit SHA: this documentation commit, recorded below
+  (the migration fix and the concurrency test)
+- Round-2 documentation commit: `1b664aa2136492b03d8381d87137487bb5f344c7`
+- Branch HEAD is this final documentation-only commit, which records the two
+  SHAs above; verify with `git rev-parse HEAD` and `git log --oneline`.
 - Worktree clean at handoff.
 
 ### Pre-flight
