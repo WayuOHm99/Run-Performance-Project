@@ -46,6 +46,9 @@ of what they consented to is retained for them and not visible to the coach.
   narrowly scoped triggers.
 - One new additive pgTAP test file under
   `platform/supabase/tests/database/`.
+- One additional deterministic concurrency regression file under
+  `platform/supabase/tests/database/`, authorized by the Product Owner for the
+  Codex round-1 High finding.
 - Regenerated TypeScript database types from the **local** stack only.
 - The handoff at `docs/app/handoffs/TASK-011.md`.
 
@@ -77,7 +80,10 @@ of what they consented to is retained for them and not visible to the coach.
 - `platform/supabase/migrations/20260728120000_consent_sharing_grants_rls.sql`
   (the one new TASK-011 migration)
 - `platform/supabase/tests/database/003_consent_sharing_grants_rls_test.sql`
-  (the one new TASK-011 pgTAP test)
+  (the main TASK-011 pgTAP test)
+- `platform/supabase/tests/database/004_consent_sharing_grants_concurrency_test.sql`
+  (the deterministic concurrency regression test for the Codex round-1 High
+  finding, authorized by the Product Owner)
 - `platform/apps/mobile/src/lib/supabase/database.types.ts`
 - `platform/supabase/tests/database/001_identity_teams_membership_rls_test.sql`,
   **four literal counts only** — see "Verified requirement found during
@@ -86,7 +92,124 @@ of what they consented to is retained for them and not visible to the coach.
 No additional application documentation is named by this packet, so none may be
 added during implementation.
 
+## Codex round-1 High finding and fix
+
+Status: fixed and proved by a passing regression test.
+
+### The finding
+
+`public.grant_team_data_sharing` originally established the caller's active
+athlete membership with an **unlocked** `EXISTS`, and inserted the grant row
+afterwards. That is a time-of-check-to-time-of-use race. Codex reproduced it
+deterministically against local Supabase with synthetic fixtures and two
+database connections:
+
+1. the grant RPC passed its active-membership check and was paused before the
+   `INSERT`;
+2. a second connection revoked the athlete membership;
+3. the membership trigger ran while **no grant row existed**, so it had nothing
+   to revoke;
+4. the grant RPC then inserted an active grant;
+5. final committed state was `membership status = revoked` with
+   `active grants = 1`;
+6. after reactivation, `private.can_current_user_read_shared_data(...)` returned
+   **true with no new consent action**.
+
+This violates approved decision 7 and the acceptance criterion that reactivation
+must never revive an old grant. It is a real authorization defect, not a
+theoretical one.
+
+### The fix
+
+Only the unmerged TASK-011 migration was edited. The `EXISTS` check is replaced
+by a locking read of the caller's exact membership row, taken **before** any
+grant lookup or insert:
+
+```sql
+select m.id into v_membership_id
+from public.team_memberships as m
+where m.team_id = p_team_id
+  and m.profile_id = v_actor
+  and m.status = 'active'
+  and m.role = 'athlete'
+for update;
+
+if v_membership_id is null then
+  raise exception 'active athlete membership required' using errcode = '42501';
+end if;
+```
+
+The lock targets the exact `team_id` + `auth.uid()` membership, requires
+`status = 'active'` and `role = 'athlete'`, conflicts with any membership
+status or role update, and is held until the grant transaction ends.
+
+Both committed orderings are now safe:
+
+- **Grant locks first.** A concurrent revocation blocks until the grant
+  transaction ends. Its trigger then runs against a snapshot in which the new
+  grant is committed and visible, so the grant is revoked.
+- **Revocation locks first.** The locking read blocks; on release, `READ
+  COMMITTED` re-evaluates the predicate against the updated row, which no longer
+  satisfies `status = 'active' and role = 'athlete'`. No row is returned and the
+  call fails with the unchanged sanitized `42501`.
+
+There is therefore no committed ordering that leaves a revoked membership
+holding an active grant, and reactivation still requires an explicit new grant.
+
+Lock order is membership row, then `sharing_grants`, in both the RPC and the
+membership trigger, so the two paths cannot deadlock.
+
+Everything else is preserved unchanged: idempotent duplicate grant, category
+validation, `auth.uid()`-owned identity, database-controlled timestamps, revoke
+behaviour, RLS, and the minimum privilege model.
+
+### The regression test
+
+`platform/supabase/tests/database/004_consent_sharing_grants_concurrency_test.sql`
+— 23 assertions, added under the Product Owner's authorization for one
+additional test-only file.
+
+A separate file is required because it cannot be transaction-scoped. Proving a
+race needs a second genuinely independent session, and a second session cannot
+see fixtures held in an uncommitted transaction. The file therefore commits
+synthetic fixtures, drives two independent sessions through `dblink`, and
+removes everything again; the cleanup is idempotent and also runs first, so an
+interrupted run cannot poison a later one. Three assertions verify that it left
+no grant row, no membership row, and no probe role behind, and a fourth verifies
+the test-only `dblink` extension was removed.
+
+No sleep, pause, test hook, extension, or debug object was added to the
+migration. No dependency was added. The synthetic probe role's password is
+generated by and for the test and the role is dropped before the file finishes.
+
+It asserts both orderings, and in each: that the second session provably
+**blocks** (`dblink_is_busy = 1`), that the committed state has zero active
+grants, that reactivation produces no active grant, that the authorization
+helper stays false after reactivation, and that only an explicit new grant makes
+it true again.
+
+### Mutation evidence
+
+With the row lock removed and the unlocked `EXISTS` restored, the local suite
+was re-run:
+
+- `001`, `002`, and `003` all still **pass** — a sequential test cannot observe
+  this race, which is exactly why the concurrency file was necessary;
+- `004` **fails 11 of 23 assertions**, including the RPC not blocking,
+  `scenario A commits with zero active grants` reporting 1, and
+  `the authorization helper stays false after reactivation` reporting true.
+
+That last failure is the finding itself: coach access restored with no consent.
+The lock was then restored and the full suite passes again.
+
 ## Verified requirement found during implementation
+
+The Product Owner has **explicitly approved** this deviation. It is no longer
+merely flagged for attention.
+
+The approval is limited to exactly: four literal private-function counts changed
+from `4` to `7`, and one assertion description updated. No assertion is removed,
+weakened, or otherwise changed, and no other line of that file may be edited.
 
 This packet originally listed the TASK-008 pgTAP file as forbidden. That turned
 out to be incompatible with acceptance criterion 31 ("all existing TASK-008 and
@@ -111,8 +234,8 @@ covering 7 instead of 4. No other line of that file, and no line of
 There is precedent: TASK-009 similarly updated TASK-008's pgTAP file where one
 of its assertions had become intentionally obsolete.
 
-This deviation is flagged for Product Owner and reviewer attention rather than
-assumed to be pre-approved.
+The Product Owner reviewed this deviation and approved it explicitly, with the
+scope limited exactly as stated above.
 
 ## Forbidden paths
 
@@ -259,7 +382,10 @@ the newly inserted row, or the already-active row when the call is a repeat.
 - Raises `22023` when `p_data_category` is not one of the three approved values.
 - Raises `42501` unless the caller holds a membership in `p_team_id` with
   `status = 'active'` **and** `role = 'athlete'`. A coach-role membership
-  therefore cannot grant athlete sharing.
+  therefore cannot grant athlete sharing. This check is a locking read
+  (`select ... for update`) of that exact membership row, taken before any grant
+  lookup or insert, so a concurrent revocation cannot slip between the check and
+  the write — see "Codex round-1 High finding and fix".
 - Never accepts an athlete identifier from the client; the row is always written
   with `auth.uid()`.
 - Idempotent: a repeat call returns the existing active row's id and inserts
@@ -368,6 +494,9 @@ health-data authorization cannot drift apart.
 - [x] No TASK-008 membership policy changes semantic behaviour, and no existing
       migration file is edited.
 - [x] Generated types match the local database.
+- [x] No committed interleaving of a grant call and a membership revocation
+      leaves a revoked membership holding an active grant, proved by a
+      two-connection regression test that fails if the row lock is removed.
 - [x] The new pgTAP file passes, and TASK-008 and TASK-009 pgTAP files still
       pass unchanged.
 - [x] Existing mobile format, lint, typecheck, and unit tests still pass.
@@ -412,6 +541,9 @@ Synthetic identities only: `athlete-a`, `athlete-b`, `coach-a`, `coach-b`,
 | 29 | helper with grant plus both active memberships | true |
 | 30 | catalog: RLS enabled, policies, grants, table privileges, function privileges, constraints, indexes, triggers, `search_path` | asserted |
 | 31 | existing TASK-008 and TASK-009 pgTAP files | still pass |
+| 32 | grant concurrent with membership revocation, revocation locking first | grant blocks, then fails `42501`; zero grant rows |
+| 33 | grant concurrent with membership revocation, grant locking first | revocation blocks, then its trigger revokes the new grant; zero active grants |
+| 34 | reactivation after either race | zero active grants; helper false until an explicit new grant |
 
 ## Privacy classification
 
@@ -452,6 +584,11 @@ corepack pnpm exec supabase db reset --local --no-seed
 corepack pnpm exec supabase test db --local
 corepack pnpm exec supabase db lint --local --schema public,private --level warning --fail-on warning
 ```
+
+The deterministic concurrency regression test needs no separate command: it is
+an ordinary pgTAP file and runs as part of `supabase test db --local`, fourth
+and last. It manages its own committed fixtures and removes them, so the local
+database is left exactly as `db reset` produced it.
 
 Regenerate the types from the **local** stack and confirm no drift:
 
