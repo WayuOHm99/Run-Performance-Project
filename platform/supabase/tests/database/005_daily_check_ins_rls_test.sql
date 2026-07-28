@@ -1,0 +1,1381 @@
+-- TASK-012: Daily check-in authorization tests.
+--
+-- Every fixture in this file is synthetic, transaction-scoped, and rolled back.
+-- No seed file, no persistent fixture, no service-role key, and no real user
+-- data is involved. Test addresses use the reserved example.test domain.
+--
+-- This is the first table in the product that stores protected health data, so
+-- this file is deliberately written not to disclose any. No assertion
+-- description names an RPE, an overall feeling, or a pain status, and no
+-- assertion echoes one: every check compares a row count, a column name, an
+-- error code, or a snapshot join. A failure therefore reports which
+-- authorization rule broke, never a measurement.
+--
+-- Fixture setup runs as the local database owner. Every authorization assertion
+-- switches to the anon or authenticated role with synthetic JWT claims, so Row
+-- Level Security, table privileges, and column privileges are actually
+-- exercised.
+
+begin;
+
+-- pgTAP is created inside the transaction and rolled back with everything else,
+-- so it is never shipped in a migration.
+create extension if not exists pgtap with schema extensions;
+
+set local search_path = public, extensions, pg_catalog;
+
+select plan(166);
+
+-- ---------------------------------------------------------------------------
+-- Synthetic fixtures
+-- ---------------------------------------------------------------------------
+--
+-- Users
+--   coach-a          active coach   in Team A   (also owns one check-in)
+--   coach-t          active coach   in Team A   (revoked mid-test)
+--   coach-b          active coach   in Team B
+--   athlete-a        active athlete in Team A   (grants check_in; main subject)
+--   athlete-b        active athlete in Team A   (never grants anything)
+--   athlete-w        active athlete in Team A   (grants the two wrong categories)
+--   athlete-x        active athlete in Team A and Team B (grants check_in to
+--                                                         Team B only)
+--   athlete-t        active athlete in Team A   (membership revoked mid-test)
+
+insert into auth.users (id, instance_id, aud, role, email, raw_user_meta_data)
+values
+  ('00000000-0000-4000-8000-00000000000a', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'coach-a@example.test', '{}'::jsonb),
+  ('00000000-0000-4000-8000-00000000000b', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'athlete-a@example.test', '{}'::jsonb),
+  ('00000000-0000-4000-8000-00000000000c', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'athlete-b@example.test', '{}'::jsonb),
+  ('00000000-0000-4000-8000-00000000000d', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'coach-b@example.test', '{}'::jsonb),
+  ('00000000-0000-4000-8000-00000000000e', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'athlete-w@example.test', '{}'::jsonb),
+  ('00000000-0000-4000-8000-00000000000f', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'athlete-x@example.test', '{}'::jsonb),
+  ('00000000-0000-4000-8000-000000000012', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'athlete-t@example.test', '{}'::jsonb),
+  ('00000000-0000-4000-8000-000000000013', '00000000-0000-0000-0000-000000000000',
+   'authenticated', 'authenticated', 'coach-t@example.test', '{}'::jsonb);
+
+insert into public.teams (id, name)
+values
+  ('00000000-0000-4000-8000-0000000000a1', 'Team A'),
+  ('00000000-0000-4000-8000-0000000000b1', 'Team B');
+
+insert into public.team_memberships (team_id, profile_id, role, status, revoked_at)
+values
+  -- Team A
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-00000000000a',
+   'coach', 'active', null),
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000013',
+   'coach', 'active', null),
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-00000000000b',
+   'athlete', 'active', null),
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-00000000000c',
+   'athlete', 'active', null),
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-00000000000e',
+   'athlete', 'active', null),
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-00000000000f',
+   'athlete', 'active', null),
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000012',
+   'athlete', 'active', null),
+  -- Team B
+  ('00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-00000000000d',
+   'coach', 'active', null),
+  ('00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-00000000000f',
+   'athlete', 'active', null);
+
+-- ---------------------------------------------------------------------------
+-- 1. Structure
+-- ---------------------------------------------------------------------------
+
+select has_table('public', 'daily_check_ins', 'public.daily_check_ins exists');
+
+select col_is_pk('public', 'daily_check_ins', 'id',
+  'daily_check_ins.id is the primary key');
+
+select col_type_is('public', 'daily_check_ins', 'id', 'uuid',
+  'id is uuid');
+select col_type_is('public', 'daily_check_ins', 'athlete_profile_id', 'uuid',
+  'athlete_profile_id is uuid');
+select col_type_is('public', 'daily_check_ins', 'check_in_date', 'date',
+  'check_in_date is a date, so a check-in belongs to a calendar day rather than an instant');
+select col_type_is('public', 'daily_check_ins', 'rpe', 'smallint',
+  'rpe is smallint');
+select col_type_is('public', 'daily_check_ins', 'overall_feeling', 'smallint',
+  'overall_feeling is smallint');
+select col_type_is('public', 'daily_check_ins', 'pain_status', 'text',
+  'pain_status is text');
+select col_type_is('public', 'daily_check_ins', 'created_at',
+  'timestamp with time zone', 'created_at is timestamptz');
+select col_type_is('public', 'daily_check_ins', 'updated_at',
+  'timestamp with time zone', 'updated_at is timestamptz');
+
+select col_not_null('public', 'daily_check_ins', 'athlete_profile_id',
+  'athlete_profile_id is not null');
+select col_not_null('public', 'daily_check_ins', 'check_in_date',
+  'check_in_date is not null');
+select col_not_null('public', 'daily_check_ins', 'rpe',
+  'rpe is required');
+select col_not_null('public', 'daily_check_ins', 'overall_feeling',
+  'overall_feeling is required');
+select col_not_null('public', 'daily_check_ins', 'pain_status',
+  'pain_status is required');
+select col_not_null('public', 'daily_check_ins', 'created_at',
+  'created_at is not null');
+select col_not_null('public', 'daily_check_ins', 'updated_at',
+  'updated_at is not null');
+
+select col_has_default('public', 'daily_check_ins', 'id',
+  'id carries a database default, so the client never supplies one');
+select col_has_default('public', 'daily_check_ins', 'created_at',
+  'created_at carries a database default');
+select col_has_default('public', 'daily_check_ins', 'updated_at',
+  'updated_at carries a database default');
+
+-- Decision 1: a check-in is personal athlete data, not team-owned data.
+select hasnt_column('public', 'daily_check_ins', 'team_id',
+  'daily_check_ins has no team_id; sharing is per team through sharing_grants');
+
+-- Decision 3: the three structured health fields and nothing else. Pinning the
+-- exact column set makes a future note, body-location, diagnosis, or attachment
+-- column a test failure rather than a review miss.
+select is(
+  (select string_agg(column_name, ',' order by column_name)
+     from information_schema.columns
+    where table_schema = 'public' and table_name = 'daily_check_ins'),
+  'athlete_profile_id,check_in_date,created_at,id,overall_feeling,pain_status,rpe,updated_at',
+  'daily_check_ins carries exactly the eight approved columns'
+);
+select is(
+  (select coalesce(string_agg(column_name, ',' order by column_name), '')
+     from information_schema.columns
+    where table_schema = 'public' and table_name = 'daily_check_ins'
+      and data_type in ('text', 'character varying', 'character', 'json', 'jsonb', 'bytea')),
+  'pain_status',
+  'the only free-form-capable column is pain_status, and a check constraint pins it to two values'
+);
+
+-- ---------------------------------------------------------------------------
+-- 2. Constraints, indexes, and trigger
+-- ---------------------------------------------------------------------------
+
+select is(
+  (select count(*)::int from pg_catalog.pg_constraint
+    where conrelid = 'public.daily_check_ins'::regclass
+      and conname = 'daily_check_ins_rpe_valid'
+      and contype = 'c'),
+  1,
+  'the rpe range check constraint exists'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_constraint
+    where conrelid = 'public.daily_check_ins'::regclass
+      and conname = 'daily_check_ins_overall_feeling_valid'
+      and contype = 'c'),
+  1,
+  'the overall_feeling range check constraint exists'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_constraint
+    where conrelid = 'public.daily_check_ins'::regclass
+      and conname = 'daily_check_ins_pain_status_valid'
+      and contype = 'c'),
+  1,
+  'the pain_status check constraint exists'
+);
+
+-- Decision 2 is a constraint, not an application convention.
+select is(
+  (select count(*)::int from pg_catalog.pg_constraint
+    where conrelid = 'public.daily_check_ins'::regclass
+      and conname = 'daily_check_ins_athlete_date_unique'
+      and contype = 'u'),
+  1,
+  'the one-check-in-per-athlete-per-date unique constraint exists'
+);
+select is(
+  (select string_agg(a.attname, ',' order by a.attname)
+     from pg_catalog.pg_constraint as c
+     cross join unnest(c.conkey) as k(attnum)
+     join pg_catalog.pg_attribute as a
+       on a.attrelid = c.conrelid and a.attnum = k.attnum
+    where c.conrelid = 'public.daily_check_ins'::regclass
+      and c.conname = 'daily_check_ins_athlete_date_unique'),
+  'athlete_profile_id,check_in_date',
+  'the unique constraint covers exactly the athlete and the calendar date'
+);
+
+select is(
+  (select confrelid::regclass::text from pg_catalog.pg_constraint
+    where conrelid = 'public.daily_check_ins'::regclass
+      and contype = 'f'),
+  'profiles',
+  'athlete_profile_id references public.profiles'
+);
+select is(
+  (select confdeltype::text from pg_catalog.pg_constraint
+    where conrelid = 'public.daily_check_ins'::regclass
+      and contype = 'f'),
+  'c',
+  'deleting the profile cascades the check-ins away, leaving no orphan health row'
+);
+
+-- Index justification: exactly one index exists, the unique constraint's, whose
+-- leading column serves both the own-read and the coach-read query paths. A
+-- speculative extra index on a protected-health table would be cost without a
+-- query path.
+select is(
+  (select string_agg(i.indexrelid::regclass::text, ',' order by i.indexrelid::regclass::text)
+     from pg_catalog.pg_index as i
+    where i.indrelid = 'public.daily_check_ins'::regclass),
+  'daily_check_ins_athlete_date_unique,daily_check_ins_pkey',
+  'only the primary key and the athlete-and-date unique index exist; no unjustified index was added'
+);
+
+select has_trigger('public', 'daily_check_ins', 'daily_check_ins_enforce_columns',
+  'the column enforcement trigger exists on daily_check_ins');
+
+-- ---------------------------------------------------------------------------
+-- 3. Constraint and trigger behaviour (positive controls, run as the owner)
+-- ---------------------------------------------------------------------------
+--
+-- These probes use athlete-b and are removed at the end of the section, so the
+-- authorization sections below start from a known state. The out-of-range
+-- literals here are synthetic boundary probes, not anybody's measurements.
+
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             -1, 3, 'none') $$,
+  '23514', null,
+  'an rpe below the allowed range is rejected'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             11, 3, 'none') $$,
+  '23514', null,
+  'an rpe above the allowed range is rejected'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             5, 0, 'none') $$,
+  '23514', null,
+  'an overall_feeling below the allowed range is rejected'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             5, 6, 'none') $$,
+  '23514', null,
+  'an overall_feeling above the allowed range is rejected'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             5, 3, 'mild') $$,
+  '23514', null,
+  'a pain_status outside the two approved values is rejected'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             5, 3, '') $$,
+  '23514', null,
+  'an empty pain_status is rejected, so there is no free-text escape hatch'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             5, 3, 'NONE') $$,
+  '23514', null,
+  'pain_status is case-sensitive, so only the two exact approved values pass'
+);
+
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             0, 1, 'present') $$,
+  'a row at the lower bound of both scales is accepted'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             10, 5, 'none') $$,
+  '23505', null,
+  'a second row for the same athlete and the same calendar date is rejected'
+);
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-21',
+             10, 5, 'none') $$,
+  'the same athlete may check in on a different calendar date'
+);
+
+-- Forged timestamps are overwritten by the trigger even for a trusted writer.
+insert into public.daily_check_ins
+  (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
+   created_at, updated_at)
+values
+  ('00000000-0000-4000-8000-00000000000c', date '2026-07-22', 5, 3, 'none',
+   timestamptz '2000-01-01 00:00:00+00', timestamptz '2000-01-02 00:00:00+00');
+
+select is(
+  (select created_at from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+      and check_in_date = date '2026-07-22'),
+  now(),
+  'a supplied created_at is overwritten with database time on insert'
+);
+select is(
+  (select updated_at from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+      and check_in_date = date '2026-07-22'),
+  now(),
+  'a supplied updated_at is overwritten with database time on insert'
+);
+
+-- A trusted update attempting to move the owner, the date, the identity, and
+-- the creation time is silently corrected by the trigger.
+update public.daily_check_ins
+set id = '00000000-0000-4000-8000-0000000000ff',
+    athlete_profile_id = '00000000-0000-4000-8000-00000000000b',
+    check_in_date = date '2000-01-01',
+    created_at = timestamptz '2000-01-01 00:00:00+00',
+    updated_at = timestamptz '2000-01-01 00:00:00+00'
+where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+  and check_in_date = date '2026-07-22';
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+      and check_in_date = date '2026-07-22'
+      and created_at = now()),
+  1,
+  'the owner, the calendar date, and created_at are immutable after insert'
+);
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where id = '00000000-0000-4000-8000-0000000000ff'),
+  0,
+  'the row id is immutable after insert'
+);
+select is(
+  (select updated_at from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+      and check_in_date = date '2026-07-22'),
+  now(),
+  'a supplied updated_at is overwritten with database time on update'
+);
+
+delete from public.daily_check_ins
+where athlete_profile_id = '00000000-0000-4000-8000-00000000000c';
+
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  0,
+  'the owner-level probe rows are cleared before the authorization sections'
+);
+
+-- ---------------------------------------------------------------------------
+-- 4. Anonymous access
+-- ---------------------------------------------------------------------------
+--
+-- anon holds no privilege at all, so every statement fails at the privilege
+-- layer with 42501, which is strictly stronger than an RLS row filter.
+
+set local role anon;
+
+select throws_ok(
+  $$ select * from public.daily_check_ins $$,
+  '42501', null,
+  'anonymous cannot read daily_check_ins'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-20',
+             5, 3, 'none') $$,
+  '42501', null,
+  'anonymous cannot insert a check-in'
+);
+select throws_ok(
+  $$ update public.daily_check_ins set rpe = rpe $$,
+  '42501', null,
+  'anonymous cannot update a check-in'
+);
+select throws_ok(
+  $$ delete from public.daily_check_ins $$,
+  '42501', null,
+  'anonymous cannot delete a check-in'
+);
+select throws_ok(
+  $$ select private.can_current_user_read_check_in(
+       '00000000-0000-4000-8000-00000000000b'::uuid) $$,
+  '42501', null,
+  'anonymous cannot execute the check-in read helper'
+);
+
+reset role;
+
+-- ---------------------------------------------------------------------------
+-- 5. The data subject owns their row
+-- ---------------------------------------------------------------------------
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-20',
+             5, 3, 'none') $$,
+  'an authenticated athlete inserts their own check-in'
+);
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  1,
+  'the athlete reads back exactly their own one row'
+);
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+      and created_at = now()
+      and updated_at = now()),
+  1,
+  'both timestamps came from the database on a client insert'
+);
+
+-- Column privileges, not merely trigger correction: the client cannot even name
+-- the database-controlled columns.
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (id, athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-0000000000fe',
+             '00000000-0000-4000-8000-00000000000b', date '2026-07-25',
+             5, 3, 'none') $$,
+  '42501', null,
+  'a client insert cannot name the id column'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
+        created_at)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-25',
+             5, 3, 'none', timestamptz '2000-01-01 00:00:00+00') $$,
+  '42501', null,
+  'a client insert cannot name the created_at column'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
+        updated_at)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-25',
+             5, 3, 'none', timestamptz '2000-01-01 00:00:00+00') $$,
+  '42501', null,
+  'a client insert cannot name the updated_at column'
+);
+
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             5, 3, 'none') $$,
+  '42501', null,
+  'a client cannot insert a check-in for another profile'
+);
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-20',
+             8, 4, 'present') $$,
+  '23505', null,
+  'a client cannot create a second check-in for the same calendar date'
+);
+
+-- Decision 5: the data subject may change exactly the three health fields.
+select lives_ok(
+  $$ update public.daily_check_ins
+        set rpe = 8, overall_feeling = 4, pain_status = 'present'
+      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$,
+  'the data subject updates their own three health fields'
+);
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+      and check_in_date = date '2026-07-20'
+      and updated_at = now()),
+  1,
+  'the updated row keeps its owner and date, and updated_at stays under database control'
+);
+
+select throws_ok(
+  $$ update public.daily_check_ins
+        set athlete_profile_id = '00000000-0000-4000-8000-00000000000c' $$,
+  '42501', null,
+  'a client update cannot name the athlete_profile_id column'
+);
+select throws_ok(
+  $$ update public.daily_check_ins set check_in_date = date '2026-07-01' $$,
+  '42501', null,
+  'a client update cannot name the check_in_date column'
+);
+select throws_ok(
+  $$ update public.daily_check_ins
+        set id = '00000000-0000-4000-8000-0000000000fd' $$,
+  '42501', null,
+  'a client update cannot name the id column'
+);
+select throws_ok(
+  $$ update public.daily_check_ins
+        set created_at = timestamptz '2000-01-01 00:00:00+00' $$,
+  '42501', null,
+  'a client update cannot name the created_at column'
+);
+select throws_ok(
+  $$ update public.daily_check_ins
+        set updated_at = timestamptz '2000-01-01 00:00:00+00' $$,
+  '42501', null,
+  'a client update cannot name the updated_at column'
+);
+
+-- Decision 5: there is no client DELETE privilege and no DELETE policy.
+select throws_ok(
+  $$ delete from public.daily_check_ins $$,
+  '42501', null,
+  'the data subject cannot delete their own check-in, because no client DELETE path exists'
+);
+
+reset role;
+
+-- The remaining synthetic subjects insert their own rows the same way, which
+-- also proves the insert policy is not specific to one fixture.
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000c","role":"authenticated"}';
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
+             5, 3, 'none') $$,
+  'a second Team A athlete inserts their own check-in'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000e","role":"authenticated"}';
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000e', date '2026-07-20',
+             5, 3, 'none') $$,
+  'the wrong-category athlete inserts their own check-in'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000f","role":"authenticated"}';
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000f', date '2026-07-20',
+             5, 3, 'none') $$,
+  'the dual-team athlete inserts their own check-in'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000012","role":"authenticated"}';
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-000000000012', date '2026-07-20',
+             5, 3, 'none') $$,
+  'the toggle athlete inserts their own check-in'
+);
+reset role;
+
+-- Decision 6 is about the data subject, not about a role. A user who holds a
+-- coach membership is still the owner of their own check-in, and that row is
+-- exposed to nobody by the self policies.
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select lives_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000a', date '2026-07-20',
+             5, 3, 'none') $$,
+  'self insert is identity-owned, so a user who is also a coach may record their own check-in'
+);
+reset role;
+
+-- A snapshot of every stored row. Later sections assert against this join to
+-- prove that a refused mutation changed nothing, without ever echoing a health
+-- value into the test output.
+create temporary table check_in_snapshot as
+select id, athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status
+from public.daily_check_ins;
+
+select is(
+  (select count(*)::int from check_in_snapshot),
+  6,
+  'six synthetic check-in rows exist, one per subject'
+);
+
+-- ---------------------------------------------------------------------------
+-- 6. One athlete cannot reach another athlete's row
+-- ---------------------------------------------------------------------------
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000c","role":"authenticated"}';
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  0,
+  'an athlete in the same team cannot read another athlete''s check-in'
+);
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  1,
+  'that athlete sees only their own row and nothing else at all'
+);
+
+-- The update matches no row through the policy rather than erroring. The
+-- snapshot join below is what proves nothing changed.
+update public.daily_check_ins as c
+set rpe = c.rpe, overall_feeling = c.overall_feeling, pain_status = c.pain_status
+where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b';
+
+select throws_ok(
+  $$ delete from public.daily_check_ins
+      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$,
+  '42501', null,
+  'an athlete cannot delete another athlete''s check-in'
+);
+
+reset role;
+
+select is(
+  (select count(*)::int
+     from public.daily_check_ins as c
+     join check_in_snapshot as s
+       on s.id = c.id
+      and s.athlete_profile_id = c.athlete_profile_id
+      and s.check_in_date = c.check_in_date
+      and s.rpe = c.rpe
+      and s.overall_feeling = c.overall_feeling
+      and s.pain_status = c.pain_status),
+  6,
+  'every stored row is unchanged after another athlete attempted an update'
+);
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000a'),
+  0,
+  'an athlete cannot read the check-in owned by a coach of their own team'
+);
+
+reset role;
+
+-- ---------------------------------------------------------------------------
+-- 7. Consent is what a coach's read depends on
+-- ---------------------------------------------------------------------------
+--
+-- Grants are created through the TASK-011 RPCs, as a real client would, so the
+-- coach-read path is exercised end to end rather than against hand-written
+-- grant rows.
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+select ok(
+  (select public.grant_team_data_sharing(
+     '00000000-0000-4000-8000-0000000000a1'::uuid, 'check_in')) is not null,
+  'the main subject grants check_in sharing to Team A'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000e","role":"authenticated"}';
+select ok(
+  (select public.grant_team_data_sharing(
+     '00000000-0000-4000-8000-0000000000a1'::uuid, 'workout_summary')) is not null,
+  'the wrong-category athlete grants workout_summary to Team A'
+);
+select ok(
+  (select public.grant_team_data_sharing(
+     '00000000-0000-4000-8000-0000000000a1'::uuid, 'sleep_summary')) is not null,
+  'the wrong-category athlete grants sleep_summary to Team A'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000f","role":"authenticated"}';
+select ok(
+  (select public.grant_team_data_sharing(
+     '00000000-0000-4000-8000-0000000000b1'::uuid, 'check_in')) is not null,
+  'the dual-team athlete grants check_in to Team B only'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000012","role":"authenticated"}';
+select ok(
+  (select public.grant_team_data_sharing(
+     '00000000-0000-4000-8000-0000000000a1'::uuid, 'check_in')) is not null,
+  'the toggle athlete grants check_in sharing to Team A'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  1,
+  'an active coach reads the check-in of an actively sharing athlete in the same team'
+);
+select ok(
+  private.can_current_user_read_check_in('00000000-0000-4000-8000-00000000000b'),
+  'the read helper is true for that athlete'
+);
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'),
+  0,
+  'both memberships active but no grant at all means the coach reads nothing'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-00000000000c'),
+  'the read helper is false without a grant'
+);
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000e'),
+  0,
+  'a workout_summary and sleep_summary grant does not authorize check-in access'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-00000000000e'),
+  'the read helper is false for a grant in another category'
+);
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000f'),
+  0,
+  'a Team A coach cannot read an athlete who shares only through Team B'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-00000000000f'),
+  'the read helper is false across a team the caller does not coach'
+);
+
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  3,
+  'the coach sees exactly the two actively shared rows plus their own, and nothing else'
+);
+
+-- Decision 8: the coach has no write path, even to a row they may read.
+select throws_ok(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-23',
+             5, 3, 'none') $$,
+  '42501', null,
+  'a coach cannot insert a check-in for an athlete who shares with them'
+);
+update public.daily_check_ins as c
+set rpe = c.rpe, overall_feeling = c.overall_feeling, pain_status = c.pain_status
+where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b';
+select throws_ok(
+  $$ delete from public.daily_check_ins
+      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$,
+  '42501', null,
+  'a coach cannot delete a check-in'
+);
+
+reset role;
+
+select is(
+  (select count(*)::int
+     from public.daily_check_ins as c
+     join check_in_snapshot as s
+       on s.id = c.id
+      and s.athlete_profile_id = c.athlete_profile_id
+      and s.check_in_date = c.check_in_date
+      and s.rpe = c.rpe
+      and s.overall_feeling = c.overall_feeling
+      and s.pain_status = c.pain_status),
+  6,
+  'every stored row is unchanged after a coach attempted an update'
+);
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000d","role":"authenticated"}';
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000f'),
+  1,
+  'the Team B coach reads the athlete who granted through Team B'
+);
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  0,
+  'the Team B coach reads nothing belonging to a Team A athlete'
+);
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  1,
+  'the Team B coach sees exactly that one shared row'
+);
+
+reset role;
+
+-- Another athlete of the same team cannot ride the coach's grant.
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000c","role":"authenticated"}';
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  0,
+  'a teammate athlete cannot use the grant that authorizes the coach'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-00000000000b'),
+  'the read helper is false for a caller who holds no coach membership'
+);
+
+reset role;
+
+-- ---------------------------------------------------------------------------
+-- 8. Revoking the grant removes coach visibility on the next query
+-- ---------------------------------------------------------------------------
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+select ok(
+  (select public.revoke_team_data_sharing(
+     '00000000-0000-4000-8000-0000000000a1'::uuid, 'check_in')) is not null,
+  'the athlete withdraws the check_in consent'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  0,
+  'the coach loses that athlete''s check-in on the very next query, with no token change'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-00000000000b'),
+  'the read helper turns false immediately after revocation'
+);
+reset role;
+
+-- Decision 6: revocation is about the coach, never about the owner.
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  1,
+  'the data subject still reads their own check-in after revoking sharing'
+);
+reset role;
+
+-- Retained consent history must never authorize a read.
+select is(
+  (select count(*)::int from public.sharing_grants
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
+      and data_category = 'check_in'
+      and revoked_at is not null),
+  1,
+  'the revoked grant is retained as consent history'
+);
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  0,
+  'the retained revoked grant authorizes nothing'
+);
+reset role;
+
+-- Only an explicit new grant restores access.
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+select ok(
+  (select public.grant_team_data_sharing(
+     '00000000-0000-4000-8000-0000000000a1'::uuid, 'check_in')) is not null,
+  'the athlete grants check_in sharing again'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  1,
+  'coach access returns only after an explicit new grant'
+);
+reset role;
+
+-- ---------------------------------------------------------------------------
+-- 9. Revoking the coach membership removes coach visibility
+-- ---------------------------------------------------------------------------
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000013","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  1,
+  'a second active Team A coach also reads the shared check-in'
+);
+reset role;
+
+update public.team_memberships
+set status = 'revoked', revoked_at = now()
+where team_id = '00000000-0000-4000-8000-0000000000a1'
+  and profile_id = '00000000-0000-4000-8000-000000000013';
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000013","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  0,
+  'that coach loses every check-in on the very next query after their membership is revoked'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-00000000000b'),
+  'the read helper is false for a revoked coach membership'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'),
+  1,
+  'revoking one coach does not affect another active coach of the same team'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  1,
+  'the data subject still reads their own check-in after a coach membership is revoked'
+);
+reset role;
+
+-- ---------------------------------------------------------------------------
+-- 10. Revoking the athlete membership removes coach visibility
+-- ---------------------------------------------------------------------------
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-000000000012'),
+  1,
+  'the coach reads the toggle athlete''s check-in while both memberships are active'
+);
+reset role;
+
+update public.team_memberships
+set status = 'revoked', revoked_at = now()
+where team_id = '00000000-0000-4000-8000-0000000000a1'
+  and profile_id = '00000000-0000-4000-8000-000000000012';
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-000000000012'),
+  0,
+  'the coach loses that check-in on the next query after the athlete membership is revoked'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-000000000012'),
+  'the read helper is false for a revoked athlete membership'
+);
+reset role;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000012","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins),
+  1,
+  'the data subject still reads their own check-in after their membership is revoked'
+);
+reset role;
+
+-- The TASK-011 trigger revoked the grant as well, and reactivation revives
+-- nothing.
+select is(
+  (select count(*)::int from public.sharing_grants
+    where athlete_profile_id = '00000000-0000-4000-8000-000000000012'
+      and revoked_at is null),
+  0,
+  'revoking the athlete membership left no active grant behind'
+);
+
+update public.team_memberships
+set status = 'active', revoked_at = null
+where team_id = '00000000-0000-4000-8000-0000000000a1'
+  and profile_id = '00000000-0000-4000-8000-000000000012';
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-000000000012'),
+  0,
+  'reactivating the membership does not restore coach access to the check-in'
+);
+select ok(
+  not private.can_current_user_read_check_in('00000000-0000-4000-8000-000000000012'),
+  'the read helper stays false after reactivation until the athlete grants again'
+);
+reset role;
+
+-- ---------------------------------------------------------------------------
+-- 11. Row Level Security, policies, and privileges
+-- ---------------------------------------------------------------------------
+
+select ok(
+  (select relrowsecurity from pg_catalog.pg_class
+    where oid = 'public.daily_check_ins'::regclass),
+  'RLS is enabled on public.daily_check_ins'
+);
+
+select is(
+  (select count(*)::int from pg_catalog.pg_policies
+    where schemaname = 'public' and tablename = 'daily_check_ins'),
+  4,
+  'daily_check_ins carries exactly four policies'
+);
+select is(
+  (select coalesce(string_agg(policyname || ':' || cmd, ', ' order by policyname), '')
+     from pg_catalog.pg_policies
+    where schemaname = 'public' and tablename = 'daily_check_ins'),
+  'daily_check_ins_insert_own:INSERT, daily_check_ins_select_own:SELECT, '
+  || 'daily_check_ins_select_shared_for_coach:SELECT, daily_check_ins_update_own:UPDATE',
+  'the four policies are exactly one INSERT, two SELECT, and one UPDATE'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_policies
+    where schemaname = 'public' and tablename = 'daily_check_ins'
+      and cmd = 'DELETE'),
+  0,
+  'no DELETE policy exists on daily_check_ins'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_policies
+    where schemaname = 'public' and tablename = 'daily_check_ins'
+      and 'anon' = any (roles)),
+  0,
+  'no daily_check_ins policy targets the anon role'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_policies
+    where schemaname = 'public' and tablename = 'daily_check_ins'
+      and 'public' = any (roles)),
+  0,
+  'no daily_check_ins policy targets every role'
+);
+-- The coach path is read-only: it must not appear on a write policy.
+select is(
+  (select count(*)::int from pg_catalog.pg_policies
+    where schemaname = 'public' and tablename = 'daily_check_ins'
+      and cmd <> 'SELECT'
+      and coalesce(qual, '') || coalesce(with_check, '')
+          like '%can_current_user_read_check_in%'),
+  0,
+  'no write policy consults the coach read helper'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_policies
+    where schemaname = 'public' and tablename = 'daily_check_ins'
+      and cmd <> 'SELECT'
+      and coalesce(with_check, '') not like '%auth.uid()%'),
+  0,
+  'every write policy constrains the row to the caller''s own identity'
+);
+
+select is(
+  (select count(*)::int from information_schema.role_table_grants
+    where table_schema = 'public' and table_name = 'daily_check_ins'
+      and grantee = 'anon'),
+  0,
+  'anon holds no table privilege on daily_check_ins'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_attribute as a
+     cross join pg_catalog.aclexplode(a.attacl) as acl
+    where a.attrelid = 'public.daily_check_ins'::regclass
+      and acl.grantee = 'anon'::regrole),
+  0,
+  'anon holds no column privilege on daily_check_ins either'
+);
+select is(
+  (select coalesce(string_agg(distinct privilege_type, ',' order by privilege_type), '')
+     from information_schema.role_table_grants
+    where table_schema = 'public' and table_name = 'daily_check_ins'
+      and grantee = 'authenticated'),
+  'SELECT',
+  'the only table-wide privilege authenticated holds is SELECT'
+);
+
+-- The write privileges are column-level, which is what makes the
+-- database-controlled and immutable columns unwritable rather than merely
+-- unwritten.
+select is(
+  (select coalesce(string_agg(a.attname, ',' order by a.attname), '')
+     from pg_catalog.pg_attribute as a
+     cross join pg_catalog.aclexplode(a.attacl) as acl
+    where a.attrelid = 'public.daily_check_ins'::regclass
+      and acl.grantee = 'authenticated'::regrole
+      and acl.privilege_type = 'INSERT'),
+  'athlete_profile_id,check_in_date,overall_feeling,pain_status,rpe',
+  'authenticated may insert exactly the five client-supplied columns'
+);
+select is(
+  (select coalesce(string_agg(a.attname, ',' order by a.attname), '')
+     from pg_catalog.pg_attribute as a
+     cross join pg_catalog.aclexplode(a.attacl) as acl
+    where a.attrelid = 'public.daily_check_ins'::regclass
+      and acl.grantee = 'authenticated'::regrole
+      and acl.privilege_type = 'UPDATE'),
+  'overall_feeling,pain_status,rpe',
+  'authenticated may update exactly the three health columns'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_attribute as a
+     cross join pg_catalog.aclexplode(a.attacl) as acl
+    where a.attrelid = 'public.daily_check_ins'::regclass
+      and acl.grantee = 'authenticated'::regrole
+      and acl.privilege_type not in ('INSERT', 'UPDATE')),
+  0,
+  'authenticated holds no other column-level privilege'
+);
+
+select ok(
+  has_table_privilege('authenticated', 'public.daily_check_ins', 'select'),
+  'authenticated can select from daily_check_ins'
+);
+select ok(
+  not has_table_privilege('anon', 'public.daily_check_ins', 'select'),
+  'anon cannot select from daily_check_ins'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.daily_check_ins', 'insert'),
+  'authenticated holds no table-wide insert privilege'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.daily_check_ins', 'update'),
+  'authenticated holds no table-wide update privilege'
+);
+select ok(
+  has_any_column_privilege('authenticated', 'public.daily_check_ins', 'insert'),
+  'authenticated holds a column-level insert privilege instead'
+);
+select ok(
+  has_any_column_privilege('authenticated', 'public.daily_check_ins', 'update'),
+  'authenticated holds a column-level update privilege instead'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.daily_check_ins', 'delete'),
+  'authenticated cannot delete from daily_check_ins'
+);
+select ok(
+  not has_any_column_privilege('anon', 'public.daily_check_ins', 'insert'),
+  'anon holds no insert privilege on any column'
+);
+select ok(
+  not has_any_column_privilege('anon', 'public.daily_check_ins', 'update'),
+  'anon holds no update privilege on any column'
+);
+select ok(
+  not has_table_privilege('anon', 'public.daily_check_ins', 'delete'),
+  'anon cannot delete from daily_check_ins'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.daily_check_ins', 'truncate'),
+  'authenticated cannot truncate daily_check_ins'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.daily_check_ins', 'references'),
+  'authenticated holds no references privilege on daily_check_ins'
+);
+select ok(
+  not has_table_privilege('authenticated', 'public.daily_check_ins', 'trigger'),
+  'authenticated holds no trigger privilege on daily_check_ins'
+);
+
+-- The earlier tables are untouched by this migration.
+select is(
+  (select count(*)::int from information_schema.role_table_grants
+    where table_schema = 'public'
+      and table_name in ('profiles', 'teams', 'team_memberships', 'sharing_grants')
+      and grantee = 'anon'),
+  0,
+  'anon still holds no privilege on the TASK-008 and TASK-011 tables'
+);
+select is(
+  (select coalesce(string_agg(distinct privilege_type, ',' order by privilege_type), '')
+     from information_schema.role_table_grants
+    where table_schema = 'public'
+      and table_name in ('teams', 'team_memberships', 'sharing_grants')
+      and grantee = 'authenticated'),
+  'SELECT',
+  'the TASK-008 and TASK-011 tables remain read-only for authenticated'
+);
+
+-- ---------------------------------------------------------------------------
+-- 12. Function catalog, privileges, and reuse of the TASK-011 helper
+-- ---------------------------------------------------------------------------
+
+select has_function('private', 'can_current_user_read_check_in',
+  array['uuid'], 'the check-in read helper exists in the private schema');
+select has_function('private', 'enforce_daily_check_in_columns',
+  array[]::text[], 'the column enforcement trigger function exists in the private schema');
+
+select is(
+  (select count(*)::int from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname in ('public', 'graphql_public')
+      and p.proname in ('can_current_user_read_check_in',
+                        'enforce_daily_check_in_columns')),
+  0,
+  'neither TASK-012 function is defined in an exposed schema'
+);
+
+select is(
+  (select count(*)::int from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'private' and p.prosecdef
+      and p.proname in ('can_current_user_read_check_in',
+                        'enforce_daily_check_in_columns')),
+  2,
+  'both TASK-012 functions are SECURITY DEFINER'
+);
+select is(
+  (select count(*)::int from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'private'
+      and p.proname in ('can_current_user_read_check_in',
+                        'enforce_daily_check_in_columns')
+      and exists (
+        select 1 from unnest(p.proconfig) as cfg
+        -- PostgreSQL stores an empty search_path canonically as search_path=""
+        where cfg in ('search_path=""', 'search_path='))),
+  2,
+  'both TASK-012 functions pin an empty search_path'
+);
+
+select ok(
+  not has_function_privilege('anon',
+    'private.can_current_user_read_check_in(uuid)', 'execute'),
+  'anon cannot execute the check-in read helper'
+);
+select ok(
+  has_function_privilege('authenticated',
+    'private.can_current_user_read_check_in(uuid)', 'execute'),
+  'authenticated can execute the read helper, which the coach policy requires'
+);
+select ok(
+  not has_function_privilege('authenticated',
+    'private.enforce_daily_check_in_columns()', 'execute'),
+  'authenticated cannot execute the column enforcement trigger function'
+);
+select ok(
+  not has_schema_privilege('anon', 'private', 'usage'),
+  'anon still holds no usage on the private schema'
+);
+
+-- Decision 7: the coach path reuses the TASK-011 authorization helper rather
+-- than duplicating or weakening it. These assertions fail the moment somebody
+-- forks that logic into this table's helper.
+select has_function('private', 'can_current_user_read_shared_data',
+  array['uuid', 'uuid', 'text'],
+  'the TASK-011 authorization helper still exists with its original signature');
+select ok(
+  (select p.prosrc like '%can_current_user_read_shared_data%'
+     from pg_catalog.pg_proc p
+     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'private' and p.proname = 'can_current_user_read_check_in'),
+  'the check-in read helper calls the TASK-011 authorization helper'
+);
+select ok(
+  (select p.prosrc not like '%sharing_grants%'
+     from pg_catalog.pg_proc p
+     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'private' and p.proname = 'can_current_user_read_check_in'),
+  'it does not reimplement the sharing-grant lookup'
+);
+select ok(
+  (select p.prosrc not like '%coach%'
+     from pg_catalog.pg_proc p
+     join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'private' and p.proname = 'can_current_user_read_check_in'),
+  'it does not reimplement the coach-role check'
+);
+select ok(
+  (select count(*)::int from pg_catalog.pg_policies
+     where schemaname = 'public' and tablename = 'daily_check_ins'
+       and policyname = 'daily_check_ins_select_shared_for_coach'
+       and qual like '%can_current_user_read_check_in%') = 1,
+  'the coach SELECT policy delegates entirely to the read helper'
+);
+
+-- ---------------------------------------------------------------------------
+-- 13. Trusted cascade deletion leaves no orphan health row
+-- ---------------------------------------------------------------------------
+
+delete from auth.users where id = '00000000-0000-4000-8000-00000000000c';
+
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'),
+  0,
+  'deleting the auth user cascades through the profile to every check-in'
+);
+
+select * from finish();
+
+rollback;

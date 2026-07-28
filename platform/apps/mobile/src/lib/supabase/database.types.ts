@@ -9,6 +9,47 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
+      daily_check_ins: {
+        Row: {
+          athlete_profile_id: string;
+          check_in_date: string;
+          created_at: string;
+          id: string;
+          overall_feeling: number;
+          pain_status: string;
+          rpe: number;
+          updated_at: string;
+        };
+        Insert: {
+          athlete_profile_id: string;
+          check_in_date: string;
+          created_at?: string;
+          id?: string;
+          overall_feeling: number;
+          pain_status: string;
+          rpe: number;
+          updated_at?: string;
+        };
+        Update: {
+          athlete_profile_id?: string;
+          check_in_date?: string;
+          created_at?: string;
+          id?: string;
+          overall_feeling?: number;
+          pain_status?: string;
+          rpe?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "daily_check_ins_athlete_profile_id_fkey";
+            columns: ["athlete_profile_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       profiles: {
         Row: {
           created_at: string;
