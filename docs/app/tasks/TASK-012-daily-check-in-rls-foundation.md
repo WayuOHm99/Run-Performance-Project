@@ -2,13 +2,13 @@
 
 Status: Implemented and verified locally. Round 1 Codex findings H1, M1, M2, and
 M3, Round 2 Codex findings M1, M2, L1, and L2, the Round 3 Codex Medium on
-pgTAP failure-output safety, and Round 4 Codex findings M1 and L1 are fixed and
-re-verified. Awaiting GPT/Codex Round 5 read-only review.
+pgTAP failure-output safety, Round 4 Codex findings M1 and L1, and Round 5 Codex
+findings M1 and M2 are fixed and re-verified. Awaiting GPT/Codex Round 6
+read-only review.
 
-One open finding of my own discovery is recorded as F1 in the handoff: bare
-fixture DML in the test file still emits a native psql error, including a
-failing-row `DETAIL`, if a schema change ever makes a fixture invalid. It is
-outside the approved Round 5 scope and awaits a Product Owner decision.
+F1, the open finding of my own discovery recorded in Round 5 — bare fixture DML
+emitting a native psql error with a failing-row `DETAIL` — was approved as Round
+6 M1 and is closed with mutation proof. Nothing is outstanding.
 
 The approved scope and decisions 1–10 below are unchanged. Round 2 altered only
 how the boundary is enforced and proved, never what it is; the changes are
@@ -502,15 +502,37 @@ query, with only a row count returned to the assertion (Round 4). A captured
 `RETURNED_SQLSTATE` is returned directly: it is a five-character code from a
 closed enumeration and can carry no value, identifier, date, or row.
 
-The guarantee is structural as of Round 5. `throws_ok()` and `lives_ok()` print
-the caught database error when they fail, so all 35 of their calls were replaced
-with a `SECURITY INVOKER` `pg_temp.probe_state(text)` probe that runs the
-statement under the caller's role and JWT claims, preserves the effects of a
-successful statement, and returns only the fixed sentinel `'ok'` or a
-five-character `SQLSTATE`. No `throws_ok` or `lives_ok` call remains in the
-file. The two assertions that compared a raw `created_at`/`updated_at` against
-`now()` were converted to row counts in the same round, so no assertion can
-print a timestamp.
+The guarantee is structural as of Round 5 for assertions and as of Round 6 for
+the file as a whole.
+
+`throws_ok()` and `lives_ok()` print the caught database error when they fail,
+so all 35 of their calls were replaced with a `SECURITY INVOKER`
+`pg_temp.probe_state(text)` probe that runs the statement under the caller's
+role and JWT claims, preserves the effects of a successful statement, and
+returns only the fixed sentinel `'ok'` or a five-character `SQLSTATE`. No
+`throws_ok` or `lives_ok` call remains. The two assertions that compared a raw
+`created_at`/`updated_at` against `now()` were converted to row counts in the
+same round, so no assertion can print a timestamp.
+
+Round 6 extends the boundary to executable fixture statements, which sat outside
+it. A bare `INSERT`, `UPDATE`, or `DELETE` that fails emits psql's native error
+including `DETAIL: Failing row contains (...)`. All 17 statements carrying a
+health value, athlete identifier, or check-in date are wrapped in
+`pg_temp.run_fixture(text)`, which re-raises a fixed sanitized `22023` so an
+expected-success failure stays loud and aborts the file rather than continuing
+silently. The three affected-row CTE updates use `pg_temp.probe_rowcount(text)`,
+which returns `GET DIAGNOSTICS ROW_COUNT` and raises sanitized on error, keeping
+owner-update-1-row, cross-athlete-0, and coach-0 at their previous strength
+while ensuring an unexpected failure cannot be misread as zero rows. The only
+statement left bare is a column-definition-only `CREATE TEMPORARY TABLE`, which
+carries no value, identifier, or date.
+
+Round 6 also closes a gap in the probes themselves. PostgreSQL's `WHEN OTHERS`
+does not catch `QUERY_CANCELED` or `ASSERT_FAILURE`, so both escaped with a
+`CONTEXT` line reproducing the dynamic SQL verbatim. All four temporary helpers
+now handle those two conditions by name and re-raise a fixed sanitized
+diagnostic, so the condition stays terminal while the statement text is
+replaced.
 
 ## Expected mechanical update to the TASK-008 test
 

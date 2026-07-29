@@ -1,11 +1,10 @@
 # TASK-012 Handoff — Daily Check-In RLS Foundation
 
-Status: Implemented, reviewed four times by GPT/Codex, and Round 5 fixes applied
-and verified locally. Awaiting GPT/Codex Round 5 read-only review.
+Status: Implemented, reviewed five times by GPT/Codex, and Round 6 fixes applied
+and verified locally. Awaiting GPT/Codex Round 6 read-only review.
 
-One **new** failure-output finding was discovered during Round 5 mutation
-testing and is **not** fixed: bare fixture DML in the test file still emits
-native psql errors. It is described in "Remaining reviewer findings".
+The F1 finding opened in Round 5 (bare fixture DML emitting native psql errors)
+is **closed in Round 6 with mutation proof**. No finding is outstanding.
 
 Round 1 and Round 2 history below is retained. Everything a later round altered
 is recorded in its own "Round N — Codex findings and fixes" section, and figures
@@ -52,7 +51,8 @@ a later round superseded are corrected in place with the earlier value noted.
 | `406f149` | Round 4 fixes | 3 |
 | `1c7d989` | record the Round 4 SHA | 1 |
 | `89130f6` | Round 5 fixes | 3 |
-| branch HEAD | record the Round 5 SHA | 1 |
+| `cea28d3` | record the Round 5 SHA | 1 |
+| Round 6 fix commit (branch HEAD) | Round 6 fixes | 3 |
 | **Complete TASK-012 diff against `69a1471`** | | **6** |
 
 **Correction of record (Round 3, L2).** The body of commit `9d6acd3` says
@@ -1081,6 +1081,200 @@ directly. `GRANT` does not resolve that alias, so the file aborted having run 0
 tests. Fixed by resolving `pg_my_temp_schema()`; caught by the runner, and no
 partial state reached a commit.
 
+## Round 6 — Codex findings and fixes
+
+All prior-round history above is retained. Round 6 changed three files and no
+migration, schema, policy, privilege, generated type, dependency, or
+configuration.
+
+### M1 — bare fixture and CTE DML could still emit native output
+
+Round 5 closed the assertion channel but left every executable fixture statement
+outside it. A bare `INSERT`, `UPDATE`, or `DELETE` that fails emits psql's native
+error, including `DETAIL: Failing row contains (...)` with the athlete
+identifier, the calendar date, and all three health columns.
+
+I audited the whole file rather than the three lines the finding named. There
+were **19** executable statements, more than the six known examples:
+
+| Kind | Count | Treatment |
+| --- | --- | --- |
+| fixture `INSERT` / `UPDATE` / `DELETE` (`auth.users`, `teams`, `team_memberships`, `daily_check_ins`) | 11 | wrapped in `run_fixture` |
+| `CREATE TEMPORARY TABLE … AS SELECT` reading `daily_check_ins` (carries identifier and date) | 3 | wrapped in `run_fixture` |
+| `CREATE TEMPORARY TABLE rejection_probe AS …` and the two `client_rejection_probe` inserts (carry health values in dynamic SQL) | 3 | wrapped in `run_fixture` with a `$fx$` tag, since the statement itself contains `$$`-quoted SQL |
+| affected-row CTE updates (owner, cross-athlete, coach) | 3 | replaced with `probe_rowcount` |
+| `CREATE TEMPORARY TABLE client_rejection_probe (…)` | 1 | left bare — column definitions only, no value, identifier, or date |
+
+Two new helpers:
+
+```sql
+create function pg_temp.run_fixture(p_sql text) returns void …
+  -- executes; on any error raises a fixed sanitized 22023
+
+create function pg_temp.probe_rowcount(p_sql text) returns int …
+  -- executes, returns GET DIAGNOSTICS ROW_COUNT;
+  -- on any error raises a fixed sanitized 22023
+```
+
+`run_fixture` keeps an expected-success failure **loud**: it raises, so the
+transaction aborts and the file stops rather than silently continuing. It simply
+raises a fixed generic message instead of PostgreSQL's row-bearing one.
+
+`probe_rowcount` preserves the affected-row assertions at exactly their previous
+strength — owner update 1 row, cross-athlete 0, coach 0 — and is strictly
+stronger in one respect: it raises rather than returns if the statement errors,
+so an unexpected failure can never be misread as "affected zero rows". The
+former `RETURNING 1 as touched` CTE is no longer needed; `ROW_COUNT` is an
+integer and never a column.
+
+Positive-control side effects are preserved. `run_fixture` and `probe_rowcount`
+are `SECURITY INVOKER` with no pinned `search_path`, so role, JWT claims, RLS,
+and column grants behave exactly as before, and a successful statement's effects
+persist because a plpgsql exception block only rolls back its subtransaction
+when an exception is actually raised. Temporary tables created through
+`run_fixture` persist for the same reason. `plan(190)` is unchanged.
+
+### M2 — `query_canceled` and `assert_failure` bypass `WHEN OTHERS`
+
+Codex is correct, and this was a real hole in my Round 5 work. PostgreSQL
+documents that `WHEN OTHERS` does not catch `QUERY_CANCELED` or
+`ASSERT_FAILURE`, so both escaped `probe_state` with a `CONTEXT` line reading
+`SQL statement "…"` — the dynamic SQL reproduced verbatim, which is precisely
+the disclosure the probe exists to prevent.
+
+Every temporary helper — `probe_state`, `probe_rowcount`, `run_fixture`, and
+`probe_error` — now handles both conditions **by name**:
+
+```sql
+exception
+  when query_canceled then
+    raise exception using errcode = '57014',
+      message = 'probe: statement canceled';
+  when assert_failure then
+    raise exception using errcode = 'P0004',
+      message = 'probe: assertion failed';
+  when others then
+    …
+```
+
+Neither is swallowed. Each is re-raised, so a real cancellation stays terminal
+and still aborts the transaction; only the diagnostic is replaced. Because the
+new error is raised from the handler, its context names the helper function
+rather than the statement it was given. Ordinary expected errors are unaffected
+and still return the safe sentinel or SQLSTATE.
+
+### Structural checks
+
+| Check | Result |
+| --- | --- |
+| bare executable DML outside a safe boundary | **0** (one column-definition-only `CREATE TEMPORARY TABLE` remains, carrying no value, identifier, or date) |
+| `select throws_ok(` / `select lives_ok(` | **0** / **0** (unchanged from Round 5) |
+| helpers handling `query_canceled` and `assert_failure` by name | **4 of 4** |
+| assertion recount | `is` 122 + `ok` 43 + catalog 25 = **190** |
+| `plan(190)` | unchanged |
+| affected-row strengths | owner 1, cross-athlete 0, coach 0 — unchanged |
+
+### Round 6 mutation evidence
+
+Complete output was captured to temporary files and scanned programmatically;
+raw output was never printed. Every mutation was reverted, and `005` was
+restored from a byte copy after each canary run.
+
+| # | Mutation | Outcome | Leak counts |
+| --- | --- | --- | --- |
+| 1 | `rpe` CHECK narrowed `0..10` → `0..4`, so an expected-success fixture insert fails natively | FAIL, aborted after 42 of 190; exactly **1** sanitized `fixture: statement failed` | `Failing row` 0, `DETAIL:` 0, `HINT:` 0, UUID prefix 0, `2026-07-` 0, `rpe`/`overall_feeling`/`pain_status` 0, `violates check constraint` 0 |
+| 2 | trigger raises `22999` carrying `CANARYUPD8B2` plus fake `rpe=`/`feeling=`/`pain=`, athlete UUID and date, gated to the owner update's values so it lands on the affected-row path | FAIL, aborted after 81 of 190; **1** sanitized `probe: affected-row statement failed`; all 4 ERROR lines canary-free | canary 0, `rpe=` 0, `feeling=` 0, `pain=` 0, `athlete=` 0, UUID prefix 0, `2026-07-` 0, `Failing row` 0, `DETAIL:` 0, `SQL statement` 0 |
+| 3 | `statement_timeout = 100ms` with `select pg_sleep(3) /* CANARYQC9X4 */` → `query_canceled` | **1** sanitized `probe: statement canceled` | canary 0, `pg_sleep` 0, `SQL statement` 0 |
+| 4 | `assert false, 'CANARYAF7Q2'` → `assert_failure` | **1** sanitized `probe: assertion failed` | canary 0, `assert false` 0, `SQL statement` 0 |
+
+Mutations 3 and 4 were each run twice — once against the fixed helper and once
+against a helper downgraded to `WHEN OTHERS` only — to prove the named handlers
+are load-bearing rather than decorative:
+
+| Canary | Fixed helper | Downgraded to `WHEN OTHERS` only |
+| --- | --- | --- |
+| `CANARYQC9X4` (query_canceled) | **0** occurrences; `pg_sleep` 0; `SQL statement` 0 | **1** occurrence; `pg_sleep` 1; `SQL statement` 1 |
+| `CANARYAF7Q2` (assert_failure) | **0** occurrences; `assert false` 0; `SQL statement` 0 | **2** occurrences; `assert false` 1; `SQL statement` 1 |
+
+The downgraded runs reproduce Codex's report exactly: the dynamic SQL and its
+embedded canary appear verbatim in `CONTEXT`. With the named handlers, both drop
+to zero.
+
+Each run emitted exactly one `CONTEXT` line, and in every fixed-helper run it
+named the PL/pgSQL helper function rather than the statement — verified by
+pattern match, not assumed.
+
+### F1 (Round 5) is closed
+
+Mutation 1 is the same mutation that exposed F1 in Round 5. Then it printed
+`ERROR: … violates check constraint` and `DETAIL: Failing row contains (…)`
+naming a row id, athlete UUID, date, and all three health columns. Now every one
+of those patterns counts zero and a single fixed `fixture: statement failed`
+appears instead. F1 is closed on that evidence, not on inspection.
+
+### Corrections to earlier blanket claims
+
+- Round 5's "all 190 assertions are now failure-output safe" was true of
+  assertions and was stated alongside the open F1, but the file as a whole was
+  not safe: 19 executable statements sat outside any boundary. The claim is
+  narrowed wherever it appears.
+- Round 5's description of `probe_state` said `SQLERRM`, `DETAIL`, `HINT`,
+  `CONTEXT`, and statement text "are never read, never returned, and never
+  raised onward". That was wrong for two conditions: `query_canceled` and
+  `assert_failure` propagated with the statement text in `CONTEXT`. The helper
+  comment and the packet now state the guarantee that actually holds, including
+  the two named handlers.
+- The affected-row comment still described `RETURNING` a constant sentinel; it
+  now describes `GET DIAGNOSTICS ROW_COUNT`.
+
+### Known limitations
+
+- One `CREATE TEMPORARY TABLE client_rejection_probe (…)` remains outside the
+  boundary. It is a column-definition-only DDL statement: it contains no value,
+  no identifier, and no date, so a failure cannot disclose fixture content. It
+  is left bare deliberately rather than overlooked.
+- The boundary protects this test file. It does not change what PostgREST or an
+  application client observes; that is governed by the migration's sanitized
+  trigger, which Round 6 did not touch.
+- `23505` and `23503` still return native errors, unchanged from Round 2 and
+  still flagged below.
+
+### Round 6 verification
+
+| Command | Result |
+| --- | --- |
+| `corepack pnpm install --frozen-lockfile` | exit 0 |
+| Supabase CLI | `2.109.1` |
+| start local stack, output suppressed | exit 0 |
+| `supabase db reset --local --no-seed` | exit 0 |
+| `supabase test db --local` | **PASS — 5 files, 583 assertions** (`005` contributes 190) |
+| six mutation runs (4 required + 2 downgraded comparisons) | each as tabulated; every leak count zero with the fixed helpers |
+| after restoring every mutation and resetting | **PASS — 5 files, 583 assertions** |
+| `db lint --local --schema public,private --level warning --fail-on warning` | exit 0, "No schema errors found" |
+| regenerated types, BOM stripped, Prettier-formatted | `git diff --no-index` exit 0 — zero drift; generated output not committed |
+| `corepack pnpm format:check` | exit 0 |
+| `corepack pnpm lint` | exit 0 |
+| `corepack pnpm typecheck` | exit 0 |
+| `corepack pnpm test` | exit 0 — 18 files, 327 tests passed |
+| `git diff --check` | clean |
+| stop local stack, output suppressed | exit 0, no Supabase container remains |
+| final worktree | clean |
+
+Two process notes, neither reaching the delivered code. My first canary harness
+set `$ErrorActionPreference = 'Stop'`, and PowerShell's `NativeCommandError`
+wrapper aborted it before it restored `005`; I detected the injected canary in
+the worktree, restored from the byte backup, and confirmed the file was
+canary-free before continuing. My first reading of mutation 2 reported the
+sanitized message as absent, because the string I searched for was split across
+a wrapped output line; re-scanning on a shorter substring found it present.
+
+### Round 6 rollback
+
+Round 6 touched no migration and no generated artifact, so reverting it is
+`git revert` of the Round 6 commits, or restoring the three files from
+`cea28d3`. No database change is required beyond
+`supabase db reset --local --no-seed`, and nothing was applied remotely.
+
 ## Rollback
 
 1. `git revert` the TASK-012 commits, or delete
@@ -1098,10 +1292,11 @@ needed. No dependency, lockfile, or configuration file was touched.
 
 ## Remaining reviewer findings
 
-**One finding is outstanding — see F1 below.** Every finding the reviewer has
-raised to date is closed: all four from Round 1 (H1, M1, M2, M3), all four from
-Round 2 (M1, M2, L1, L2), the Round 3 Medium, and both from Round 4 (M1, L1).
-None was deferred, partially applied, or reinterpreted, and the H1 and M2
+**Nothing is outstanding as of Round 6.** Every reviewer finding is closed: all
+four from Round 1 (H1, M1, M2, M3), all four from Round 2 (M1, M2, L1, L2), the
+Round 3 Medium, both from Round 4 (M1, L1), and both from Round 5 (M1, M2). F1,
+which I opened myself in Round 5, is closed in Round 6 with mutation proof. None
+was deferred, partially applied, or reinterpreted, and the H1 and M2
 implementations were preserved unchanged and re-proved by mutation in every
 later round.
 
@@ -1111,13 +1306,19 @@ later round.
 > genuine leak channel of my own discovery, so the blanket wording is withdrawn.
 > Earlier rounds' text is retained above rather than rewritten.
 
-### F1 (open) — bare fixture DML still emits native psql errors
+### F1 (CLOSED in Round 6) — bare fixture DML still emits native psql errors
 
-Not a reviewer finding; discovered by Round 5 mutation 2 and left unfixed
-because it falls outside the approved Round 5 scope.
+Not a reviewer finding; discovered by Round 5 mutation 2, left unfixed in Round
+5 because it fell outside that round's approved scope, approved as Round 6 M1,
+and **closed with mutation proof** — the same mutation that exposed it now
+produces zero occurrences of every leak pattern and one fixed sanitized message.
+The Round 5 text is kept below as the original record.
 
-All 190 assertions are now failure-output safe. The test file also contains
-plain, non-assertion `INSERT`/`UPDATE`/`DELETE` fixture statements. If one of
+All 190 assertions are now failure-output safe. (Round 6 note: true of
+assertions, but two conditions — `query_canceled` and `assert_failure` — still
+escaped the probe until Round 6 M2, so even that narrower claim was incomplete
+when written.) The test file also contains plain, non-assertion
+`INSERT`/`UPDATE`/`DELETE` fixture statements. If one of
 those ever fails — as it did when mutation 2 narrowed a `CHECK` constraint —
 psql prints the native error, including `DETAIL: Failing row contains (…)` with
 the row id, athlete UUID, calendar date, and all three health columns, and the
@@ -1134,6 +1335,11 @@ exception using errcode = '22023', message = 'fixture statement failed'`. It
 keeps the failure loud and the file aborting, adds no assertions, and leaves
 `plan(190)` untouched. I did not apply it because it changes how every fixture
 statement fails, which is a design decision.
+
+> **Round 6 outcome.** Approved and implemented, as `pg_temp.run_fixture` — the
+> proposal above, applied to all 17 statements carrying a value, identifier, or
+> date rather than only the one the mutation happened to hit, plus
+> `probe_rowcount` for the three affected-row CTEs.
 
 Four further points are flagged for the reviewer's explicit attention:
 

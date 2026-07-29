@@ -39,25 +39,52 @@ set local search_path = public, extensions, pg_catalog;
 select plan(190);
 
 -- ---------------------------------------------------------------------------
--- Failure-output-safe execution probe
+-- Failure-output-safe execution boundary
 -- ---------------------------------------------------------------------------
 --
--- pgTAP's throws_ok() and lives_ok() print the caught database error — code,
--- message, and context — when they fail. On a protected-health table that makes
--- the assertion a disclosure path at exactly the moment a regression occurs:
--- the test written to catch a leak becomes the leak. This probe replaces both.
+-- Two distinct disclosure paths exist in a pgTAP file over a protected-health
+-- table, and both are closed here.
 --
--- It runs the statement under the caller's current role and JWT claims
--- (SECURITY INVOKER, no pinned search_path), so privileges, RLS, and column
--- grants are exercised exactly as before. On success it returns a fixed
--- sentinel and the statement's effects persist, because a plpgsql exception
--- block only rolls back its subtransaction when an exception is actually
--- raised. On failure it returns the five-character SQLSTATE and nothing else:
--- SQLERRM, DETAIL, HINT, CONTEXT, and the statement text are never read, never
--- returned, and never raised onward.
+-- 1. Assertions. pgTAP's throws_ok() and lives_ok() print the caught database
+--    error — code, message, and context — when they fail, so the test written
+--    to catch a leak becomes the leak. probe_state() and probe_rowcount()
+--    replace them (Round 5, Round 6).
 --
--- The function lives in pg_temp, so it adds no schema surface, no RPC, and
--- disappears with the transaction.
+-- 2. Fixture statements. A bare INSERT, UPDATE, or DELETE that fails emits
+--    psql's native error, including `DETAIL: Failing row contains (...)` with
+--    the athlete identifier, the calendar date, and every health column. That
+--    is not hypothetical: Round 5 mutation testing produced exactly that line.
+--    run_fixture() closes it (Round 6, M1).
+--
+-- All four helpers are SECURITY INVOKER with no pinned search_path, so the
+-- statement runs under the caller's current role and JWT claims and privileges,
+-- RLS, and column grants are exercised exactly as before. They live in pg_temp,
+-- so they add no schema surface, no RPC, and disappear with the transaction.
+--
+-- What each may emit:
+--
+--   probe_state    'ok', or the five-character SQLSTATE. Never raises for an
+--                  ordinary error.
+--   probe_rowcount the affected-row count. Raises sanitized on any error, so an
+--                  unexpected failure cannot be mistaken for "zero rows".
+--   run_fixture    nothing on success. Raises sanitized on any error, so an
+--                  expected-success fixture failing stays loud and aborts the
+--                  file rather than silently continuing.
+--   probe_error    SQLSTATE, MESSAGE_TEXT, DETAIL, HINT, captured into a table
+--                  and only ever compared inside a query.
+--
+-- SQLERRM, DETAIL, HINT, CONTEXT, and the statement text are never returned to
+-- an assertion and never re-raised.
+--
+-- Round 6, M2 — WHEN OTHERS is not a complete net. PostgreSQL documents that it
+-- does not catch QUERY_CANCELED or ASSERT_FAILURE, and Codex reproduced a
+-- statement-timeout canary surfacing through CONTEXT as `SQL statement "..."`,
+-- which reproduces the dynamic SQL verbatim. Both conditions are therefore
+-- handled by name in every helper. They are not swallowed: each is re-raised so
+-- the cancellation or assertion failure stays terminal and the transaction
+-- still aborts. Only the diagnostic is replaced, with a fixed message raised
+-- from the handler, so the new error's context names the helper rather than the
+-- statement it was given.
 
 create function pg_temp.probe_state(p_sql text)
 returns text
@@ -66,12 +93,61 @@ as $probe_state$
 begin
   execute p_sql;
   return 'ok';
-exception when others then
-  return sqlstate;
+exception
+  when query_canceled then
+    raise exception using errcode = '57014',
+      message = 'probe: statement canceled';
+  when assert_failure then
+    raise exception using errcode = 'P0004',
+      message = 'probe: assertion failed';
+  when others then
+    return sqlstate;
 end;
 $probe_state$;
 
--- anon and authenticated must be able to call the probe, and "pg_temp" is a
+create function pg_temp.probe_rowcount(p_sql text)
+returns int
+language plpgsql
+as $probe_rowcount$
+declare
+  v_rows int;
+begin
+  execute p_sql;
+  get diagnostics v_rows = row_count;
+  return v_rows;
+exception
+  when query_canceled then
+    raise exception using errcode = '57014',
+      message = 'probe: statement canceled';
+  when assert_failure then
+    raise exception using errcode = 'P0004',
+      message = 'probe: assertion failed';
+  when others then
+    raise exception using errcode = '22023',
+      message = 'probe: affected-row statement failed';
+end;
+$probe_rowcount$;
+
+create function pg_temp.run_fixture(p_sql text)
+returns void
+language plpgsql
+as $run_fixture$
+begin
+  execute p_sql;
+exception
+  when query_canceled then
+    raise exception using errcode = '57014',
+      message = 'fixture: statement canceled';
+  when assert_failure then
+    raise exception using errcode = 'P0004',
+      message = 'fixture: assertion failed';
+  when others then
+    raise exception using errcode = '22023',
+      message = 'fixture: statement failed';
+end;
+$run_fixture$;
+
+-- anon and authenticated must be able to call the probes, and "pg_temp" is a
 -- search-path alias that GRANT does not resolve, so the session's real temp
 -- schema name is looked up and granted explicitly.
 do $grant_probe$
@@ -82,6 +158,12 @@ begin
   execute format('grant usage on schema %I to anon, authenticated', v_schema);
   execute format(
     'grant execute on function %I.probe_state(text) to anon, authenticated',
+    v_schema);
+  execute format(
+    'grant execute on function %I.probe_rowcount(text) to anon, authenticated',
+    v_schema);
+  execute format(
+    'grant execute on function %I.run_fixture(text) to anon, authenticated',
     v_schema);
 end;
 $grant_probe$;
@@ -101,6 +183,7 @@ $grant_probe$;
 --                                                         Team B only)
 --   athlete-t        active athlete in Team A   (membership revoked mid-test)
 
+select pg_temp.run_fixture($$
 insert into auth.users (id, instance_id, aud, role, email, raw_user_meta_data)
 values
   ('00000000-0000-4000-8000-00000000000a', '00000000-0000-0000-0000-000000000000',
@@ -118,13 +201,17 @@ values
   ('00000000-0000-4000-8000-000000000012', '00000000-0000-0000-0000-000000000000',
    'authenticated', 'authenticated', 'athlete-t@example.test', '{}'::jsonb),
   ('00000000-0000-4000-8000-000000000013', '00000000-0000-0000-0000-000000000000',
-   'authenticated', 'authenticated', 'coach-t@example.test', '{}'::jsonb);
+   'authenticated', 'authenticated', 'coach-t@example.test', '{}'::jsonb)
+$$);
 
+select pg_temp.run_fixture($$
 insert into public.teams (id, name)
 values
   ('00000000-0000-4000-8000-0000000000a1', 'Team A'),
-  ('00000000-0000-4000-8000-0000000000b1', 'Team B');
+  ('00000000-0000-4000-8000-0000000000b1', 'Team B')
+$$);
 
+select pg_temp.run_fixture($$
 insert into public.team_memberships (team_id, profile_id, role, status, revoked_at)
 values
   -- Team A
@@ -146,7 +233,8 @@ values
   ('00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-00000000000d',
    'coach', 'active', null),
   ('00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-00000000000f',
-   'athlete', 'active', null);
+   'athlete', 'active', null)
+$$);
 
 -- ---------------------------------------------------------------------------
 -- 1. Structure
@@ -397,12 +485,14 @@ select is(
 );
 
 -- Forged timestamps are overwritten by the trigger even for a trusted writer.
+select pg_temp.run_fixture($$
 insert into public.daily_check_ins
   (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
    created_at, updated_at)
 values
   ('00000000-0000-4000-8000-00000000000c', date '2026-07-22', 5, 3, 'none',
-   timestamptz '2000-01-01 00:00:00+00', timestamptz '2000-01-02 00:00:00+00');
+   timestamptz '2000-01-01 00:00:00+00', timestamptz '2000-01-02 00:00:00+00')
+$$);
 
 -- Counted, not compared: a direct scalar comparison would print both the stored
 -- and the expected timestamp when it failed (Round 5, L1). The equality is
@@ -426,6 +516,7 @@ select is(
 
 -- A trusted update attempting to move the owner, the date, the identity, and
 -- the creation time is silently corrected by the trigger.
+select pg_temp.run_fixture($$
 update public.daily_check_ins
 set id = '00000000-0000-4000-8000-0000000000ff',
     athlete_profile_id = '00000000-0000-4000-8000-00000000000b',
@@ -433,7 +524,8 @@ set id = '00000000-0000-4000-8000-0000000000ff',
     created_at = timestamptz '2000-01-01 00:00:00+00',
     updated_at = timestamptz '2000-01-01 00:00:00+00'
 where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
-  and check_in_date = date '2026-07-22';
+  and check_in_date = date '2026-07-22'
+$$);
 
 select is(
   (select count(*)::int from public.daily_check_ins
@@ -468,16 +560,20 @@ select ok(
 
 -- A second update in the same transaction must advance the timestamp again.
 -- Under transaction-stable now() both updates would stamp the same instant.
+select pg_temp.run_fixture($$
 create temporary table trusted_update_clock as
 select updated_at
 from public.daily_check_ins
 where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
-  and check_in_date = date '2026-07-22';
+  and check_in_date = date '2026-07-22'
+$$);
 
+select pg_temp.run_fixture($$
 update public.daily_check_ins
 set rpe = 7
 where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
-  and check_in_date = date '2026-07-22';
+  and check_in_date = date '2026-07-22'
+$$);
 
 select ok(
   (select c.updated_at > k.updated_at
@@ -519,16 +615,29 @@ begin
   err_detail := '';
   err_hint := '';
   return next;
-exception when others then
-  get stacked diagnostics
-    err_state = returned_sqlstate,
-    err_message = message_text,
-    err_detail = pg_exception_detail,
-    err_hint = pg_exception_hint;
-  return next;
+exception
+  -- Round 6, M2: WHEN OTHERS does not catch these two, so they would otherwise
+  -- escape with a CONTEXT reproducing the dynamic SQL verbatim. Re-raised, not
+  -- swallowed: the condition stays terminal, only the diagnostic is replaced.
+  when query_canceled then
+    raise exception using errcode = '57014',
+      message = 'probe: statement canceled';
+  when assert_failure then
+    raise exception using errcode = 'P0004',
+      message = 'probe: assertion failed';
+  when others then
+    get stacked diagnostics
+      err_state = returned_sqlstate,
+      err_message = message_text,
+      err_detail = pg_exception_detail,
+      err_hint = pg_exception_hint;
+    return next;
 end;
 $probe$;
 
+-- A distinct dollar-quote tag, because the wrapped statement itself contains
+-- $$-quoted dynamic SQL.
+select pg_temp.run_fixture($fx$
 create temporary table rejection_probe as
 select 'out of range' as probe, p.*
 from pg_temp.probe_error(
@@ -566,7 +675,8 @@ union all
 select 'invalid update', p.*
 from pg_temp.probe_error(
   $$ update public.daily_check_ins set rpe = 11
-      where athlete_profile_id = '00000000-0000-4000-8000-00000000000c' $$) as p;
+      where athlete_profile_id = '00000000-0000-4000-8000-00000000000c' $$) as p
+$fx$);
 
 select is(
   (select count(*)::int from rejection_probe),
@@ -653,21 +763,27 @@ select is(
   'the rejection probes below execute as the authenticated client role, not as the database owner'
 );
 
+-- A distinct dollar-quote tag, because the wrapped statement itself contains
+-- $$-quoted dynamic SQL.
+select pg_temp.run_fixture($fx$
 insert into client_rejection_probe
 select 'null overall feeling', p.*
 from pg_temp.probe_error(
   $$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-28',
-             5, null, 'none') $$) as p;
+             5, null, 'none') $$) as p
+$fx$);
 
+select pg_temp.run_fixture($fx$
 insert into client_rejection_probe
 select 'null pain status', p.*
 from pg_temp.probe_error(
   $$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-28',
-             5, 3, null) $$) as p;
+             5, 3, null) $$) as p
+$fx$);
 
 reset request.jwt.claims;
 reset role;
@@ -724,8 +840,10 @@ select is(
   'no rejection an authenticated client sees names a column, a constraint, a row representation, an identifier, or a date'
 );
 
+select pg_temp.run_fixture($$
 delete from public.daily_check_ins
-where athlete_profile_id = '00000000-0000-4000-8000-00000000000c';
+where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
+$$);
 
 select is(
   (select count(*)::int from public.daily_check_ins),
@@ -857,8 +975,11 @@ select is(
 -- filters rather than errors, so an update that reaches nothing still
 -- succeeds — and that is equally true of the probe's 'ok' sentinel as it was
 -- of the lives_ok() this file used to call. Every update path in this file
--- therefore counts the rows the statement actually affected. RETURNING yields a
--- constant sentinel, never a column, so no protected value reaches the output.
+-- therefore counts the rows the statement actually affected, via
+-- probe_rowcount(), which returns GET DIAGNOSTICS ROW_COUNT and never a column,
+-- so no protected value reaches the output. It raises a sanitized error rather
+-- than returning if the statement fails, so an unexpected failure can never be
+-- misread as "affected zero rows" (Round 6, M1).
 --
 -- The attempted values differ from the stored ones: the fixture inserted one
 -- triple and this update writes a different one, so the assertions below fail
@@ -867,21 +988,19 @@ select is(
 -- The clock snapshot is taken as the table owner, because a temporary table is
 -- not readable by the authenticated role.
 reset role;
+select pg_temp.run_fixture($$
 create temporary table owner_update_clock as
 select updated_at
 from public.daily_check_ins
 where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
-  and check_in_date = date '2026-07-20';
+  and check_in_date = date '2026-07-20'
+$$);
 set local role authenticated;
 
-with owner_update as (
-  update public.daily_check_ins
-     set rpe = 8, overall_feeling = 4, pain_status = 'present'
-   where athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
-  returning 1 as touched
-)
 select is(
-  (select count(*)::int from owner_update),
+  pg_temp.probe_rowcount($$ update public.daily_check_ins
+     set rpe = 8, overall_feeling = 4, pain_status = 'present'
+   where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$),
   1,
   'the data subject''s own update affects exactly one row'
 );
@@ -1028,10 +1147,12 @@ reset role;
 -- updated_at is part of the snapshot on purpose. Without it a refused mutation
 -- that nevertheless fired the trigger would leave the health columns equal and
 -- still pass the join, so the timestamp is the tell-tale.
+select pg_temp.run_fixture($$
 create temporary table check_in_snapshot as
 select id, athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
        updated_at
-from public.daily_check_ins;
+from public.daily_check_ins
+$$);
 
 select is(
   (select count(*)::int from check_in_snapshot),
@@ -1062,14 +1183,10 @@ select is(
 -- affected-row count is the assertion that has teeth. The attempted values are
 -- deliberately different from the stored ones, and the snapshot join below is
 -- kept as defence in depth.
-with cross_athlete_update as (
-  update public.daily_check_ins as c
-     set rpe = 1, overall_feeling = 1, pain_status = 'none'
-   where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
-  returning 1 as touched
-)
 select is(
-  (select count(*)::int from cross_athlete_update),
+  pg_temp.probe_rowcount($$ update public.daily_check_ins as c
+     set rpe = 1, overall_feeling = 1, pain_status = 'none'
+   where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$),
   0,
   'another athlete''s update of a check-in affects exactly zero rows'
 );
@@ -1223,14 +1340,10 @@ select is(
 );
 -- Readable is not writable. The coach can see this row, so a widened UPDATE
 -- policy would silently modify it; the affected-row count is what catches that.
-with coach_update as (
-  update public.daily_check_ins as c
-     set rpe = 2, overall_feeling = 2, pain_status = 'none'
-   where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b'
-  returning 1 as touched
-)
 select is(
-  (select count(*)::int from coach_update),
+  pg_temp.probe_rowcount($$ update public.daily_check_ins as c
+     set rpe = 2, overall_feeling = 2, pain_status = 'none'
+   where c.athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$),
   0,
   'a coach''s update of a check-in they may read affects exactly zero rows'
 );
@@ -1389,10 +1502,12 @@ select is(
 );
 reset role;
 
+select pg_temp.run_fixture($$
 update public.team_memberships
 set status = 'revoked', revoked_at = now()
 where team_id = '00000000-0000-4000-8000-0000000000a1'
-  and profile_id = '00000000-0000-4000-8000-000000000013';
+  and profile_id = '00000000-0000-4000-8000-000000000013'
+$$);
 
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000013","role":"authenticated"}';
@@ -1440,10 +1555,12 @@ select is(
 );
 reset role;
 
+select pg_temp.run_fixture($$
 update public.team_memberships
 set status = 'revoked', revoked_at = now()
 where team_id = '00000000-0000-4000-8000-0000000000a1'
-  and profile_id = '00000000-0000-4000-8000-000000000012';
+  and profile_id = '00000000-0000-4000-8000-000000000012'
+$$);
 
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
@@ -1478,10 +1595,12 @@ select is(
   'revoking the athlete membership left no active grant behind'
 );
 
+select pg_temp.run_fixture($$
 update public.team_memberships
 set status = 'active', revoked_at = null
 where team_id = '00000000-0000-4000-8000-0000000000a1'
-  and profile_id = '00000000-0000-4000-8000-000000000012';
+  and profile_id = '00000000-0000-4000-8000-000000000012'
+$$);
 
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
@@ -1791,7 +1910,9 @@ select ok(
 -- 13. Trusted cascade deletion leaves no orphan health row
 -- ---------------------------------------------------------------------------
 
-delete from auth.users where id = '00000000-0000-4000-8000-00000000000c';
+select pg_temp.run_fixture($$
+delete from auth.users where id = '00000000-0000-4000-8000-00000000000c'
+$$);
 
 select is(
   (select count(*)::int from public.daily_check_ins
