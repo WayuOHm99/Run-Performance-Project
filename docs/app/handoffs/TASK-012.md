@@ -1,7 +1,14 @@
 # TASK-012 Handoff — Daily Check-In RLS Foundation
 
-Status: Implemented, reviewed five times by GPT/Codex, and Round 6 fixes applied
-and verified locally. Awaiting GPT/Codex Round 6 read-only review.
+Status: Implemented, reviewed five times by GPT/Codex, Round 6 fixes applied and
+verified locally, and the Round 6 documentation closeout applied. Awaiting final
+GPT/Codex read-only review.
+
+The closeout is documentation-only: it corrects the Round 6 executable-statement
+accounting and completes the mutation leak-scan audit trail. No SQL test,
+migration, generated type, task packet, application file, configuration,
+dependency, or lockfile was changed by it, and no mutation was rerun — every
+count comes from the output captured during Round 6.
 
 The F1 finding opened in Round 5 (bare fixture DML emitting native psql errors)
 is **closed in Round 6 with mutation proof**. No finding is outstanding.
@@ -53,7 +60,8 @@ a later round superseded are corrected in place with the earlier value noted.
 | `89130f6` | Round 5 fixes | 3 |
 | `cea28d3` | record the Round 5 SHA | 1 |
 | `a00ece8` | Round 6 fixes | 3 |
-| branch HEAD | record the Round 6 SHA | 1 |
+| `7264474` | record the Round 6 SHA | 1 |
+| Round 6 closeout commit (branch HEAD) | documentation-only closeout | 1 |
 | **Complete TASK-012 diff against `69a1471`** | | **6** |
 
 **Correction of record (Round 3, L2).** The body of commit `9d6acd3` says
@@ -1096,7 +1104,7 @@ error, including `DETAIL: Failing row contains (...)` with the athlete
 identifier, the calendar date, and all three health columns.
 
 I audited the whole file rather than the three lines the finding named. There
-were **19** executable statements, more than the six known examples:
+were **21** executable statements, more than the six known examples:
 
 | Kind | Count | Treatment |
 | --- | --- | --- |
@@ -1105,6 +1113,19 @@ were **19** executable statements, more than the six known examples:
 | `CREATE TEMPORARY TABLE rejection_probe AS …` and the two `client_rejection_probe` inserts (carry health values in dynamic SQL) | 3 | wrapped in `run_fixture` with a `$fx$` tag, since the statement itself contains `$$`-quoted SQL |
 | affected-row CTE updates (owner, cross-athlete, coach) | 3 | replaced with `probe_rowcount` |
 | `CREATE TEMPORARY TABLE client_rejection_probe (…)` | 1 | left bare — column definitions only, no value, identifier, or date |
+
+The arithmetic, verified against the committed file rather than the audit notes:
+**17** `run_fixture` calls (11 + 3 + 3) and **3** `probe_rowcount` calls put
+**20** content-bearing statements inside a safe boundary, and **1**
+content-free DDL statement is deliberately left bare — **21** executable
+statements in total.
+
+> **Documentation closeout correction.** The prose above originally said "19
+> executable statements". That was the count from my first audit grep, taken
+> before the wrappers existed and missing two statements; the table beneath it
+> was already correct and already summed to 21. The table was right and the
+> sentence introducing it was wrong. Only the executable-statement accounting is
+> corrected here; unrelated numbers elsewhere in this handoff are untouched.
 
 Two new helpers:
 
@@ -1181,12 +1202,43 @@ Complete output was captured to temporary files and scanned programmatically;
 raw output was never printed. Every mutation was reverted, and `005` was
 restored from a byte copy after each canary run.
 
-| # | Mutation | Outcome | Leak counts |
-| --- | --- | --- | --- |
-| 1 | `rpe` CHECK narrowed `0..10` → `0..4`, so an expected-success fixture insert fails natively | FAIL, aborted after 42 of 190; exactly **1** sanitized `fixture: statement failed` | `Failing row` 0, `DETAIL:` 0, `HINT:` 0, UUID prefix 0, `2026-07-` 0, `rpe`/`overall_feeling`/`pain_status` 0, `violates check constraint` 0 |
-| 2 | trigger raises `22999` carrying `CANARYUPD8B2` plus fake `rpe=`/`feeling=`/`pain=`, athlete UUID and date, gated to the owner update's values so it lands on the affected-row path | FAIL, aborted after 81 of 190; **1** sanitized `probe: affected-row statement failed`; all 4 ERROR lines canary-free | canary 0, `rpe=` 0, `feeling=` 0, `pain=` 0, `athlete=` 0, UUID prefix 0, `2026-07-` 0, `Failing row` 0, `DETAIL:` 0, `SQL statement` 0 |
-| 3 | `statement_timeout = 100ms` with `select pg_sleep(3) /* CANARYQC9X4 */` → `query_canceled` | **1** sanitized `probe: statement canceled` | canary 0, `pg_sleep` 0, `SQL statement` 0 |
-| 4 | `assert false, 'CANARYAF7Q2'` → `assert_failure` | **1** sanitized `probe: assertion failed` | canary 0, `assert false` 0, `SQL statement` 0 |
+The four mutations:
+
+| # | Mutation | Outcome |
+| --- | --- | --- |
+| 1 | `rpe` CHECK narrowed `0..10` → `0..4`, so an expected-success fixture insert fails natively | FAIL, aborted after 42 of 190 |
+| 2 | trigger raises `22999` carrying `CANARYUPD8B2` plus fake `rpe=`/`feeling=`/`pain=`, athlete UUID and date, gated to the owner update's values so it lands on the affected-row path | FAIL, aborted after 81 of 190 |
+| 3 | `statement_timeout = 100ms` with `select pg_sleep(3) /* CANARYQC9X4 */` → `query_canceled` | terminal, transaction aborted |
+| 4 | `assert false, 'CANARYAF7Q2'` → `assert_failure` | terminal, transaction aborted |
+
+Every pattern was counted against every captured file, so each cell is an
+observed count rather than an inference from a related one. `N/A` appears only
+where the pattern cannot exist for that mutation.
+
+| Scanned pattern | M1 | M2 | M3 | M4 |
+| --- | --- | --- | --- | --- |
+| mutation canary | N/A (no canary; native-failure mutation) | 0 | 0 | 0 |
+| synthetic UUID prefix `00000000-0000-4000-8000` | 0 | 0 | 0 | 0 |
+| date pattern `2026-07-` | 0 | 0 | 0 | 0 |
+| health-field / value patterns (`overall_feeling`, `pain_status`, `rpe=`, `feeling=`, `pain=`) | 0 | 0 | 0 | 0 |
+| `Failing row` | 0 | 0 | 0 | 0 |
+| `DETAIL:` | 0 | 0 | 0 | 0 |
+| `HINT:` | 0 | 0 | 0 | 0 |
+| raw dynamic SQL / `SQL statement` | 0 | 0 | 0 | 0 |
+| mutation-specific SQL marker | 0 (`violates check constraint`) | 0 (`CANARYUPD8B2`) | 0 (`pg_sleep`) | 0 (`assert false`) |
+| `CONTEXT` lines total | 1 | 1 | 1 | 1 |
+| `CONTEXT` containing the dynamic statement | **0** | **0** | **0** | **0** |
+| fixed sanitized message | 1 (`fixture: statement failed`) | 1 (`probe: affected-row statement failed`) | 1 (`probe: statement canceled`) | 1 (`probe: assertion failed`) |
+
+Each run emitted exactly one `CONTEXT` line and none of them contained the
+dynamic statement: the unsafe-context count is the number of `CONTEXT` lines
+matching any canary, `pg_sleep`, `assert false`, an `insert`/`update`/`delete`
+statement fragment, the UUID prefix, or a date. The surviving line names the
+PL/pgSQL helper frame only.
+
+Mutation 1 is the mutation that leaked in Round 5. The `Failing row` and
+`DETAIL:` cells reading 0 here, against the same mutation, are the evidence that
+F1 is closed.
 
 Mutations 3 and 4 were each run twice — once against the fixed helper and once
 against a helper downgraded to `WHEN OTHERS` only — to prove the named handlers
@@ -1201,9 +1253,7 @@ The downgraded runs reproduce Codex's report exactly: the dynamic SQL and its
 embedded canary appear verbatim in `CONTEXT`. With the named handlers, both drop
 to zero.
 
-Each run emitted exactly one `CONTEXT` line, and in every fixed-helper run it
-named the PL/pgSQL helper function rather than the statement — verified by
-pattern match, not assumed.
+The `CONTEXT` accounting for the fixed-helper runs is in the scan table above.
 
 ### F1 (Round 5) is closed
 
@@ -1217,8 +1267,9 @@ appears instead. F1 is closed on that evidence, not on inspection.
 
 - Round 5's "all 190 assertions are now failure-output safe" was true of
   assertions and was stated alongside the open F1, but the file as a whole was
-  not safe: 19 executable statements sat outside any boundary. The claim is
-  narrowed wherever it appears.
+  not safe: all 21 executable statements sat outside any boundary, 20 of them
+  carrying a health value, an athlete identifier, or a check-in date. The claim
+  is narrowed wherever it appears.
 - Round 5's description of `probe_state` said `SQLERRM`, `DETAIL`, `HINT`,
   `CONTEXT`, and statement text "are never read, never returned, and never
   raised onward". That was wrong for two conditions: `query_canceled` and
@@ -1268,6 +1319,34 @@ the worktree, restored from the byte backup, and confirmed the file was
 canary-free before continuing. My first reading of mutation 2 reported the
 sanitized message as absent, because the string I searched for was split across
 a wrapped output line; re-scanning on a shorter substring found it present.
+
+### Round 6 documentation closeout
+
+Applied after `7264474`, touching `docs/app/handoffs/TASK-012.md` only. Two
+corrections, both to this handoff's own reporting rather than to any behaviour:
+
+1. **Executable-statement accounting.** The Round 6 prose said "19 executable
+   statements"; the correct total is **21** — 17 `run_fixture` + 3
+   `probe_rowcount` + 1 bare content-free DDL, with **20** content-bearing
+   statements inside a safe boundary. The inventory table was already correct
+   and already summed to 21; only the sentence introducing it was wrong. The
+   corrected figures were re-derived from the committed test file, not from the
+   earlier audit notes. Unrelated numbers elsewhere in this handoff — including
+   negative-test matrix row 19 — were deliberately left alone.
+2. **Mutation leak-scan audit trail.** The Round 6 tables reported a different
+   subset of patterns per mutation, so some cells were not stated for some runs.
+   Every pattern is now counted against every captured file, with `N/A` used
+   only where a pattern cannot exist. The downgraded-helper comparison evidence
+   is unchanged.
+
+No mutation was rerun and no test, migration, or other file was edited, even
+temporarily. The six Round 6 capture files were re-read and re-scanned; every
+number in the completed table is an observed count from that evidence. No count
+was inferred or estimated, and no gap remained that would have required one.
+
+Verification for the closeout was limited to `git diff --check` and confirming
+the diff contains only this file. The database and application suites were not
+rerun, because no implementation changed.
 
 ### Round 6 rollback
 
