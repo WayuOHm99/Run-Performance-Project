@@ -1,11 +1,11 @@
 # TASK-012 Handoff — Daily Check-In RLS Foundation
 
-Status: Implemented, reviewed once by GPT/Codex, and Round 2 fixes applied and
-verified locally. Awaiting GPT/Codex Round 2 read-only review.
+Status: Implemented, reviewed twice by GPT/Codex, and Round 3 fixes applied and
+verified locally. Awaiting GPT/Codex Round 3 read-only review.
 
-Round 1 history below is retained unchanged. Everything Round 2 altered is
-recorded in "Round 2 — Codex findings and fixes", and figures that Round 2
-superseded are corrected in place with the Round 1 value noted.
+Round 1 and Round 2 history below is retained. Everything a later round altered
+is recorded in its own "Round N — Codex findings and fixes" section, and figures
+a later round superseded are corrected in place with the earlier value noted.
 
 ## Task and writer
 
@@ -28,10 +28,28 @@ superseded are corrected in place with the Round 1 value noted.
 - Implementation commit:
   `ec2b72b99d9068c84ce85e96f2cd8d0e53fc5702`
 - Handoff commit: `26ca8a98dd0f4301f76abf4bc9044fa0a6cedfec` (the commit that
-  first added this file). The branch HEAD is the follow-up documentation-only
-  commit that records this SHA in place of the forward reference. Verify with
-  `git rev-parse HEAD` and `git log --oneline`.
+  first added this file), followed by a documentation-only commit recording that
+  SHA in place of the forward reference. Verify with `git rev-parse HEAD` and
+  `git log --oneline`.
 - Worktree clean at handoff.
+
+### Commit ledger
+
+| Commit | Purpose | Changed files |
+| --- | --- | --- |
+| `1f4c4c2` | task packet, before implementation | 1 |
+| `ec2b72b` | implementation | 4 |
+| `26ca8a9` | this handoff | 1 |
+| `7d41c0c` | record the handoff SHA | 1 |
+| `9d6acd3` | Round 2 fixes | **4** |
+| `1313bf0` | record the Round 2 SHA | 1 |
+| Round 3 fix commit (branch HEAD) | Round 3 fixes | 3 |
+| **Complete TASK-012 diff against `69a1471`** | | **6** |
+
+**Correction of record (Round 3, L2).** The body of commit `9d6acd3` says
+"Local only: 5 files". That is wrong: it changed exactly four files. Six is the
+count for the complete TASK-012 scope, not for that commit. Commit `9d6acd3` was
+not amended, rebased, or rewritten — this table is the correction.
 
 ### Pre-flight
 
@@ -59,7 +77,7 @@ No protected legacy path and no root `CLAUDE.md` was read.
 | `docs/app/tasks/TASK-012-daily-check-in-rls-foundation.md` | new task packet, committed before implementation |
 | `docs/app/handoffs/TASK-012.md` | this handoff |
 | `platform/supabase/migrations/20260728140000_daily_check_ins_rls.sql` | new; the only migration added |
-| `platform/supabase/tests/database/005_daily_check_ins_rls_test.sql` | new; 181 assertions (166 in Round 1) |
+| `platform/supabase/tests/database/005_daily_check_ins_rls_test.sql` | new; 190 assertions (166 in Round 1, 181 in Round 2) |
 | `platform/apps/mobile/src/lib/supabase/database.types.ts` | regenerated from local Supabase (+41) |
 | `platform/supabase/tests/database/001_identity_teams_membership_rls_test.sql` | **four literal counts `7` → `9`** and one description reworded — the update the packet authorizes in advance |
 
@@ -236,7 +254,7 @@ All criteria met.
 | Revoked grant history never authorizes a read | history row retained and asserted; access stays 0 until an explicit new grant |
 | Data subject still reads their own row after revocation | asserted after grant revocation and after both membership revocations |
 | Coach policy reuses the TASK-011 helper | three body assertions plus the policy-delegation assertion; TASK-011 migration unedited |
-| New file passes; TASK-008/009/011 files still pass | 5 files, 574 assertions, PASS |
+| New file passes; TASK-008/009/011 files still pass | 5 files, 583 assertions, PASS |
 | `db lint` clean for `public` and `private` | exit 0, no schema errors |
 | Generated types match the local database, zero drift | `git diff --no-index` exit 0 against a fresh regeneration |
 | Mobile format, lint, typecheck, unit tests pass | all exit 0; 327 tests |
@@ -246,7 +264,8 @@ All criteria met.
 
 ## Negative-test matrix and results
 
-All 37 packet cases pass. `005` contributes 181 assertions (166 in Round 1).
+All 39 packet cases pass — 37 through Round 2, plus cases 38 and 39 added in
+Round 3. `005` contributes 190 assertions (166 in Round 1, 181 in Round 2).
 
 | # | Case | Result |
 | --- | --- | --- |
@@ -284,6 +303,8 @@ All 37 packet cases pass. `005` contributes 181 assertions (166 in Round 1).
 | 35 | catalog assertions | PASS — RLS, exactly four policies, zero `DELETE` policies, no policy targeting `anon`/`public`, table and column privileges, function privileges, `SECURITY DEFINER` ×2, empty `search_path` ×2, constraints, exact index set, trigger |
 | 36 | coach policy reuses the TASK-011 helper | PASS — body mentions it, mentions neither `sharing_grants` nor `coach`, and the policy delegates to the helper |
 | 37 | TASK-008, TASK-009, TASK-011 pgTAP files | PASS |
+| 38 | sanitized-rejection matrix, six paths, run as the owner | PASS — one `22023`, one fixed message, empty `DETAIL`, empty `HINT`, nothing disclosed in the message |
+| 39 | sanitized rejection observed by an authenticated client — null `overall_feeling`, null `pain_status` (Round 3) | PASS — `current_user` is `authenticated`; same `22023`, same fixed message, empty `DETAIL`, empty `HINT`, nothing disclosed |
 
 Positive controls sit alongside every denial — the coach sees exactly three rows
 while the same query returns 0 for a revoked coach and 1 for the data subject —
@@ -482,12 +503,19 @@ trigger only ensures a client never reaches them. No RPC and no new schema
 surface was added — the test helper lives in `pg_temp` and dies with the
 transaction.
 
-Six rejection paths are probed — out-of-range value, unapproved status, and a
-null in each required field, plus an invalid `UPDATE` — capturing
-`RETURNED_SQLSTATE`, `MESSAGE_TEXT`, `PG_EXCEPTION_DETAIL`, and
-`PG_EXCEPTION_HINT`. The tests assert one distinct SQLSTATE across all six, one
-distinct message, empty detail and hint everywhere, and that no message names a
-column, a constraint, a row representation, an identifier, or a date.
+Six rejection paths are probed as the database owner — out-of-range value,
+unapproved status, a null `rpe`, a null `athlete_profile_id`, a null
+`check_in_date`, and an invalid `UPDATE` — capturing `RETURNED_SQLSTATE`,
+`MESSAGE_TEXT`, `PG_EXCEPTION_DETAIL`, and `PG_EXCEPTION_HINT`. The tests assert
+one distinct SQLSTATE across all six, one distinct message, empty detail and
+hint everywhere, and that no message names a column, a constraint, a row
+representation, an identifier, or a date.
+
+> **Round 3 correction (M1).** This paragraph originally claimed the matrix
+> probed "a null in each required field". It did not: a null `overall_feeling`
+> and a null `pain_status` were never probed, so removing either trigger guard
+> would have left the suite green. Round 3 adds both, through the authenticated
+> client path — see the Round 3 section below.
 
 ### M2 — `updated_at` advancement was not proved
 
@@ -579,6 +607,138 @@ runner caught it. The first drift check reported 28 added lines because I
 omitted `--schema public`, which is the canonical flag recorded in the packet and
 in `apps/mobile/README.md`; with the correct command the diff is empty.
 
+## Round 3 — Codex findings and fixes
+
+Round 1 and Round 2 records above are retained. Figures Round 3 superseded are
+corrected in place with the earlier value noted. Round 3 changed three files and
+no migration: `005_daily_check_ins_rls_test.sql`, the task packet, and this
+handoff.
+
+### M1 — sanitized NULL-path coverage was incomplete
+
+The Round 2 matrix probed a null `rpe`, `athlete_profile_id`, and
+`check_in_date`, but never a null `overall_feeling` or a null `pain_status`,
+while this handoff claimed it covered "a null in each required field". The
+migration guards were correct, but nothing held them in place: deleting either
+guard left the suite green and let PostgreSQL's native `NOT NULL` error reach
+the client.
+
+The two missing paths are now probed, and — per L1 — they are the paths run
+through the authenticated client rather than a second owner-path pair, so no
+redundant case was added. Both capture `RETURNED_SQLSTATE`, `MESSAGE_TEXT`,
+`PG_EXCEPTION_DETAIL`, and `PG_EXCEPTION_HINT` and assert one distinct SQLSTATE
+(`22023`), one distinct message, empty detail, empty hint, and no column,
+constraint, row representation, identifier, or date in the message.
+
+The migration was **not** changed. Its guards were already correct, and no
+defect was found in them, so nothing was edited there.
+
+### L1 — the sanitized-error probes did not exercise the client path
+
+Every Round 2 probe ran as the database owner, which proves the trigger raises a
+sanitized error but not that a real client observes one — a client also passes
+through column privileges and RLS.
+
+The two new probes run under `set local role authenticated` with synthetic JWT
+claims, inserting the caller's **own** row. The capture table is created and
+read by the owner and only written by `authenticated`, so no assertion depends
+on a temp table the client owns; role and claims are reset immediately
+afterwards, and all fixtures stay transaction-scoped. No service-role credential
+was used and RLS was not bypassed.
+
+One assertion exists purely to make this section honest: a sanitized rejection
+looks identical whether it was raised for the owner or for a client, so
+`current_user = 'authenticated'` is asserted inside the block. Without it a
+silently failed role switch would leave the section proving nothing new.
+
+### M2 — stale TASK-011 dependency statement in the task packet
+
+The packet still said TASK-011 was awaiting Codex round-2 review and made this
+task's helper conditional on that review's outcome. That contradicted both Git
+history and the Round 2 handoff. The bullet now records the settled state:
+TASK-011 was reviewed and merged before TASK-012 began, and its merged helper at
+base SHA `69a1471` is the dependency used here and verified by every run in this
+handoff. The conditional language is withdrawn rather than reworded. No approved
+decision and no Round 1 record was altered.
+
+### L2 — Round 2 commit body overstated its file count
+
+Commit `9d6acd3` says "Local only: 5 files". It changed exactly **four**:
+
+| Scope | Changed files |
+| --- | --- |
+| Round 2 fix commit `9d6acd3` | **4** |
+| Complete TASK-012 diff against `69a1471` | **6** |
+
+This is a documentation correction only. Commit `9d6acd3` was not amended,
+rebased, or rewritten, and its message still reads "5 files"; this ledger entry
+is the correction of record.
+
+### Round 3 mutation evidence
+
+Each mutation was applied to a local working copy of the migration, verified by
+`git diff --numstat` to be exactly the intended edit, run after a full
+`db reset`, then reverted with `git checkout --` and the database reset again.
+The migration is byte-identical to its committed state afterwards.
+
+| Mutation | Result |
+| --- | --- |
+| the `overall_feeling is null` and `pain_status is null` trigger guards removed (`0` insertions, `2` deletions) | **FAIL — 4 of 190**: tests 62, 63, 64, 67 |
+| UPDATE policy widened to `using (true) with check (true)` | **FAIL — 3 of 190**: tests 119, 121, 154 |
+| owner UPDATE policy denied while still containing `auth.uid()` — `using (athlete_profile_id = (select auth.uid()) and false)` | **FAIL — 3 of 190**: tests 82, 83, 84 |
+
+The first mutation is the direct proof that M1 is closed: those four assertions
+are exactly the new authenticated-client checks, and they were absent in Round
+2. Test 67 failing shows the message a client would then receive matches one of
+the forbidden patterns — a column name, a constraint name, a row
+representation, an identifier, or a date — instead of the fixed sanitized
+string.
+
+One honest detail: under that mutation tests 65 and 66 (empty `DETAIL`, empty
+`HINT`) still **passed**, so the observed leak was in the message text, not in a
+failing-row `DETAIL`. I have not established why PostgreSQL withheld the
+`DETAIL` from this particular role and am not asserting a mechanism here. The
+guard is what keeps the contract sanitized either way, and the assertions that
+failed are sufficient to prove the guard is load-bearing.
+
+The second and third mutations are the two Round 2 H1 checks, re-run unchanged
+against the Round 3 suite; their failing test numbers shifted only because nine
+assertions were inserted earlier in the file.
+
+### Round 3 verification
+
+Every command below was run locally in this worktree. Credential-bearing streams
+were suppressed; no status output, API URL, key, JWT secret, database URL, or
+token was printed.
+
+| Command | Result |
+| --- | --- |
+| `corepack pnpm install --frozen-lockfile` | exit 0 |
+| `corepack pnpm exec supabase --version` | `2.109.1` |
+| start local stack, output suppressed | exit 0 |
+| `corepack pnpm exec supabase db reset --local --no-seed` | exit 0 |
+| `corepack pnpm exec supabase test db --local` | **PASS — 5 files, 583 assertions** (`005` contributes 190) |
+| same, trigger NULL guards removed | **FAIL — `005` fails 4/190** |
+| same, UPDATE policy widened | **FAIL — `005` fails 3/190** |
+| same, owner UPDATE policy denied | **FAIL — `005` fails 3/190** |
+| after reverting every mutation and resetting | **PASS — 5 files, 583 assertions** |
+| `supabase db lint --local --schema public,private --level warning --fail-on warning` | exit 0, "No schema errors found" |
+| `supabase gen types typescript --local --schema public`, BOM stripped, Prettier-formatted | `git diff --no-index` exit 0 — zero drift |
+| `corepack pnpm format:check` | exit 0 |
+| `corepack pnpm lint` | exit 0 |
+| `corepack pnpm typecheck` | exit 0 |
+| `corepack pnpm test` | exit 0 — 18 files, 327 tests passed |
+| `git diff --check` | clean |
+| stop local stack, output suppressed | exit 0, no Supabase container remains |
+
+Two process notes, both mine and neither reaching the delivered code. My first
+mutation run wrote the migration with `Set-Content -Encoding utf8`, which adds a
+BOM in PowerShell 5.1; `db reset` exited 1 and that run's evidence was discarded
+and redone with a byte-exact writer. My first Round 3 drift check compared raw
+generator output against the committed file and reported a whole-file
+difference; the committed file is Prettier-formatted after generation, which is
+the procedure the packet records, and with that step the diff is empty.
+
 ## Rollback
 
 1. `git revert` the TASK-012 commits, or delete
@@ -596,9 +756,11 @@ needed. No dependency, lockfile, or configuration file was touched.
 
 ## Remaining reviewer findings
 
-None outstanding. All four Round 1 findings — H1, M1, M2, M3 — are implemented,
-tested, and verified above. No finding was deferred, partially applied, or
-reinterpreted.
+None outstanding. All four Round 1 findings — H1, M1, M2, M3 — and all four
+Round 2 findings — M1, M2, L1, L2 — are implemented, tested, and verified above.
+No finding was deferred, partially applied, or reinterpreted. The Round 2 H1 and
+M2 implementations and their tests were preserved unchanged and re-proved by
+mutation in Round 3.
 
 Three points are flagged for the reviewer's explicit attention:
 

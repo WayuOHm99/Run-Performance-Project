@@ -26,7 +26,7 @@ create extension if not exists pgtap with schema extensions;
 
 set local search_path = public, extensions, pg_catalog;
 
-select plan(181);
+select plan(190);
 
 -- ---------------------------------------------------------------------------
 -- Synthetic fixtures
@@ -506,7 +506,7 @@ from pg_temp.probe_error(
 select is(
   (select count(*)::int from rejection_probe),
   6,
-  'six rejection paths were probed, covering range, status, and every required field'
+  'six rejection paths were probed as the owner, covering range, status, and three required fields'
 );
 select is(
   (select count(distinct err_state)::int from rejection_probe),
@@ -551,13 +551,114 @@ select is(
   'no rejection message names a column, a constraint, a row representation, an identifier, or a date'
 );
 
+-- The probes above run as the database owner, which proves the trigger raises a
+-- sanitized error but not that a real client observes one. A client reaches the
+-- table through column privileges and RLS as well, so these two probes repeat
+-- the exercise as role authenticated with synthetic JWT claims, writing the
+-- caller's own row. They also cover the two required fields the owner matrix
+-- above does not: a null overall_feeling and a null pain_status. Removing
+-- either trigger guard would let PostgreSQL's native NOT NULL error through,
+-- and its DETAIL reproduces the whole protected-health row.
+--
+-- The capture table is created and read by the owner and only written by
+-- authenticated, so no assertion depends on a temp table the client owns.
+
+create temporary table client_rejection_probe (
+  probe       text,
+  err_state   text,
+  err_message text,
+  err_detail  text,
+  err_hint    text
+);
+grant insert on client_rejection_probe to authenticated;
+
+set local role authenticated;
+set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
+
+-- Without this the probes below would return an identical sanitized result if
+-- the role switch silently failed, and the section would prove nothing new.
+select is(
+  current_user::text,
+  'authenticated',
+  'the rejection probes below execute as the authenticated client role, not as the database owner'
+);
+
+insert into client_rejection_probe
+select 'null overall feeling', p.*
+from pg_temp.probe_error(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-28',
+             5, null, 'none') $$) as p;
+
+insert into client_rejection_probe
+select 'null pain status', p.*
+from pg_temp.probe_error(
+  $$ insert into public.daily_check_ins
+       (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
+     values ('00000000-0000-4000-8000-00000000000b', date '2026-07-28',
+             5, 3, null) $$) as p;
+
+reset request.jwt.claims;
+reset role;
+
+select is(
+  (select count(*)::int from client_rejection_probe),
+  2,
+  'both remaining required fields were probed as an authenticated client writing their own row'
+);
+select is(
+  (select count(distinct err_state)::int from client_rejection_probe),
+  1,
+  'an authenticated client sees one SQLSTATE for both, so the error cannot be used to probe which field was wrong'
+);
+select is(
+  (select min(err_state) from client_rejection_probe),
+  '22023',
+  'the SQLSTATE an authenticated client sees is the documented sanitized code, not a native NOT NULL failure'
+);
+select is(
+  (select count(distinct err_message)::int from client_rejection_probe),
+  1,
+  'an authenticated client sees the same message text for both'
+);
+select is(
+  (select min(err_message) from client_rejection_probe),
+  'daily check-in rejected: invalid input',
+  'the message an authenticated client sees is the fixed generic one'
+);
+select is(
+  (select count(*)::int from client_rejection_probe
+    where coalesce(err_detail, '') <> ''),
+  0,
+  'no rejection an authenticated client sees carries a DETAIL'
+);
+select is(
+  (select count(*)::int from client_rejection_probe
+    where coalesce(err_hint, '') <> ''),
+  0,
+  'no rejection an authenticated client sees carries a HINT'
+);
+select is(
+  (select count(*)::int from client_rejection_probe
+    where err_message like '%Failing row%'
+       or err_message like '%daily_check_ins%'
+       or err_message like '%overall_feeling%'
+       or err_message like '%pain_status%'
+       or err_message like '%null value%'
+       or err_message like '%00000000-0000-4000-8000%'
+       or err_message like '%2026-07-28%'),
+  0,
+  'no rejection an authenticated client sees names a column, a constraint, a row representation, an identifier, or a date'
+);
+
 delete from public.daily_check_ins
 where athlete_profile_id = '00000000-0000-4000-8000-00000000000c';
 
 select is(
   (select count(*)::int from public.daily_check_ins),
   0,
-  'the owner-level probe rows are cleared before the authorization sections'
+  'every owner-level and client-level probe row is cleared before the authorization sections'
 );
 
 -- ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 # TASK-012: Daily Check-In RLS Foundation
 
 Status: Implemented and verified locally. Round 1 Codex findings H1, M1, M2, and
-M3 are fixed and re-verified. Awaiting GPT/Codex Round 2 read-only review.
+M3, and Round 2 Codex findings M1, M2, L1, and L2, are fixed and re-verified.
+Awaiting GPT/Codex Round 3 read-only review.
 
 The approved scope and decisions 1–10 below are unchanged. Round 2 altered only
 how the boundary is enforced and proved, never what it is; the changes are
@@ -471,6 +472,16 @@ Synthetic identities only, on the reserved `example.test` domain.
 | 35 | catalog: RLS enabled, exactly the four policies, no `DELETE` policy, no policy targeting `anon`/`public`, table and column privileges, function privileges, `SECURITY DEFINER`, empty `search_path`, constraints, index justification, trigger | asserted |
 | 36 | the coach policy reuses the TASK-011 helper | the helper appears in the new helper's body; the TASK-011 migration is unedited |
 | 37 | existing TASK-008, TASK-009, and TASK-011 pgTAP files | still pass |
+| 38 | sanitized-rejection matrix run as the database owner: out-of-range value, unapproved status, null `rpe`, null `athlete_profile_id`, null `check_in_date`, invalid `UPDATE` — six paths | each rejected with the same `22023` and the same fixed message; empty `DETAIL`, empty `HINT`; no column, constraint, row representation, identifier, or date in the message |
+| 39 | the same sanitized rejection observed by an **authenticated client** writing their own row: null `overall_feeling`, null `pain_status` — two paths (Round 3, M1 and L1) | `current_user` asserted to be `authenticated`; both rejected with the same `22023` and fixed message; empty `DETAIL`, empty `HINT`; no column, constraint, row representation, identifier, or date in the message |
+
+Cases 38 and 39 were added in Round 3. Together they cover all five
+client-supplied required fields: cases 12–14 and 38 cover range, allowed values,
+and a null in `rpe`, `athlete_profile_id`, and `check_in_date`; case 39 covers
+the null `overall_feeling` and null `pain_status` paths that Round 2 left
+untested. Eight rejection paths are probed in total. No `NOT NULL` or `CHECK`
+constraint was changed, and the trigger guards were already correct and were not
+edited.
 
 No test prints an `rpe`, `overall_feeling`, or `pain_status` value. Assertion
 descriptions state the authorization outcome, never a measurement, and
@@ -605,10 +616,13 @@ remote database URL.
 - TASK-011 provides `sharing_grants`, the grant/revoke RPCs, and
   `private.can_current_user_read_shared_data`, which this task must call rather
   than reimplement.
-- TASK-011 is still awaiting Codex round-2 read-only review. This task builds on
-  its committed state at the base SHA. If that review changes the TASK-011
-  helper's signature or semantics, this task's helper and tests must be
-  re-verified against the change.
+- TASK-011 was reviewed and merged before TASK-012 began, so this dependency is
+  settled rather than pending. Its merged helper at base SHA `69a1471` is the
+  version this task calls and the version every verification run here was
+  executed against. (Round 3, M2: this bullet previously said TASK-011 was still
+  awaiting Codex round-2 review and made the dependency conditional on that
+  review's outcome. That was stale — it contradicted both Git history and the
+  Round 2 handoff. The conditional language is withdrawn, not merely reworded.)
 - Local Analytics remains disabled from TASK-007, so Studio's Logs section is
   empty locally.
 - No open product decision remains: decisions 1–10 are approved.
