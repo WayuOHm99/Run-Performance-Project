@@ -52,7 +52,8 @@ a later round superseded are corrected in place with the earlier value noted.
 | `1c7d989` | record the Round 4 SHA | 1 |
 | `89130f6` | Round 5 fixes | 3 |
 | `cea28d3` | record the Round 5 SHA | 1 |
-| Round 6 fix commit (branch HEAD) | Round 6 fixes | 3 |
+| `a00ece8` | Round 6 fixes | 3 |
+| branch HEAD | record the Round 6 SHA | 1 |
 | **Complete TASK-012 diff against `69a1471`** | | **6** |
 
 **Correction of record (Round 3, L2).** The body of commit `9d6acd3` says
