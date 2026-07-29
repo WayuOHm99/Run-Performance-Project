@@ -13,6 +13,16 @@
 -- assertion returns. A failure therefore reports which authorization rule
 -- broke, never a measurement and never a timestamp.
 --
+-- The rule that matters is about *failure* output, not passing output. pgTAP
+-- prints the have/got value when an assertion fails, so any assertion that
+-- returns a captured database error message would republish that message into
+-- the test log at exactly the moment a disclosure regression occurred — the
+-- test meant to catch the leak would become the leak. Captured MESSAGE_TEXT,
+-- DETAIL, and HINT are therefore never returned to an assertion; they are
+-- compared inside the query and only a count crosses the boundary. A captured
+-- SQLSTATE is returned directly, because it is a five-character code from a
+-- closed enumeration and cannot carry a value, an identifier, or a date.
+--
 -- Fixture setup runs as the local database owner. Every authorization assertion
 -- switches to the anon or authenticated role with synthetic JWT claims, so Row
 -- Level Security, table privileges, and column privileges are actually
@@ -523,10 +533,15 @@ select is(
   1,
   'every rejection path returns the same message text'
 );
+-- Counted rather than compared. pgTAP prints the have/got value when is()
+-- fails, so returning a captured message here would make the very test that
+-- detects a disclosure republish it into the test log. The comparison happens
+-- inside the query and only the row count crosses the boundary.
 select is(
-  (select min(err_message) from rejection_probe),
-  'daily check-in rejected: invalid input',
-  'that message is the fixed generic one'
+  (select count(*)::int from rejection_probe
+    where err_message is distinct from 'daily check-in rejected: invalid input'),
+  0,
+  'no rejection message differs from the fixed generic one'
 );
 select is(
   (select count(*)::int from rejection_probe where coalesce(err_detail, '') <> ''),
@@ -622,10 +637,12 @@ select is(
   1,
   'an authenticated client sees the same message text for both'
 );
+-- Counted, not compared, for the same reason as the owner matrix above.
 select is(
-  (select min(err_message) from client_rejection_probe),
-  'daily check-in rejected: invalid input',
-  'the message an authenticated client sees is the fixed generic one'
+  (select count(*)::int from client_rejection_probe
+    where err_message is distinct from 'daily check-in rejected: invalid input'),
+  0,
+  'no rejection message an authenticated client sees differs from the fixed generic one'
 );
 select is(
   (select count(*)::int from client_rejection_probe

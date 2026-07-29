@@ -1,8 +1,9 @@
 # TASK-012: Daily Check-In RLS Foundation
 
 Status: Implemented and verified locally. Round 1 Codex findings H1, M1, M2, and
-M3, and Round 2 Codex findings M1, M2, L1, and L2, are fixed and re-verified.
-Awaiting GPT/Codex Round 3 read-only review.
+M3, Round 2 Codex findings M1, M2, L1, and L2, and the Round 3 Codex Medium on
+pgTAP failure-output safety are fixed and re-verified. Awaiting GPT/Codex Round
+4 read-only review.
 
 The approved scope and decisions 1–10 below are unchanged. Round 2 altered only
 how the boundary is enforced and proved, never what it is; the changes are
@@ -486,6 +487,15 @@ edited.
 No test prints an `rpe`, `overall_feeling`, or `pain_status` value. Assertion
 descriptions state the authorization outcome, never a measurement, and
 assertions compare counts and error codes rather than echoing values.
+
+This requirement governs **failure** output, not merely passing output. pgTAP
+prints the have/got value of a failing assertion, so an assertion that returns a
+captured database error message would republish that message at exactly the
+moment a disclosure regression occurred. Captured `MESSAGE_TEXT`,
+`PG_EXCEPTION_DETAIL`, and `PG_EXCEPTION_HINT` are therefore compared inside the
+query, with only a row count returned to the assertion (Round 4). A captured
+`RETURNED_SQLSTATE` is returned directly: it is a five-character code from a
+closed enumeration and can carry no value, identifier, date, or row.
 
 ## Expected mechanical update to the TASK-008 test
 

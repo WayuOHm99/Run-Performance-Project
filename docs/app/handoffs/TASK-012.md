@@ -1,7 +1,7 @@
 # TASK-012 Handoff — Daily Check-In RLS Foundation
 
-Status: Implemented, reviewed twice by GPT/Codex, and Round 3 fixes applied and
-verified locally. Awaiting GPT/Codex Round 3 read-only review.
+Status: Implemented, reviewed three times by GPT/Codex, and Round 4 fixes
+applied and verified locally. Awaiting GPT/Codex Round 4 read-only review.
 
 Round 1 and Round 2 history below is retained. Everything a later round altered
 is recorded in its own "Round N — Codex findings and fixes" section, and figures
@@ -44,7 +44,8 @@ a later round superseded are corrected in place with the earlier value noted.
 | `9d6acd3` | Round 2 fixes | **4** |
 | `1313bf0` | record the Round 2 SHA | 1 |
 | `8f28893` | Round 3 fixes | 3 |
-| branch HEAD | record the Round 3 SHA | 1 |
+| `7eca322` | record the Round 3 SHA | 1 |
+| Round 4 fix commit (branch HEAD) | Round 4 fixes | 3 |
 | **Complete TASK-012 diff against `69a1471`** | | **6** |
 
 **Correction of record (Round 3, L2).** The body of commit `9d6acd3` says
@@ -259,7 +260,7 @@ All criteria met.
 | `db lint` clean for `public` and `private` | exit 0, no schema errors |
 | Generated types match the local database, zero drift | `git diff --no-index` exit 0 against a fresh regeneration |
 | Mobile format, lint, typecheck, unit tests pass | all exit 0; 327 tests |
-| Fixtures synthetic; no health value in test output | `example.test` domain; every assertion compares a count, a constant sentinel, a column name, an error code, a boolean, or a snapshot join |
+| Fixtures synthetic; no health value in test output | `example.test` domain; every assertion compares a count, a constant sentinel, a column name, an error code, a boolean, or a snapshot join. Captured `MESSAGE_TEXT`, `DETAIL`, and `HINT` are compared inside the query and never returned to an assertion (Round 4) |
 | No secret, credential, real user, Garmin, or legacy data; no dependency change | lockfile unchanged; nothing printed |
 | No forbidden path modified | six changed files, all owned |
 
@@ -385,9 +386,26 @@ attributable.
 - **No health value is printed in test output.** Every assertion compares a row
   count, a constant sentinel, a column name, an error code, a boolean, or a
   snapshot join, and no assertion description names a measurement. The Round 2
-  affected-row checks return the literal `1`, never a column. Under all four
-  mutations the failure output named only authorization rules. No health value
+  affected-row checks return the literal `1`, never a column. No health value
   appears in a commit message, this handoff, or an AI prompt.
+
+  > **Round 4 correction.** This bullet previously claimed that "under all four
+  > mutations the failure output named only authorization rules". That was
+  > wrong. The Round 3 guard-removal mutation made the two
+  > `is((select min(err_message) ...), 'daily check-in rejected: invalid
+  > input', ...)` assertions fail, and pgTAP prints the captured value of a
+  > failing `is()`. The failure output therefore contained PostgreSQL's native
+  > `null value in column "overall_feeling" ... violates not-null constraint`
+  > message — a column-bearing database error, not an authorization rule. Round
+  > 4 replaces both assertions with counted forms; see the Round 4 section.
+  >
+  > To be precise about impact: **no real data and no protected production value
+  > was exposed.** Every fixture in that run was synthetic, the mutation was
+  > local, and the message named a column rather than any measurement. The
+  > defect was in the assertion design, which violated the approved
+  > failure-output-safety requirement, not in what happened to be disclosed on
+  > that particular run. The requirement exists precisely so that the outcome
+  > does not depend on which row happened to fail.
 - **A rejected write discloses nothing** (Round 2, M1). Every invalid client
   write is refused with one fixed sanitized `22023` error carrying no field
   name, value, identifier, date, row representation, `DETAIL`, or `HINT`, so a
@@ -740,6 +758,148 @@ generator output against the committed file and reported a whole-file
 difference; the committed file is Prettier-formatted after generation, which is
 the procedure the packet records, and with that step the diff is empty.
 
+## Round 4 — Codex finding and fix
+
+All prior-round history above is retained. Round 4 changed three files and no
+migration, schema, policy, privilege, or generated type:
+`005_daily_check_ins_rls_test.sql`, the task packet, and this handoff.
+
+### Medium — pgTAP could print a captured `MESSAGE_TEXT` on failure
+
+Two assertions compared a captured error message directly:
+
+```sql
+select is(
+  (select min(err_message) from rejection_probe),
+  'daily check-in rejected: invalid input',
+  'that message is the fixed generic one'
+);
+```
+
+pgTAP prints the have/got value of a failing `is()`. So if a regression ever put
+a UUID, a date, a row representation, a supplied value, or a health value into
+`MESSAGE_TEXT`, the assertion whose entire purpose is to detect that disclosure
+would copy the disclosed string into the test log. The test meant to catch the
+leak was itself a leak path.
+
+Both are now counted. The comparison happens inside the query and only a row
+count crosses the boundary into pgTAP:
+
+```sql
+select is(
+  (select count(*)::int from rejection_probe
+    where err_message is distinct from 'daily check-in rejected: invalid input'),
+  0,
+  'no rejection message differs from the fixed generic one'
+);
+```
+
+and, for the authenticated client matrix:
+
+```sql
+select is(
+  (select count(*)::int from client_rejection_probe
+    where err_message is distinct from 'daily check-in rejected: invalid input'),
+  0,
+  'no rejection message an authenticated client sees differs from the fixed generic one'
+);
+```
+
+`is distinct from` is deliberate: a null `MESSAGE_TEXT` counts as differing
+rather than evaluating to null and vanishing from the count.
+
+The distinct-message, SQLSTATE, `DETAIL`, `HINT`, and forbidden-pattern
+assertions are all preserved unchanged. The replacement is one-for-one, so the
+plan stays at 190 — recalculated from the actual assertion tally, not assumed.
+
+### Audit of the rest of the rejection section
+
+`err_message`, `err_detail`, and `err_hint` are no longer returned to any
+assertion anywhere in the file; every remaining check counts rows.
+
+Two things were deliberately **not** changed:
+
+1. **`is((select min(err_state) ...), '22023', ...)` returns a captured
+   SQLSTATE.** This is a five-character code from a closed enumeration. It
+   cannot carry a value, an identifier, a date, or a row, and its printed value
+   on failure is diagnostically useful. Under mutation it printed `23502`, which
+   is exactly the safe scalar this assertion is for.
+2. **`throws_ok(..., '<code>', null, ...)`.** pgTAP's `throws_ok` prints the
+   caught error — code *and* message — when the expected code does not match, so
+   it is structurally the same channel as the finding. It is flagged below
+   rather than rewritten, because changing it means replacing 27 assertions
+   across sections unrelated to this finding, and the instruction was not to
+   broadly rewrite unrelated tests. It did not fire in any mutation run: all
+   diagnostics observed were bare integers.
+
+### Round 4 mutation evidence
+
+Full test output was captured to a file and scanned programmatically. The raw
+output was never printed; only counts, booleans, and values proven to be bare
+integers are reported. Each mutation was verified by `git diff --numstat` to be
+exactly the intended edit, then reverted with `git checkout --` and the database
+reset.
+
+| Mutation | Result | Diagnostic value lines | Non-integer diagnostics | Leaked message/UUID/date/row |
+| --- | --- | --- | --- | --- |
+| trigger `overall_feeling`/`pain_status` NULL guards removed (`0` insertions, `2` deletions) | **FAIL — 4 of 190**: tests 62, 63, 64, 67 | 8 | **0** | **0** |
+| UPDATE policy widened to `using (true) with check (true)` | **FAIL — 3 of 190**: tests 119, 121, 154 | 6 | **0** | **0** |
+| owner UPDATE denied while retaining `auth.uid()` | **FAIL — 3 of 190**: tests 82, 83, 84 | 4 | **0** | **0** |
+
+Every diagnostic under the guard-removal mutation was a bare integer, and they
+are safe to reproduce in full:
+
+```
+#   have: 23502     #   want: 22023      (test 62, SQLSTATE)
+#   have: 2         #   want: 1          (test 63, distinct message count)
+#   have: 2         #   want: 0          (test 64, the new counted assertion)
+#   have: 2         #   want: 0          (test 67, forbidden-pattern count)
+```
+
+The whole 50-line output was also scanned for `null value in column`,
+`Failing row contains`, `violates not-null`, `violates check constraint`, the
+synthetic UUID prefix, and any `2026-07-` date: **zero occurrences of each**.
+
+### The same mutation against the Round 3 test file
+
+To verify the finding rather than take it on trust, the Round 3 committed test
+file was checked out and run against the identical mutation, with the Round 4
+file set aside and restored immediately afterwards.
+
+| Test file | Failing tests | Diagnostic value lines | Non-integer diagnostics | Diagnostic lines containing the native message |
+| --- | --- | --- | --- | --- |
+| Round 3 (`7eca322`) | 62-64, 67 | 8 | **2** | **1** — matched `null value in column`, `violates not-null`, and `overall_feeling` |
+| Round 4 | 62-64, 67 | 8 | **0** | **0** |
+
+The finding is confirmed exactly as written. The offending line was detected by
+pattern match and its content was never printed to a terminal, a log, or this
+handoff. Fixtures in that run were synthetic and the leaked string named a
+column, not a measurement — but the assertion design, not the luck of which row
+failed, is what the requirement governs.
+
+### Round 4 verification
+
+| Command | Result |
+| --- | --- |
+| `corepack pnpm install --frozen-lockfile` | exit 0 |
+| `corepack pnpm exec supabase --version` | `2.109.1` |
+| start local stack, output suppressed | exit 0 |
+| `corepack pnpm exec supabase db reset --local --no-seed` | exit 0 |
+| `corepack pnpm exec supabase test db --local` | **PASS — 5 files, 583 assertions** (`005` contributes 190) |
+| guard-removal mutation | **FAIL — 4/190**, diagnostics all bare integers |
+| UPDATE policy widened | **FAIL — 3/190**, diagnostics all bare integers |
+| owner UPDATE denied | **FAIL — 3/190**, diagnostics all bare integers |
+| after restoring every file and resetting | **PASS — 5 files, 583 assertions** |
+| `supabase db lint --local --schema public,private --level warning --fail-on warning` | exit 0, "No schema errors found" |
+| type regeneration, BOM stripped, Prettier-formatted | `git diff --no-index` exit 0 — zero drift |
+| `corepack pnpm format:check` | exit 0 |
+| `corepack pnpm lint` | exit 0 |
+| `corepack pnpm typecheck` | exit 0 |
+| `corepack pnpm test` | exit 0 — 18 files, 327 tests passed |
+| `git diff --check` | clean |
+| stop local stack, output suppressed | exit 0, no Supabase container remains |
+| final worktree | clean |
+
 ## Rollback
 
 1. `git revert` the TASK-012 commits, or delete
@@ -757,13 +917,13 @@ needed. No dependency, lockfile, or configuration file was touched.
 
 ## Remaining reviewer findings
 
-None outstanding. All four Round 1 findings — H1, M1, M2, M3 — and all four
-Round 2 findings — M1, M2, L1, L2 — are implemented, tested, and verified above.
-No finding was deferred, partially applied, or reinterpreted. The Round 2 H1 and
-M2 implementations and their tests were preserved unchanged and re-proved by
-mutation in Round 3.
+None outstanding. All four Round 1 findings (H1, M1, M2, M3), all four Round 2
+findings (M1, M2, L1, L2), and the single Round 3 Medium are implemented,
+tested, and verified above. No finding was deferred, partially applied, or
+reinterpreted. The H1 and M2 implementations and their tests were preserved
+unchanged and re-proved by mutation in every later round.
 
-Three points are flagged for the reviewer's explicit attention:
+Four points are flagged for the reviewer's explicit attention:
 
 1. **The reading of decision 8** recorded in the task packet and above: a coach
    is denied any write path into another person's check-in, but is not
@@ -781,6 +941,15 @@ Three points are flagged for the reviewer's explicit attention:
    given athlete checked in on a given date. I did not narrow those two
    unilaterally, because doing so changes the error a client sees for a
    legitimate duplicate-submission case and that is a product decision.
+4. **`throws_ok` prints the caught error message on a code mismatch** (raised in
+   Round 4). This is the same failure-output channel the Round 3 Medium
+   identified, but it reaches 27 assertions across sections that finding did not
+   cover, and the instruction was explicitly not to broadly rewrite unrelated
+   tests. It did not fire under any mutation run here. If the Product Owner
+   wants the guarantee to be structural rather than situational, the fix is to
+   route those assertions through the same `pg_temp` probe used by the rejection
+   matrices and assert counted SQLSTATEs — a mechanical but wide change, and one
+   I did not make unilaterally.
 
 ## Confirmation
 
