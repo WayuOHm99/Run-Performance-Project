@@ -1,9 +1,14 @@
 # TASK-012: Daily Check-In RLS Foundation
 
 Status: Implemented and verified locally. Round 1 Codex findings H1, M1, M2, and
-M3, Round 2 Codex findings M1, M2, L1, and L2, and the Round 3 Codex Medium on
-pgTAP failure-output safety are fixed and re-verified. Awaiting GPT/Codex Round
-4 read-only review.
+M3, Round 2 Codex findings M1, M2, L1, and L2, the Round 3 Codex Medium on
+pgTAP failure-output safety, and Round 4 Codex findings M1 and L1 are fixed and
+re-verified. Awaiting GPT/Codex Round 5 read-only review.
+
+One open finding of my own discovery is recorded as F1 in the handoff: bare
+fixture DML in the test file still emits a native psql error, including a
+failing-row `DETAIL`, if a schema change ever makes a fixture invalid. It is
+outside the approved Round 5 scope and awaits a Product Owner decision.
 
 The approved scope and decisions 1–10 below are unchanged. Round 2 altered only
 how the boundary is enforced and proved, never what it is; the changes are
@@ -496,6 +501,16 @@ moment a disclosure regression occurred. Captured `MESSAGE_TEXT`,
 query, with only a row count returned to the assertion (Round 4). A captured
 `RETURNED_SQLSTATE` is returned directly: it is a five-character code from a
 closed enumeration and can carry no value, identifier, date, or row.
+
+The guarantee is structural as of Round 5. `throws_ok()` and `lives_ok()` print
+the caught database error when they fail, so all 35 of their calls were replaced
+with a `SECURITY INVOKER` `pg_temp.probe_state(text)` probe that runs the
+statement under the caller's role and JWT claims, preserves the effects of a
+successful statement, and returns only the fixed sentinel `'ok'` or a
+five-character `SQLSTATE`. No `throws_ok` or `lives_ok` call remains in the
+file. The two assertions that compared a raw `created_at`/`updated_at` against
+`now()` were converted to row counts in the same round, so no assertion can
+print a timestamp.
 
 ## Expected mechanical update to the TASK-008 test
 

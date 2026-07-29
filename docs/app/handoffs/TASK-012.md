@@ -1,7 +1,11 @@
 # TASK-012 Handoff — Daily Check-In RLS Foundation
 
-Status: Implemented, reviewed three times by GPT/Codex, and Round 4 fixes
-applied and verified locally. Awaiting GPT/Codex Round 4 read-only review.
+Status: Implemented, reviewed four times by GPT/Codex, and Round 5 fixes applied
+and verified locally. Awaiting GPT/Codex Round 5 read-only review.
+
+One **new** failure-output finding was discovered during Round 5 mutation
+testing and is **not** fixed: bare fixture DML in the test file still emits
+native psql errors. It is described in "Remaining reviewer findings".
 
 Round 1 and Round 2 history below is retained. Everything a later round altered
 is recorded in its own "Round N — Codex findings and fixes" section, and figures
@@ -46,7 +50,8 @@ a later round superseded are corrected in place with the earlier value noted.
 | `8f28893` | Round 3 fixes | 3 |
 | `7eca322` | record the Round 3 SHA | 1 |
 | `406f149` | Round 4 fixes | 3 |
-| branch HEAD | record the Round 4 SHA | 1 |
+| `1c7d989` | record the Round 4 SHA | 1 |
+| Round 5 fix commit (branch HEAD) | Round 5 fixes | 3 |
 | **Complete TASK-012 diff against `69a1471`** | | **6** |
 
 **Correction of record (Round 3, L2).** The body of commit `9d6acd3` says
@@ -901,6 +906,180 @@ failed, is what the requirement governs.
 | stop local stack, output suppressed | exit 0, no Supabase container remains |
 | final worktree | clean |
 
+## Round 5 — Codex findings and fixes
+
+All prior-round history above is retained. Round 5 changed three files and no
+migration, schema, policy, privilege, or generated type.
+
+### M1 — failure-output safety is now structural
+
+`005` still called 27 `throws_ok()` and 8 `lives_ok()` assertions. Both pgTAP
+helpers print the caught database error — SQLSTATE, message, and context — when
+they fail, so 35 assertions remained capable of republishing a captured
+diagnostic on a protected-health table.
+
+All 35 are replaced one-for-one with a `pg_temp` probe:
+
+```sql
+create function pg_temp.probe_state(p_sql text)
+returns text
+language plpgsql
+as $probe_state$
+begin
+  execute p_sql;
+  return 'ok';
+exception when others then
+  return sqlstate;
+end;
+$probe_state$;
+```
+
+- **`SECURITY INVOKER`, no pinned `search_path`** — the statement runs under the
+  caller's current role and JWT claims, so privileges, RLS, and column grants
+  are exercised exactly as before.
+- **Successful effects persist.** A plpgsql exception block only rolls back its
+  subtransaction when an exception is actually raised, so the former `lives_ok`
+  inserts still create the rows later assertions depend on. The suite passing at
+  583 with every downstream row-count assertion intact is the proof.
+- **Only two things can ever be returned**: the fixed sentinel `'ok'` or a
+  five-character `SQLSTATE`. `SQLERRM`, `DETAIL`, `HINT`, `CONTEXT`, the
+  statement text, and every identifier are never read, never returned, and never
+  re-raised.
+
+`throws_ok(sql, '42501', null, desc)` became
+`is(pg_temp.probe_state(sql), '42501', desc)`, and `lives_ok(sql, desc)` became
+`is(pg_temp.probe_state(sql), 'ok', desc)`. No authorization outcome and no
+positive control was weakened; every expectation is the same value it was
+before, only carried by a safe scalar.
+
+`anon` and `authenticated` must be able to call the probe. `pg_temp` is a
+search-path alias that `GRANT` does not resolve, so the session's real temp
+schema name is looked up via `pg_my_temp_schema()` and granted explicitly.
+
+### L1 — direct timestamp diagnostics
+
+The two owner timestamp-forgery assertions returned a raw `created_at` /
+`updated_at` and compared it to `now()`, so a failure would have printed both
+timestamps. Both now count the matching rows, with the equality evaluated inside
+the query:
+
+```sql
+select is(
+  (select count(*)::int from public.daily_check_ins
+    where athlete_profile_id = '...' and check_in_date = date '2026-07-22'
+      and created_at = now()),
+  1,
+  'a supplied created_at is overwritten with database time on insert'
+);
+```
+
+### Structural checks
+
+| Check | Result |
+| --- | --- |
+| `select throws_ok(` calls remaining in `005` | **0** |
+| `select lives_ok(` calls remaining in `005` | **0** |
+| remaining textual mentions | 2, both in explanatory comments |
+| assertion recount | `is` 122 + `ok` 43 + `col_not_null` 7 + `col_type_is` 8 + `col_has_default` 3 + `has_function` 3 + `col_is_pk` 1 + `has_table` 1 + `has_trigger` 1 + `hasnt_column` 1 = **190** |
+| `plan(190)` | unchanged, one-for-one replacement confirmed by recount |
+| assertion receiving captured `MESSAGE_TEXT`, `DETAIL`, `HINT`, or a raw timestamp | **none** |
+
+### Round 5 mutation evidence
+
+Complete output was captured to a temporary file and scanned programmatically.
+Raw output was never printed. Every mutation was reverted with
+`git checkout --` and the database reset.
+
+**Mutation 1 — a former expected-failure path returns a different SQLSTATE
+carrying a synthetic leak canary.** The trigger's sanitized `raise` was changed
+to `errcode = '22999'` with a message embedding the canary token
+`LEAKCANARY7F3A` plus a fake `rpe=`, `feeling=`, `pain=`, athlete UUID, and
+date.
+
+Result: **FAIL — 13 of 190** (tests 33-39, 53, 55, 58, 62, 64, 67). All 26
+diagnostic value lines were safe scalars; the complete set of distinct values
+printed was `0`, `2`, `6`, `22023`, `22999`.
+
+| Scanned for | Occurrences in the entire output |
+| --- | --- |
+| `LEAKCANARY7F3A` | **0** |
+| `rpe=`, `feeling=`, `pain=` | **0** |
+| synthetic UUID prefix | **0** |
+| any `2026-07-` date | **0** |
+| `Failing row`, `DETAIL`, `HINT`, `CONTEXT`, `PL/pgSQL` | **0** |
+
+The canary was inside the database error on 13 failing assertions and reached
+the output zero times.
+
+**Mutation 2 — a former expected-success insert hits a native constraint failure
+capable of carrying a failing-row `DETAIL`.** `daily_check_ins_rpe_valid` was
+narrowed from `rpe between 0 and 10` to `0 and 4`, so previously valid inserts
+raise a native `23514`.
+
+Result: **FAIL — tests 41-42**, then the file aborted after 42 of 190. All 4
+diagnostic value lines were safe scalars: `ok`, `23514`, `23505`. **No pgTAP
+assertion diagnostic contained a leak** — verified by matching every `#`-prefixed
+line against the leak patterns: zero hits.
+
+### A real leak this mutation exposed, in a channel outside the fix
+
+Mutation 2's output *did* contain one `ERROR: … violates check constraint
+"daily_check_ins_rpe_valid"` line and one `DETAIL: Failing row contains (…)`
+line naming a row id, the athlete UUID, the date, and the three health columns.
+
+I checked where they came from before drawing any conclusion. Neither is a pgTAP
+assertion diagnostic — both are psql's own error output, emitted when a **bare
+fixture `INSERT`** (not an assertion, not wrapped in the probe) failed and
+aborted the transaction at test 42. Assertion-diagnostic leak count was zero;
+the two leaking lines were the only ones in the file.
+
+So the Round 5 fix does exactly what it was scoped to do, and a **separate,
+previously unknown failure-output channel exists**. It is recorded as an open
+finding below rather than fixed, because the approved Round 5 scope was the 35
+helper assertions and the two timestamp assertions, and closing this one changes
+how fixture statements fail — a design decision, not a mechanical substitution.
+
+Fixtures in that run were synthetic and the values printed were the file's own
+literals; no real or production data was involved. The channel, not the run, is
+the finding.
+
+### Previous mutation coverage, re-proved
+
+| Mutation | Result | Diagnostics | Leak occurrences |
+| --- | --- | --- | --- |
+| trigger `overall_feeling`/`pain_status` NULL guards removed | **FAIL — 4/190**: 62-64, 67 | 8, all scalar (`0`, `1`, `2`, `22023`, `23502`) | **0** |
+| UPDATE policy widened to `using (true) with check (true)` | **FAIL — 3/190**: 119, 121, 154 | 6, all scalar | **0** |
+| owner UPDATE denied while retaining `auth.uid()` | **FAIL — 3/190**: 82-84 | 4, all scalar | **0** |
+
+Identical failing-test numbers to Round 4, so the rewrite preserved every
+authorization outcome and every mutation-detected behaviour.
+
+### Round 5 verification
+
+| Command | Result |
+| --- | --- |
+| `corepack pnpm install --frozen-lockfile` | exit 0 |
+| `corepack pnpm exec supabase --version` | `2.109.1` |
+| start local stack, output suppressed | exit 0 |
+| `corepack pnpm exec supabase db reset --local --no-seed` | exit 0 |
+| `corepack pnpm exec supabase test db --local` | **PASS — 5 files, 583 assertions** (`005` contributes 190) |
+| five mutations (2 new + 3 prior) | each FAIL as tabulated; every diagnostic a safe scalar |
+| after restoring every mutation and resetting | **PASS — 5 files, 583 assertions** |
+| `supabase db lint --local --schema public,private --level warning --fail-on warning` | exit 0, "No schema errors found" |
+| type regeneration, BOM stripped, Prettier-formatted | `git diff --no-index` exit 0 — zero drift |
+| `corepack pnpm format:check` | exit 0 |
+| `corepack pnpm lint` | exit 0 |
+| `corepack pnpm typecheck` | exit 0 |
+| `corepack pnpm test` | exit 0 — 18 files, 327 tests passed |
+| `git diff --check` | clean |
+| stop local stack, output suppressed | exit 0, no Supabase container remains |
+| final worktree | clean |
+
+One process note: my first probe definition granted `usage on schema pg_temp`
+directly. `GRANT` does not resolve that alias, so the file aborted having run 0
+tests. Fixed by resolving `pg_my_temp_schema()`; caught by the runner, and no
+partial state reached a commit.
+
 ## Rollback
 
 1. `git revert` the TASK-012 commits, or delete
@@ -918,13 +1097,44 @@ needed. No dependency, lockfile, or configuration file was touched.
 
 ## Remaining reviewer findings
 
-None outstanding. All four Round 1 findings (H1, M1, M2, M3), all four Round 2
-findings (M1, M2, L1, L2), and the single Round 3 Medium are implemented,
-tested, and verified above. No finding was deferred, partially applied, or
-reinterpreted. The H1 and M2 implementations and their tests were preserved
-unchanged and re-proved by mutation in every later round.
+**One finding is outstanding — see F1 below.** Every finding the reviewer has
+raised to date is closed: all four from Round 1 (H1, M1, M2, M3), all four from
+Round 2 (M1, M2, L1, L2), the Round 3 Medium, and both from Round 4 (M1, L1).
+None was deferred, partially applied, or reinterpreted, and the H1 and M2
+implementations were preserved unchanged and re-proved by mutation in every
+later round.
 
-Four points are flagged for the reviewer's explicit attention:
+> **Correction (Round 5).** Rounds 3 and 4 opened this section with "None
+> outstanding." That was accurate only about *reviewer-raised* findings and read
+> as a claim that nothing was open at all. Round 5 mutation testing then found a
+> genuine leak channel of my own discovery, so the blanket wording is withdrawn.
+> Earlier rounds' text is retained above rather than rewritten.
+
+### F1 (open) — bare fixture DML still emits native psql errors
+
+Not a reviewer finding; discovered by Round 5 mutation 2 and left unfixed
+because it falls outside the approved Round 5 scope.
+
+All 190 assertions are now failure-output safe. The test file also contains
+plain, non-assertion `INSERT`/`UPDATE`/`DELETE` fixture statements. If one of
+those ever fails — as it did when mutation 2 narrowed a `CHECK` constraint —
+psql prints the native error, including `DETAIL: Failing row contains (…)` with
+the row id, athlete UUID, calendar date, and all three health columns, and the
+file aborts.
+
+This cannot be triggered by an authorization regression, which is what the suite
+is designed to detect; it needs a schema or constraint change that makes a
+fixture invalid. That is a realistic future migration edit, so the channel is
+real.
+
+The fix I would propose, for approval rather than unilaterally: wrap fixture DML
+in a `do` block that catches and re-raises a sanitized error, e.g. `raise
+exception using errcode = '22023', message = 'fixture statement failed'`. It
+keeps the failure loud and the file aborting, adds no assertions, and leaves
+`plan(190)` untouched. I did not apply it because it changes how every fixture
+statement fails, which is a design decision.
+
+Four further points are flagged for the reviewer's explicit attention:
 
 1. **The reading of decision 8** recorded in the task packet and above: a coach
    is denied any write path into another person's check-in, but is not
@@ -942,15 +1152,10 @@ Four points are flagged for the reviewer's explicit attention:
    given athlete checked in on a given date. I did not narrow those two
    unilaterally, because doing so changes the error a client sees for a
    legitimate duplicate-submission case and that is a product decision.
-4. **`throws_ok` prints the caught error message on a code mismatch** (raised in
-   Round 4). This is the same failure-output channel the Round 3 Medium
-   identified, but it reaches 27 assertions across sections that finding did not
-   cover, and the instruction was explicitly not to broadly rewrite unrelated
-   tests. It did not fire under any mutation run here. If the Product Owner
-   wants the guarantee to be structural rather than situational, the fix is to
-   route those assertions through the same `pg_temp` probe used by the rejection
-   matrices and assert counted SQLSTATEs — a mechanical but wide change, and one
-   I did not make unilaterally.
+4. **`throws_ok` prints the caught error message on a code mismatch** — raised
+   by me in Round 4, approved as Round 5 M1, and **now closed**. All 27
+   `throws_ok` and 8 `lives_ok` calls were replaced with the `pg_temp` probe;
+   zero remain.
 
 ## Confirmation
 

@@ -39,6 +39,54 @@ set local search_path = public, extensions, pg_catalog;
 select plan(190);
 
 -- ---------------------------------------------------------------------------
+-- Failure-output-safe execution probe
+-- ---------------------------------------------------------------------------
+--
+-- pgTAP's throws_ok() and lives_ok() print the caught database error — code,
+-- message, and context — when they fail. On a protected-health table that makes
+-- the assertion a disclosure path at exactly the moment a regression occurs:
+-- the test written to catch a leak becomes the leak. This probe replaces both.
+--
+-- It runs the statement under the caller's current role and JWT claims
+-- (SECURITY INVOKER, no pinned search_path), so privileges, RLS, and column
+-- grants are exercised exactly as before. On success it returns a fixed
+-- sentinel and the statement's effects persist, because a plpgsql exception
+-- block only rolls back its subtransaction when an exception is actually
+-- raised. On failure it returns the five-character SQLSTATE and nothing else:
+-- SQLERRM, DETAIL, HINT, CONTEXT, and the statement text are never read, never
+-- returned, and never raised onward.
+--
+-- The function lives in pg_temp, so it adds no schema surface, no RPC, and
+-- disappears with the transaction.
+
+create function pg_temp.probe_state(p_sql text)
+returns text
+language plpgsql
+as $probe_state$
+begin
+  execute p_sql;
+  return 'ok';
+exception when others then
+  return sqlstate;
+end;
+$probe_state$;
+
+-- anon and authenticated must be able to call the probe, and "pg_temp" is a
+-- search-path alias that GRANT does not resolve, so the session's real temp
+-- schema name is looked up and granted explicitly.
+do $grant_probe$
+declare
+  v_schema text := (select nspname from pg_catalog.pg_namespace
+                     where oid = pg_catalog.pg_my_temp_schema());
+begin
+  execute format('grant usage on schema %I to anon, authenticated', v_schema);
+  execute format(
+    'grant execute on function %I.probe_state(text) to anon, authenticated',
+    v_schema);
+end;
+$grant_probe$;
+
+-- ---------------------------------------------------------------------------
 -- Synthetic fixtures
 -- ---------------------------------------------------------------------------
 --
@@ -266,83 +314,85 @@ select has_trigger('public', 'daily_check_ins', 'daily_check_ins_enforce_columns
 -- The constraints are still present and still enforce the same rules; section
 -- 3b proves the error a client actually receives discloses nothing.
 
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             -1, 3, 'none') $$,
-  '22023', null,
+             -1, 3, 'none') $$),
+  '22023',
   'an rpe below the allowed range is rejected'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             11, 3, 'none') $$,
-  '22023', null,
+             11, 3, 'none') $$),
+  '22023',
   'an rpe above the allowed range is rejected'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             5, 0, 'none') $$,
-  '22023', null,
+             5, 0, 'none') $$),
+  '22023',
   'an overall_feeling below the allowed range is rejected'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             5, 6, 'none') $$,
-  '22023', null,
+             5, 6, 'none') $$),
+  '22023',
   'an overall_feeling above the allowed range is rejected'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             5, 3, 'mild') $$,
-  '22023', null,
+             5, 3, 'mild') $$),
+  '22023',
   'a pain_status outside the two approved values is rejected'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             5, 3, '') $$,
-  '22023', null,
+             5, 3, '') $$),
+  '22023',
   'an empty pain_status is rejected, so there is no free-text escape hatch'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             5, 3, 'NONE') $$,
-  '22023', null,
+             5, 3, 'NONE') $$),
+  '22023',
   'pain_status is case-sensitive, so only the two exact approved values pass'
 );
 
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             0, 1, 'present') $$,
+             0, 1, 'present') $$),
+  'ok',
   'a row at the lower bound of both scales is accepted'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             10, 5, 'none') $$,
-  '23505', null,
+             10, 5, 'none') $$),
+  '23505',
   'a second row for the same athlete and the same calendar date is rejected'
 );
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-21',
-             10, 5, 'none') $$,
+             10, 5, 'none') $$),
+  'ok',
   'the same athlete may check in on a different calendar date'
 );
 
@@ -354,18 +404,23 @@ values
   ('00000000-0000-4000-8000-00000000000c', date '2026-07-22', 5, 3, 'none',
    timestamptz '2000-01-01 00:00:00+00', timestamptz '2000-01-02 00:00:00+00');
 
+-- Counted, not compared: a direct scalar comparison would print both the stored
+-- and the expected timestamp when it failed (Round 5, L1). The equality is
+-- evaluated inside the query and only the matching row count leaves it.
 select is(
-  (select created_at from public.daily_check_ins
+  (select count(*)::int from public.daily_check_ins
     where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
-      and check_in_date = date '2026-07-22'),
-  now(),
+      and check_in_date = date '2026-07-22'
+      and created_at = now()),
+  1,
   'a supplied created_at is overwritten with database time on insert'
 );
 select is(
-  (select updated_at from public.daily_check_ins
+  (select count(*)::int from public.daily_check_ins
     where athlete_profile_id = '00000000-0000-4000-8000-00000000000c'
-      and check_in_date = date '2026-07-22'),
-  now(),
+      and check_in_date = date '2026-07-22'
+      and updated_at = now()),
+  1,
   'a supplied updated_at is overwritten with database time on insert'
 );
 
@@ -687,33 +742,33 @@ select is(
 
 set local role anon;
 
-select throws_ok(
-  $$ select * from public.daily_check_ins $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ select * from public.daily_check_ins $$),
+  '42501',
   'anonymous cannot read daily_check_ins'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-20',
-             5, 3, 'none') $$,
-  '42501', null,
+             5, 3, 'none') $$),
+  '42501',
   'anonymous cannot insert a check-in'
 );
-select throws_ok(
-  $$ update public.daily_check_ins set rpe = rpe $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ update public.daily_check_ins set rpe = rpe $$),
+  '42501',
   'anonymous cannot update a check-in'
 );
-select throws_ok(
-  $$ delete from public.daily_check_ins $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ delete from public.daily_check_ins $$),
+  '42501',
   'anonymous cannot delete a check-in'
 );
-select throws_ok(
-  $$ select private.can_current_user_read_check_in(
-       '00000000-0000-4000-8000-00000000000b'::uuid) $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ select private.can_current_user_read_check_in(
+       '00000000-0000-4000-8000-00000000000b'::uuid) $$),
+  '42501',
   'anonymous cannot execute the check-in read helper'
 );
 
@@ -726,11 +781,12 @@ reset role;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000b","role":"authenticated"}';
 
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-20',
-             5, 3, 'none') $$,
+             5, 3, 'none') $$),
+  'ok',
   'an authenticated athlete inserts their own check-in'
 );
 select is(
@@ -749,56 +805,58 @@ select is(
 
 -- Column privileges, not merely trigger correction: the client cannot even name
 -- the database-controlled columns.
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (id, athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-0000000000fe',
              '00000000-0000-4000-8000-00000000000b', date '2026-07-25',
-             5, 3, 'none') $$,
-  '42501', null,
+             5, 3, 'none') $$),
+  '42501',
   'a client insert cannot name the id column'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
         created_at)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-25',
-             5, 3, 'none', timestamptz '2000-01-01 00:00:00+00') $$,
-  '42501', null,
+             5, 3, 'none', timestamptz '2000-01-01 00:00:00+00') $$),
+  '42501',
   'a client insert cannot name the created_at column'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status,
         updated_at)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-25',
-             5, 3, 'none', timestamptz '2000-01-01 00:00:00+00') $$,
-  '42501', null,
+             5, 3, 'none', timestamptz '2000-01-01 00:00:00+00') $$),
+  '42501',
   'a client insert cannot name the updated_at column'
 );
 
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             5, 3, 'none') $$,
-  '42501', null,
+             5, 3, 'none') $$),
+  '42501',
   'a client cannot insert a check-in for another profile'
 );
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-20',
-             8, 4, 'present') $$,
-  '23505', null,
+             8, 4, 'present') $$),
+  '23505',
   'a client cannot create a second check-in for the same calendar date'
 );
 
 -- Decision 5: the data subject may change exactly the three health fields.
 --
--- Round 2, high finding. lives_ok cannot distinguish a successful update from
--- one that matched no row, because RLS filters rather than errors, so an
--- update that reaches nothing still succeeds. Every update path in this file
+-- Round 2, high finding. A bare "the statement succeeded" check cannot
+-- distinguish a successful update from one that matched no row, because RLS
+-- filters rather than errors, so an update that reaches nothing still
+-- succeeds — and that is equally true of the probe's 'ok' sentinel as it was
+-- of the lives_ok() this file used to call. Every update path in this file
 -- therefore counts the rows the statement actually affected. RETURNING yields a
 -- constant sentinel, never a column, so no protected value reaches the output.
 --
@@ -859,40 +917,40 @@ select is(
 
 set local role authenticated;
 
-select throws_ok(
-  $$ update public.daily_check_ins
-        set athlete_profile_id = '00000000-0000-4000-8000-00000000000c' $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ update public.daily_check_ins
+        set athlete_profile_id = '00000000-0000-4000-8000-00000000000c' $$),
+  '42501',
   'a client update cannot name the athlete_profile_id column'
 );
-select throws_ok(
-  $$ update public.daily_check_ins set check_in_date = date '2026-07-01' $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ update public.daily_check_ins set check_in_date = date '2026-07-01' $$),
+  '42501',
   'a client update cannot name the check_in_date column'
 );
-select throws_ok(
-  $$ update public.daily_check_ins
-        set id = '00000000-0000-4000-8000-0000000000fd' $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ update public.daily_check_ins
+        set id = '00000000-0000-4000-8000-0000000000fd' $$),
+  '42501',
   'a client update cannot name the id column'
 );
-select throws_ok(
-  $$ update public.daily_check_ins
-        set created_at = timestamptz '2000-01-01 00:00:00+00' $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ update public.daily_check_ins
+        set created_at = timestamptz '2000-01-01 00:00:00+00' $$),
+  '42501',
   'a client update cannot name the created_at column'
 );
-select throws_ok(
-  $$ update public.daily_check_ins
-        set updated_at = timestamptz '2000-01-01 00:00:00+00' $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ update public.daily_check_ins
+        set updated_at = timestamptz '2000-01-01 00:00:00+00' $$),
+  '42501',
   'a client update cannot name the updated_at column'
 );
 
 -- Decision 5: there is no client DELETE privilege and no DELETE policy.
-select throws_ok(
-  $$ delete from public.daily_check_ins $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ delete from public.daily_check_ins $$),
+  '42501',
   'the data subject cannot delete their own check-in, because no client DELETE path exists'
 );
 
@@ -903,44 +961,48 @@ reset role;
 
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000c","role":"authenticated"}';
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000c', date '2026-07-20',
-             5, 3, 'none') $$,
+             5, 3, 'none') $$),
+  'ok',
   'a second Team A athlete inserts their own check-in'
 );
 reset role;
 
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000e","role":"authenticated"}';
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000e', date '2026-07-20',
-             5, 3, 'none') $$,
+             5, 3, 'none') $$),
+  'ok',
   'the wrong-category athlete inserts their own check-in'
 );
 reset role;
 
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000f","role":"authenticated"}';
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000f', date '2026-07-20',
-             5, 3, 'none') $$,
+             5, 3, 'none') $$),
+  'ok',
   'the dual-team athlete inserts their own check-in'
 );
 reset role;
 
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-000000000012","role":"authenticated"}';
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-000000000012', date '2026-07-20',
-             5, 3, 'none') $$,
+             5, 3, 'none') $$),
+  'ok',
   'the toggle athlete inserts their own check-in'
 );
 reset role;
@@ -950,11 +1012,12 @@ reset role;
 -- exposed to nobody by the self policies.
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"00000000-0000-4000-8000-00000000000a","role":"authenticated"}';
-select lives_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000a', date '2026-07-20',
-             5, 3, 'none') $$,
+             5, 3, 'none') $$),
+  'ok',
   'self insert is identity-owned, so a user who is also a coach may record their own check-in'
 );
 reset role;
@@ -1011,10 +1074,10 @@ select is(
   'another athlete''s update of a check-in affects exactly zero rows'
 );
 
-select throws_ok(
-  $$ delete from public.daily_check_ins
-      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ delete from public.daily_check_ins
+      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$),
+  '42501',
   'an athlete cannot delete another athlete''s check-in'
 );
 
@@ -1150,12 +1213,12 @@ select is(
 );
 
 -- Decision 8: the coach has no write path, even to a row they may read.
-select throws_ok(
-  $$ insert into public.daily_check_ins
+select is(
+  pg_temp.probe_state($$ insert into public.daily_check_ins
        (athlete_profile_id, check_in_date, rpe, overall_feeling, pain_status)
      values ('00000000-0000-4000-8000-00000000000b', date '2026-07-23',
-             5, 3, 'none') $$,
-  '42501', null,
+             5, 3, 'none') $$),
+  '42501',
   'a coach cannot insert a check-in for an athlete who shares with them'
 );
 -- Readable is not writable. The coach can see this row, so a widened UPDATE
@@ -1171,10 +1234,10 @@ select is(
   0,
   'a coach''s update of a check-in they may read affects exactly zero rows'
 );
-select throws_ok(
-  $$ delete from public.daily_check_ins
-      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$,
-  '42501', null,
+select is(
+  pg_temp.probe_state($$ delete from public.daily_check_ins
+      where athlete_profile_id = '00000000-0000-4000-8000-00000000000b' $$),
+  '42501',
   'a coach cannot delete a check-in'
 );
 
