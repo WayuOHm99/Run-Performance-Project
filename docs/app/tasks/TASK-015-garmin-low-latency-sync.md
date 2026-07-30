@@ -44,6 +44,7 @@ the existing full wellness/detail sync and its recovery behavior.
 - `scripts/setup_scheduled_tasks.ps1`
 - `CLAUDE.md` (Garmin operations section only)
 - `docs/app/tasks/TASK-015-garmin-low-latency-sync.md`
+- `docs/app/handoffs/TASK-015.md`
 
 ## Forbidden paths
 
