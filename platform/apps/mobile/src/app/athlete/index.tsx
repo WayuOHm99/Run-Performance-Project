@@ -6,6 +6,7 @@ import { InfoCard } from "@/components/info-card";
 import { PrimaryButton } from "@/components/primary-button";
 import { ScreenHeading } from "@/components/screen-heading";
 import { ROUTES } from "@/features/auth/gate";
+import { DailyCheckInCard } from "@/features/check-in/check-in-card";
 import { useAccountQuery } from "@/features/profile/use-account";
 import { spacing } from "@/theme/tokens";
 
@@ -14,8 +15,9 @@ import { spacing } from "@/theme/tokens";
  *
  * Reachable only while `canEnterRoleArea(gate, "athlete")` holds, which the
  * root layout enforces by removing this screen from the navigator otherwise.
- * The training content itself is still placeholder; TASK-009 delivers the way
- * in, not what is inside.
+ * The training and sleep content is still placeholder; TASK-013 replaces the
+ * check-in placeholder with the real inline card and adds no route, so the
+ * routing rules TASK-009 established are untouched.
  */
 export default function AthleteTodayScreen() {
   const account = useAccountQuery();
@@ -45,11 +47,7 @@ export default function AthleteTodayScreen() {
         title="ยังไม่ได้เชื่อมต่อ"
         description="ข้อมูลการนอนจะต้องได้รับอนุญาตจากคุณก่อนนำมาแสดงหรือแชร์"
       />
-      <InfoCard
-        label="เช็กอิน"
-        title="ยังไม่เปิดใช้งานในขั้นนี้"
-        description="ขั้นถัดไปจะเพิ่ม RPE ความรู้สึก และการรายงานอาการเจ็บแบบสั้น"
-      />
+      <DailyCheckInCard />
 
       <View style={styles.actions}>
         <PrimaryButton

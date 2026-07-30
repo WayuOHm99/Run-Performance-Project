@@ -4,6 +4,7 @@ import { authScopedKeys, authScopedUserId, isAuthScopedKey } from "./keys";
 
 const USER_A = "00000000-0000-4000-9000-00000000000a";
 const USER_B = "00000000-0000-4000-9000-00000000000b";
+const LOCAL_DATE = "2026-07-30";
 
 describe("authScopedKeys", () => {
   it("includes the user id in every key", () => {
@@ -13,6 +14,7 @@ describe("authScopedKeys", () => {
     expect(authScopedKeys.memberships(USER_A)).toContain(USER_A);
     expect(authScopedKeys.account(USER_A)).toContain(USER_A);
     expect(authScopedKeys.user(USER_A)).toContain(USER_A);
+    expect(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)).toContain(USER_A);
   });
 
   it("produces different keys for different users", () => {
@@ -41,9 +43,54 @@ describe("authScopedKeys", () => {
       authScopedKeys.profile(USER_A),
       authScopedKeys.memberships(USER_A),
       authScopedKeys.account(USER_A),
+      authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE),
     ]) {
       expect(isAuthScopedKey(key)).toBe(true);
     }
+  });
+});
+
+describe("authScopedKeys.dailyCheckIn", () => {
+  it("carries the user id and the local date", () => {
+    expect(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)).toEqual([
+      "auth-scoped",
+      USER_A,
+      "daily-check-in",
+      LOCAL_DATE,
+    ]);
+  });
+
+  it("holds no health value", () => {
+    // The check-in's three protected values live in the cached data, never in
+    // the key. Pinning the key to four strings is what keeps that true.
+    const key = authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE);
+
+    expect(key.length).toBe(4);
+    expect(key.every((part) => typeof part === "string")).toBe(true);
+  });
+
+  it("separates dates so crossing midnight cannot reuse yesterday's entry", () => {
+    expect(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)).not.toEqual(
+      authScopedKeys.dailyCheckIn(USER_A, "2026-07-31"),
+    );
+  });
+
+  it("separates users on the same date", () => {
+    expect(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)).not.toEqual(
+      authScopedKeys.dailyCheckIn(USER_B, LOCAL_DATE),
+    );
+  });
+
+  it("is owned by the user it names", () => {
+    expect(
+      authScopedUserId(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)),
+    ).toBe(USER_A);
+  });
+
+  it("does not collide with the account key", () => {
+    expect(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)).not.toEqual(
+      authScopedKeys.account(USER_A),
+    );
   });
 });
 

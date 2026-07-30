@@ -19,6 +19,17 @@ export const authScopedKeys = {
   profile: (userId: string) => [AUTH_SCOPE, userId, "profile"] as const,
   memberships: (userId: string) => [AUTH_SCOPE, userId, "memberships"] as const,
   account: (userId: string) => [AUTH_SCOPE, userId, "account"] as const,
+  /**
+   * One athlete's own check-in for one device-local calendar date.
+   *
+   * The date is part of the key, not a filter applied afterwards, so crossing
+   * midnight or a timezone produces a different entry rather than serving
+   * yesterday's answers as today's. It is a plain calendar date and carries no
+   * health value — the three protected values stay in the cached data, which is
+   * memory-only and dropped outright by `clearAuthScopedQueries`.
+   */
+  dailyCheckIn: (userId: string, localDate: string) =>
+    [AUTH_SCOPE, userId, "daily-check-in", localDate] as const,
 } as const;
 
 /** True for any key produced by `authScopedKeys`. */
