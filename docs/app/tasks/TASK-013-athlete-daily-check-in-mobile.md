@@ -1,7 +1,9 @@
 # TASK-013: Athlete Daily Check-In Mobile Vertical Slice
 
-Status: **Approved** — Product Owner approved the complete scope and product/security
-decisions 1–10 below before implementation started.
+Status: **Implemented and verified locally. Awaiting GPT/Codex read-only review.**
+The Product Owner approved the complete scope and product/security decisions 1–10
+below before implementation started. Results, evidence, and the mutation record
+are in `docs/app/handoffs/TASK-013.md`.
 
 Date: 2026-07-30
 
@@ -252,26 +254,30 @@ terminology and no raw error is exposed to the athlete.
 
 ## Acceptance criteria
 
-- [ ] 1. An authenticated active athlete can load today's check-in from Athlete
+All met. Evidence per criterion is tabulated in `docs/app/handoffs/TASK-013.md`.
+
+- [x] 1. An authenticated active athlete can load today's check-in from Athlete
       Today.
-- [ ] 2. No existing row produces an empty form with no default health answers.
-- [ ] 3. A valid complete form can create today's row.
-- [ ] 4. A valid complete form can update today's existing row.
-- [ ] 5. Every read and write is scoped to the verified user and the exact
+- [x] 2. No existing row produces an empty form with no default health answers.
+- [x] 3. A valid complete form can create today's row.
+- [x] 4. A valid complete form can update today's existing row.
+- [x] 5. Every read and write is scoped to the verified user and the exact
       device-local date.
-- [ ] 6. Invalid server rows fail closed.
-- [ ] 7. Insert races follow the approved `23505` retry behaviour.
-- [ ] 8. Date/timezone rollover cannot silently write answers to a stale date.
-- [ ] 9. Pending, revoked, unauthenticated, and non-athlete routing behaviour is
+- [x] 6. Invalid server rows fail closed.
+- [x] 7. Insert races follow the approved `23505` retry behaviour.
+- [x] 8. Date/timezone rollover cannot silently write answers to a stale date.
+- [x] 9. Pending, revoked, unauthenticated, and non-athlete routing behaviour is
       not weakened.
-- [ ] 10. Health data is not logged, placed in analytics, persisted as a draft,
+- [x] 10. Health data is not logged, placed in analytics, persisted as a draft,
       added to query keys, or printed in test/handoff failure output.
-- [ ] 11. No migration, RLS, generated type, dependency, lockfile, shared theme,
+- [x] 11. No migration, RLS, generated type, dependency, lockfile, shared theme,
       or out-of-scope file change.
-- [ ] 12. Relevant local verification passes.
-- [ ] 13. Documentation matches the implementation.
-- [ ] 14. Git ends clean with the work committed on the task branch.
-- [ ] 15. Nothing is merged, pushed, deployed, remotely migrated, or cleaned up.
+- [x] 12. Relevant local verification passes, with one pre-existing
+      `expo-doctor` patch-version finding that lies outside the owned paths and
+      is reported rather than fixed.
+- [x] 13. Documentation matches the implementation.
+- [x] 14. Git ends clean with the work committed on the task branch.
+- [x] 15. Nothing is merged, pushed, deployed, remotely migrated, or cleaned up.
 
 ## Privacy classification
 
