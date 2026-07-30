@@ -1,17 +1,19 @@
 # TASK-013: Athlete Daily Check-In Mobile Vertical Slice
 
-Status: **Round 2 findings fixed and verified locally. Awaiting GPT/Codex
-read-only Round 2 review.**
+Status: **Round 3 findings fixed and verified locally. Awaiting GPT/Codex
+read-only Round 3 review.**
 
 The Product Owner approved the complete scope and product/security decisions 1–10
-below before implementation started, and approved all eight Round 2 findings
-(one high, five medium, two low) before those fixes started. Results, evidence,
-the verification record, and the mutation record for both rounds are in
+below before implementation started, then approved the eight Round 2 findings (one
+high, five medium, two low) and the three Round 3 findings (one medium, two low)
+before each of those rounds started. Results, evidence, the verification record,
+and the mutation and leak-scan records for every round are in
 `docs/app/handoffs/TASK-013.md`.
 
-No approved decision was changed in Round 2. Every fix stayed inside the owned
-paths listed below, and `src/test-support/capture-error.ts` was deliberately not
-modified.
+No approved decision was changed in Round 2 or Round 3. Every fix stayed inside
+the owned paths listed below, and `src/test-support/capture-error.ts` was
+deliberately not modified. Round 3 changed no runtime application code and no
+database contract — the only source file it touched is a test.
 
 Date: 2026-07-30
 
@@ -456,7 +458,15 @@ status output appears in the handoff.
 
 ## Rollback
 
-Documentation-only and additive. The task branch is separate from
+TASK-013 delivers documentation **plus additive mobile application code and
+tests**: a new `platform/apps/mobile/src/features/check-in/` module, one added
+key in `lib/query/keys.ts`, and one edit to `app/athlete/index.tsx` that replaces
+the check-in placeholder card with the real inline card.
+
+The change is additive rather than documentation-only, but it is still fully
+reversible with Git alone. Nothing outside those owned paths was touched: no
+migration, RLS policy, grant, generated type, dependency, lockfile, configuration,
+shared component, or theme token. The task branch is separate from
 `feat/mobile-foundation` and nothing is merged, so rollback needs no remote or
 database action:
 
@@ -470,6 +480,12 @@ git reset --hard 9784854a691e8a5aa22fc0e299783a751c8adce1
 # or simply abandon the branch; feat/mobile-foundation is untouched
 ```
 
-No migration was added, so no database rollback exists or is required. The local
-database is rebuilt with `supabase db reset --local --no-seed` if a verification
-run left it dirty.
+No migration was added, so no database rollback exists or is required, and the
+TASK-012 contract this task consumes is unaffected by any of the commands above.
+The local database is rebuilt with `supabase db reset --local --no-seed` if a
+verification run left it dirty.
+
+Reverting `platform/apps/mobile/src/app/athlete/index.tsx` alone removes the card
+from the screen while leaving the feature module in place but unreachable, which
+is the smallest useful rollback if the slice needs to be withdrawn without
+discarding the work.

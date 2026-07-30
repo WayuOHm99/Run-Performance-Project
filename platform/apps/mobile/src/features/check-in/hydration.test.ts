@@ -14,9 +14,20 @@ import type { LocalDateStamp } from "./local-date";
 import { isDraftComplete, type CheckInDraft } from "./submission";
 
 /**
- * Health literals are synthetic. Every assertion inspecting the visible draft
- * reduces it privately to a boolean or a count first, via `showing`, so a failure
- * prints `false` or a case name rather than an answer.
+ * Health literals are synthetic, and no health-bearing value reaches `expect`.
+ *
+ * Two ways a value could leak into failure output, both closed here:
+ *
+ * 1. **A field asserted directly.** `expect(state.draft.rpe).toBeNull()` prints
+ *    the actual answer when it fails. Draft contents are compared inside
+ *    `showing`, `showingDraft`, and `draftIsEmpty`, which return booleans.
+ *
+ * 2. **A whole form state passed to an identity matcher.** `expect(a).toBe(b)`
+ *    prints both objects on failure, and a form state holds the draft. Reference
+ *    identity is reduced by `isSameStateRef` before it reaches the assertion.
+ *
+ * A failing assertion in this file can therefore print only `true`, `false`, a
+ * generation key, a calendar date, or a test name.
  */
 
 const BANGKOK: LocalDateStamp = { date: "2026-07-30", offsetMinutes: -420 };
@@ -64,6 +75,25 @@ function showingDraft(state: CheckInFormState, draft: CheckInDraft): boolean {
     state.draft.overallFeeling === draft.overallFeeling &&
     state.draft.painStatus === draft.painStatus
   );
+}
+
+/** Whether every answer is still unchosen. Boolean only. */
+function draftIsEmpty(draft: CheckInDraft): boolean {
+  return (
+    draft.rpe === null &&
+    draft.overallFeeling === null &&
+    draft.painStatus === null
+  );
+}
+
+/**
+ * Reference identity of two form states, reduced before it reaches `expect`.
+ *
+ * `expect(a).toBe(b)` on objects prints both sides on failure, and a form state
+ * holds the draft. Comparing here means a failure can only print `false`.
+ */
+function isSameStateRef(a: CheckInFormState, b: CheckInFormState): boolean {
+  return a === b;
 }
 
 function run(
@@ -178,9 +208,8 @@ describe("first load", () => {
     const state = run(initialFormState(BANGKOK), [serverData(BANGKOK, null)]);
 
     expect(isDraftComplete(state.draft)).toBe(false);
-    expect(state.draft.rpe).toBeNull();
-    expect(state.draft.overallFeeling).toBeNull();
-    expect(state.draft.painStatus).toBeNull();
+    // Stronger than "not complete": every one of the three is still unchosen.
+    expect(draftIsEmpty(state.draft)).toBe(true);
     // Hydrated from an absence is still hydrated, so the empty-state copy is
     // allowed to appear.
     expect(state.hydratedFor).toBe(generationKey(BANGKOK));
@@ -203,7 +232,7 @@ describe("date rollover", () => {
     // Data still arriving for the old day is ignored.
     const stale = reduceForm(afterRollover, serverData(BANGKOK, SERVER_ROW));
 
-    expect(stale).toBe(afterRollover);
+    expect(isSameStateRef(stale, afterRollover)).toBe(true);
 
     const hydrated = reduceForm(afterRollover, serverData(NEXT_DAY, null));
 
@@ -240,9 +269,12 @@ describe("offset-only rollover", () => {
     // The old generation's data must not silently satisfy the new generation —
     // this is the bug: the date is unchanged, so only the generation key tells
     // them apart.
-    expect(reduceForm(afterRollover, serverData(BANGKOK, SERVER_ROW))).toBe(
-      afterRollover,
-    );
+    expect(
+      isSameStateRef(
+        reduceForm(afterRollover, serverData(BANGKOK, SERVER_ROW)),
+        afterRollover,
+      ),
+    ).toBe(true);
 
     // The deliberate refresh lands under the new generation and rehydrates.
     const hydrated = reduceForm(
@@ -368,9 +400,12 @@ describe("reduceForm referential stability", () => {
       serverData(BANGKOK, SERVER_ROW),
     ]);
 
-    expect(reduceForm(hydrated, serverData(BANGKOK, SERVER_ROW))).toBe(
-      hydrated,
-    );
+    expect(
+      isSameStateRef(
+        reduceForm(hydrated, serverData(BANGKOK, SERVER_ROW)),
+        hydrated,
+      ),
+    ).toBe(true);
   });
 
   it("returns the same state for data from another generation", () => {
@@ -378,9 +413,12 @@ describe("reduceForm referential stability", () => {
       serverData(BANGKOK, SERVER_ROW),
     ]);
 
-    expect(reduceForm(hydrated, serverData(NEXT_DAY, WINNING_ROW))).toBe(
-      hydrated,
-    );
+    expect(
+      isSameStateRef(
+        reduceForm(hydrated, serverData(NEXT_DAY, WINNING_ROW)),
+        hydrated,
+      ),
+    ).toBe(true);
   });
 
   it("returns a new state when the draft actually changes", () => {
@@ -388,9 +426,12 @@ describe("reduceForm referential stability", () => {
       serverData(BANGKOK, SERVER_ROW),
     ]);
 
-    expect(reduceForm(hydrated, serverData(BANGKOK, WINNING_ROW))).not.toBe(
-      hydrated,
-    );
+    expect(
+      isSameStateRef(
+        reduceForm(hydrated, serverData(BANGKOK, WINNING_ROW)),
+        hydrated,
+      ),
+    ).toBe(false);
   });
 });
 

@@ -1,13 +1,17 @@
 # TASK-013 Handoff — Athlete Daily Check-In Mobile Vertical Slice
 
-Status: Round 2 findings fixed and verified locally. Awaiting GPT/Codex
-read-only Round 2 review.
+Status: Round 3 findings fixed and verified locally. Awaiting GPT/Codex
+read-only Round 3 review.
 
-GPT/Codex reviewed Round 1 read-only and raised one high, five medium, and two
-low findings. The Product Owner approved all eight. **Every one is fixed** — see
-"Round 2 — Codex findings and fixes" at the end of this document, which also
-carries the Round 2 test counts, mutation evidence, verification, and commit
-SHAs.
+GPT/Codex reviewed Round 1 and raised one high, five medium, and two low
+findings; it then reviewed Round 2 and raised one medium and two low. The Product
+Owner approved all eleven. **Every one is fixed** — see "Round 2 — Codex findings
+and fixes" and "Round 3 — Codex findings and fixes" at the end of this document,
+which carry the test counts, mutation and leak-scan evidence, verification, and
+commit SHAs for each round.
+
+Round 3 changed no runtime application code and no database contract: the only
+source file it touched is a test.
 
 The Round 1 record below is retained. Where Round 2 corrected a Round 1 figure or
 claim, the correction is made in place with the earlier value noted, and the
@@ -94,8 +98,16 @@ No commit was amended, rebased, or rewritten in either round.
 
 ## Changed files
 
-Twenty-three files across the three commits so far, plus this handoff — 24 in the
-complete diff against the base, all inside the packet's owned paths.
+The table below lists the **Round 1** changed files: twenty-three across the first
+three commits, plus the Round 1 handoff.
+
+**Superseded (Round 2, LOW 2).** This paragraph originally read "24 in the
+complete diff against the base". That figure was the Round 1 total and is no
+longer current: the established total for the complete TASK-013 diff against
+`9784854` is **27 files**, Round 2 having added `hydration.ts`,
+`hydration.test.ts`, and `failure-probe.ts`. See the commit ledger above and the
+Round 2 changed-file table below. Every file in both rounds is inside the
+packet's owned paths.
 
 | File | Change |
 | --- | --- |
@@ -236,7 +248,7 @@ All fifteen criteria met.
 | 8 | rollover cannot write to a stale date | rollover checked first; three stale pairs proved never to yield `submit`; mutation M2 fails 4 assertions |
 | 9 | routing not weakened | no route added; web export still 13 static routes; gate, layout, and `ROUTES` untouched |
 | 10 | no health value logged, in analytics, drafted, keyed, or printed in failure output | source scan + runtime console-spy count; key pinned to four strings; every health assertion reduced to a boolean/count/name |
-| 11 | no migration, RLS, generated type, dependency, lockfile, theme, or out-of-scope change | 24 files, all owned; manifest diff against the base empty; pgTAP still 583 assertions |
+| 11 | no migration, RLS, generated type, dependency, lockfile, theme, or out-of-scope change | 24 files at Round 1, **27 across all rounds**, all owned; manifest diff against the base empty; pgTAP still 583 assertions |
 | 12 | local verification passes | table below; one pre-existing Expo patch-version finding, outside the owned scope |
 | 13 | documentation matches implementation | packet and this handoff written against the delivered code |
 | 14 | Git clean, work committed on the task branch | `git status --short` empty; three commits plus this handoff |
@@ -953,3 +965,208 @@ data was read, printed, or committed; AGY was not used; ownership did not
 transfer; and no existing commit was amended or rewritten.
 
 Round 2 work stops here, pending GPT/Codex read-only Round 2 review.
+
+## Round 3 — Codex findings and fixes
+
+GPT/Codex reviewed Round 2 read-only and raised one medium and two low findings;
+the Product Owner approved all three. Rounds 1 and 2 above are retained.
+
+**No runtime application code and no database contract changed in Round 3.** The
+only source file touched is a test. No migration, pgTAP test, generated type,
+dependency, lockfile, configuration, shared component, theme token, or legacy path
+was modified, and nothing outside the three approved paths was touched.
+
+### Pre-flight
+
+| Gate | Result |
+| --- | --- |
+| branch is `feat/TASK-013-athlete-daily-check-in-mobile` | yes |
+| `HEAD` is `0cf031f2314fbfc4463ee1f79fa61f9fdb7f59d1` | yes, exactly |
+| worktree clean | yes |
+| approved base `9784854` still an ancestor | yes |
+
+### Changed files
+
+Three, matching the approved scope exactly — confirmed by `git status --porcelain`
+returning three entries.
+
+| File | Change |
+| --- | --- |
+| `features/check-in/hydration.test.ts` | every health-bearing comparison reduced to a boolean before it reaches `expect` |
+| `docs/app/handoffs/TASK-013.md` | stale 24-file statements corrected; this section |
+| `docs/app/tasks/TASK-013-athlete-daily-check-in-mobile.md` | rollback wording corrected |
+
+### MEDIUM — test failure-output safety in the hydration tests
+
+Confirmed. Two shapes could still print a protected value on failure, and the
+audit of the complete file found **six** occurrences — the four reported plus two
+more of the same pattern that were not listed:
+
+| Shape | Occurrences | Why it leaked |
+| --- | --- | --- |
+| a health field asserted directly, e.g. `expect(state.draft.rpe).toBeNull()` | 3 (one test) | a failure prints the actual answer |
+| a whole form state passed to an identity matcher, `expect(a).toBe(b)` / `.not.toBe(b)` | 3 | a failure prints both objects, and a form state holds the draft |
+
+The two additional occurrences were the identity assertions in the date-rollover
+and offset-only-rollover tests; only the three in `reduceForm referential
+stability` had been listed.
+
+Fixed with two private reductions, matching the required shape:
+
+- `draftIsEmpty(draft)` returns a boolean, replacing the three direct field
+  assertions. It is **stronger** than the `isDraftComplete` check that sits beside
+  it, since it requires all three answers to be `null` rather than merely
+  incomplete, so behavioural coverage increased rather than narrowed.
+- `isSameStateRef(a, b)` returns a boolean, used as
+  `expect(isSameStateRef(x, y)).toBe(true)` and `.toBe(false)`. Every identity
+  assertion keeps its original direction and meaning.
+
+No test was removed, weakened, or made less specific; the file's test count is
+unchanged. The remaining assertions in the file were audited and are safe: they
+compare booleans, `null`, generation keys (`date|offset`), calendar dates, and
+test names, none of which is health-bearing.
+
+### LOW — handoff file-count inconsistency
+
+Two stale statements said 24, both corrected in place with the earlier value noted
+rather than silently rewritten:
+
+- the "Changed files" preamble, which read "24 in the complete diff against the
+  base", now states that 24 was the Round 1 total and that the established total
+  is **27**, and points to both the commit ledger and the Round 2 changed-file
+  table;
+- acceptance criterion 11 now reads "24 files at Round 1, **27 across all
+  rounds**".
+
+The other `24` in this document — "24 forbidden fragments absent from all 7 fixed
+messages" in the negative-test matrix — is a count of forbidden string fragments,
+not a file count, and is unrelated. All file-count statements in the document now
+agree: the commit ledger, the LOW 2 correction, criterion 11, the Round 2
+correction paragraph, and this section all give **27** for the complete diff.
+
+### LOW — inaccurate rollback description
+
+Confirmed. The packet's rollback section opened "Documentation-only and additive",
+which is wrong: TASK-013 ships a new mobile feature module, one added query key,
+and one edited screen.
+
+Replaced with wording that states plainly that the task delivers documentation
+**plus additive mobile application code and tests**, names the three code
+locations, and records that the change is still fully reversible with Git alone
+because nothing outside the owned paths was touched.
+
+**The rollback commands were not changed** — they were and remain accurate. Two
+clarifications were added: that the TASK-012 database contract is unaffected by
+any of them, and that reverting `app/athlete/index.tsx` alone is the smallest
+useful rollback, leaving the feature module in place but unreachable.
+
+### Round 3 verification
+
+| Command | Result |
+| --- | --- |
+| focused: `vitest run src/features/check-in src/lib/query` | exit 0 — **11 files, 173 tests** |
+| `corepack pnpm test` | exit 0 — **27 files, 483 tests** |
+| `corepack pnpm format:check` | exit 0 |
+| `corepack pnpm lint` | exit 0, no error and no warning |
+| `corepack pnpm typecheck` | exit 0 |
+| `git diff --check` | clean |
+| changed-file count | **3**, matching the approved scope exactly |
+| `git status --short` after committing | clean |
+
+Test counts are unchanged from Round 2, which is the intended outcome: this round
+changed how assertions report, not what they assert.
+
+The local database stack was not started in Round 3. No database, migration,
+policy, or generated type was touched, the pgTAP suite is unchanged at 5 files and
+583 assertions as recorded in Round 2, and starting the stack could not have
+produced new information about a test-only change.
+
+### Round 3 failure-output evidence
+
+A controlled comparison, run against a scratchpad backup of the test file and
+restored afterwards. The **same two failures** were induced under both assertion
+shapes, so the only variable is how the failure is reported:
+
+- the "genuine empty row" test was fed a populated row instead of `null`, making
+  its emptiness assertions genuinely fail;
+- the referential-stability expectation was flipped, making its identity assertion
+  genuinely fail.
+
+Vitest output was captured to a file, scanned programmatically for health-bearing
+serialized field names (`rpe`, `overallFeeling`, `painStatus`) and the two pain
+literals, then deleted. **It was never printed to the terminal, and no captured
+output appears in this handoff, any commit message, or any prompt.**
+
+| Variant | Failing assertions | Leak-pattern occurrences |
+| --- | --- | --- |
+| UNSAFE — the pre-Round-3 shapes | 2 | **8** |
+| SAFE — the Round 3 shapes | 2 | **0** |
+
+Expected leak count: zero. Observed under the delivered shapes: **zero**.
+
+The eight occurrences under the old shapes were the serialized `rpe`,
+`overallFeeling`, and `painStatus` keys of a printed form state plus both pain
+literals — that is, exactly the disclosure the finding predicted, now demonstrated
+rather than argued. The failing assertion names are identical across both
+variants, which is what shows the difference is in the reporting and not in the
+coverage.
+
+The test file was restored from the backup and verified **byte-identical**, and
+the capture file was deleted. `git status --porcelain` afterwards showed exactly
+the three approved files.
+
+### Round 3 commit ledger
+
+| Commit | Purpose | Files |
+| --- | --- | --- |
+| `1bdea36` | task packet, before implementation | 1 |
+| `5c7de27` | implementation | 22 |
+| `14de1f9` | Round 1 mutation-driven logging-test fix | 1 |
+| `90cf6f5` | Round 1 handoff and packet closeout | 2 |
+| `34578f4` | Round 2 fixes | 13 |
+| `cc74264` | Round 2 follow-up: redundant hydration flag removed | 2 |
+| `0cf031f` | Round 2 documentation closeout | 2 |
+| branch HEAD | Round 3 fixes and this section | 3 |
+| **Complete TASK-013 diff against `9784854`** | | **27** |
+
+Round 3 adds no new file, so the complete-diff total stays at **27**. No commit
+was amended, rebased, squashed, or rewritten in any round.
+
+### Round 3 remaining limitations
+
+The Round 1 and Round 2 limitations stand unchanged, since no runtime behaviour
+was altered. Specific to this round:
+
+- **The failure-output guarantee is a convention, not a mechanism.** Nothing
+  automatically prevents a future test from passing a draft straight into
+  `expect`; it is held by the helpers, the file's header comment, and review. A
+  lint rule could enforce it, but writing one is outside this task's scope.
+- **The leak scan is a one-off harness, not a committed test.** It lives in the
+  scratchpad and was deleted; reproducing it means rebuilding it. Committing it
+  would mean committing a deliberately failing variant, which is worse.
+- **The scan detects serialized field names and the two pain literals.** A bare
+  integer that happened to be an RPE would not be distinguishable from a count, so
+  the scan is deliberately keyed on the field names that make a value
+  attributable.
+- **Only `hydration.test.ts` was re-audited in this round**, as scoped. The other
+  TASK-013 test files were audited in Round 2 under the same rules.
+
+### Round 3 confirmation
+
+- **No runtime application code changed.** The only source file touched is
+  `hydration.test.ts`.
+- **No database contract changed.** No migration, pgTAP test, RLS policy, grant, or
+  generated type was modified; the TASK-012 contract is untouched.
+- No dependency, lockfile, or configuration file changed.
+- Nothing was merged, pushed, deployed, published, or linked to hosted Supabase;
+  no `db push`, remote migration, or hosted contact occurred; no `supabase status`
+  or `db:status` output was produced.
+- The worktree and branch are preserved; no branch or worktree was deleted, and
+  the main checkout was not modified.
+- No protected legacy path was accessed. Fixtures remain synthetic.
+- No health-bearing failing assertion, captured raw test output, raw error,
+  credential, token, Supabase status, API URL, or database URL was printed,
+  committed, or placed in this handoff.
+- No existing commit was amended or rewritten.
+
+Round 3 work stops here, pending GPT/Codex read-only Round 3 review.
