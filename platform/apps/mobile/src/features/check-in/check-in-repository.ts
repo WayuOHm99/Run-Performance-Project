@@ -41,7 +41,11 @@ import {
   toWriteColumns,
   type DailyCheckIn,
 } from "./domain";
-import { CheckInDataError, checkInErrorFrom } from "./errors";
+import {
+  CheckInDataError,
+  checkInErrorFrom,
+  type CheckInIntent,
+} from "./errors";
 import { isLocalDateString } from "./local-date";
 
 export type { AppSupabaseClient };
@@ -78,13 +82,48 @@ function isVerifiedUserId(userId: unknown): userId is string {
 }
 
 /**
+ * Collapses anything thrown inside this module into a sanitized error.
+ *
+ * `{ error }` in a resolved PostgREST response is the *expected* failure shape,
+ * but it is not the only one: a client method can throw synchronously, a builder
+ * can reject, a thenable can settle with a rejection, and a bug in this module
+ * can raise a `TypeError`. Any of those escaping unsanitized would put a raw
+ * server object — with its message, `details`, `hint`, and potentially a failing
+ * row — into TanStack Query's error state, from which the card would read it.
+ *
+ * An already-sanitized `CheckInDataError` passes through unchanged so its
+ * `intent` and `failure` are preserved. Everything else is classified from its
+ * `code`/`status`/constructor name only; nothing from it is retained.
+ */
+function sanitize(intent: CheckInIntent, error: unknown): CheckInDataError {
+  return error instanceof CheckInDataError
+    ? error
+    : checkInErrorFrom(intent, error);
+}
+
+/**
  * Loads the caller's check-in for one local date.
  *
  * Returns `null` only when the row genuinely does not exist, and a fully
  * validated value otherwise. A row that fails validation is a closed failure,
  * not a value to render partially.
+ *
+ * Every failure path, including an unexpected throw or rejection, resolves to a
+ * `CheckInDataError`.
  */
 export async function loadDailyCheckIn(
+  client: AppSupabaseClient,
+  userId: string,
+  localDate: string,
+): Promise<DailyCheckIn | null> {
+  try {
+    return await performLoad(client, userId, localDate);
+  } catch (error) {
+    throw sanitize("load", error);
+  }
+}
+
+async function performLoad(
   client: AppSupabaseClient,
   userId: string,
   localDate: string,
@@ -177,8 +216,24 @@ async function insertOwnCheckIn(
  * Resolves to `void`. The input is re-validated here even though the UI already
  * validated it, so a caller that skipped that step cannot send an out-of-range
  * value and leave the database to refuse it.
+ *
+ * Every failure path, including an unexpected throw or rejection from any of the
+ * up-to-three statements, resolves to a `CheckInDataError`.
  */
 export async function saveDailyCheckIn(
+  client: AppSupabaseClient,
+  userId: string,
+  localDate: string,
+  input: unknown,
+): Promise<void> {
+  try {
+    await performSave(client, userId, localDate, input);
+  } catch (error) {
+    throw sanitize("save", error);
+  }
+}
+
+async function performSave(
   client: AppSupabaseClient,
   userId: string,
   localDate: string,

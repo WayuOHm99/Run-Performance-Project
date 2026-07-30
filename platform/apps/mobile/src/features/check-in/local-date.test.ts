@@ -163,6 +163,95 @@ describe("isLocalDateString", () => {
 
     expect(wronglyAccepted).toEqual([]);
   });
+
+  it("accepts every real month-end date", () => {
+    const accepted: readonly [string, string][] = [
+      ["January 31", "2026-01-31"],
+      ["February 28 in a common year", "2026-02-28"],
+      ["February 29 in a leap year", "2024-02-29"],
+      ["February 29 in a 400-divisible year", "2000-02-29"],
+      ["March 31", "2026-03-31"],
+      ["April 30", "2026-04-30"],
+      ["May 31", "2026-05-31"],
+      ["June 30", "2026-06-30"],
+      ["July 31", "2026-07-31"],
+      ["August 31", "2026-08-31"],
+      ["September 30", "2026-09-30"],
+      ["October 31", "2026-10-31"],
+      ["November 30", "2026-11-30"],
+      ["December 31", "2026-12-31"],
+      ["first day of the first accepted year", "0001-01-01"],
+      ["last day of the last four-digit year", "9999-12-31"],
+    ];
+
+    const wronglyRejected = accepted
+      .filter(([, value]) => !isLocalDateString(value))
+      .map(([name]) => name);
+
+    expect(wronglyRejected).toEqual([]);
+  });
+
+  it("rejects impossible calendar dates", () => {
+    // A pattern check alone accepted all of these, which meant a broken clock
+    // could have sent a date the database would then have stored.
+    const impossible: readonly [string, string][] = [
+      ["February 29 in a common year", "2026-02-29"],
+      ["February 29 in a century year", "1900-02-29"],
+      ["February 30", "2026-02-30"],
+      ["February 31", "2026-02-31"],
+      ["February 30 in a leap year", "2024-02-30"],
+      ["April 31", "2026-04-31"],
+      ["June 31", "2026-06-31"],
+      ["September 31", "2026-09-31"],
+      ["November 31", "2026-11-31"],
+      ["year zero", "0000-01-01"],
+      ["year zero month end", "0000-12-31"],
+    ];
+
+    const wronglyAccepted = impossible
+      .filter(([, value]) => isLocalDateString(value))
+      .map(([name]) => name);
+
+    expect(wronglyAccepted).toEqual([]);
+  });
+
+  it("applies the century and 400-year leap rules, not just divisibility by four", () => {
+    const leapDayAccepted = (year: string) =>
+      isLocalDateString(`${year}-02-29`);
+
+    expect(leapDayAccepted("2024")).toBe(true);
+    expect(leapDayAccepted("2000")).toBe(true);
+    expect(leapDayAccepted("1900")).toBe(false);
+    expect(leapDayAccepted("2100")).toBe(false);
+    expect(leapDayAccepted("2026")).toBe(false);
+  });
+
+  it("agrees with a local Date round-trip on every day of a leap year", () => {
+    // An independent cross-check of the arithmetic, using local getters only.
+    // `new Date(y, m, d)` rolls an impossible day into the next month, which is
+    // exactly why it cannot be the validator — but it is a fine oracle.
+    const disagreements: string[] = [];
+
+    for (let month = 1; month <= 12; month += 1) {
+      for (let day = 1; day <= 31; day += 1) {
+        const text = `2024-${String(month).padStart(2, "0")}-${String(
+          day,
+        ).padStart(2, "0")}`;
+        const probe = new Date(2024, month - 1, day);
+        const real =
+          probe.getFullYear() === 2024 &&
+          probe.getMonth() === month - 1 &&
+          probe.getDate() === day;
+
+        if (isLocalDateString(text) !== real) {
+          disagreements.push(text);
+        }
+      }
+    }
+
+    // Date strings only; these carry no health value.
+    expect(disagreements).toEqual([]);
+  });
 });
 
 describe("localDateStampChanged", () => {

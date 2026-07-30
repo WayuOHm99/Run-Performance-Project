@@ -50,21 +50,55 @@ export function readLocalDateStamp(now: Date = new Date()): LocalDateStamp {
   };
 }
 
+/** Proleptic Gregorian leap year: every 4th, except centuries, except every 400th. */
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+const MONTH_LENGTHS: readonly number[] = [
+  31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+];
+
+/** Days in a 1-based month, or 0 for a month outside 1–12. */
+function daysInMonth(year: number, month: number): number {
+  if (month === 2 && isLeapYear(year)) {
+    return 29;
+  }
+
+  return MONTH_LENGTHS[month - 1] ?? 0;
+}
+
 /**
- * Whether a value is a well-formed calendar date string.
+ * Whether a value is a real calendar date string.
  *
  * Guards the repository boundary: a date this rejects never reaches a query, so
  * a malformed value cannot be sent as a filter or written as a row.
+ *
+ * The month length is computed arithmetically rather than by round-tripping
+ * through `Date`, because every `Date`-based check available here — `Date.UTC`,
+ * `toISOString`, a UTC getter, or locale formatting — is a UTC-derived path that
+ * decision 2 prohibits in this module, and a local `new Date(y, m, d)`
+ * round-trip silently rolls an impossible day over into the next month instead
+ * of reporting it.
+ *
+ * The accepted contract is year 1 through 9999. Year 0 is rejected: it is not a
+ * year in the Gregorian calendar as people use it, and no real check-in can
+ * carry it, so accepting it would only widen what a malformed clock can write.
  */
 export function isLocalDateString(value: unknown): value is string {
   if (typeof value !== "string" || !LOCAL_DATE_PATTERN.test(value)) {
     return false;
   }
 
+  const year = Number(value.slice(0, 4));
   const month = Number(value.slice(5, 7));
   const day = Number(value.slice(8, 10));
 
-  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+  if (year < 1 || month < 1 || month > 12) {
+    return false;
+  }
+
+  return day >= 1 && day <= daysInMonth(year, month);
 }
 
 /**

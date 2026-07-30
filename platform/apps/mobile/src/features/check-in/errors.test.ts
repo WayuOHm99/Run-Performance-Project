@@ -84,9 +84,14 @@ describe("CheckInDataError", () => {
 
     const error = checkInErrorFrom("save", raw);
 
-    // No message, detail, hint, code, or cause is retained anywhere on the error.
+    // Reduced to booleans and field names: no message, detail, hint, code, or
+    // cause is retained anywhere on the error, and nothing from `raw` is printed
+    // if any of these fails.
     expect(error.message.includes("denied for table")).toBe(false);
-    expect((error as { cause?: unknown }).cause).toBeUndefined();
+    expect((error as { cause?: unknown }).cause === undefined).toBe(true);
+    expect("code" in error).toBe(false);
+    expect("details" in error).toBe(false);
+    expect("hint" in error).toBe(false);
     expect(Object.keys(error).sort()).toEqual(["failure", "intent", "name"]);
   });
 

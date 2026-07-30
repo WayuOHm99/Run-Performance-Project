@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { Notice } from "@/components/notice";
@@ -20,10 +20,14 @@ import {
   type PainStatus,
 } from "./domain";
 import { checkInErrorMessage } from "./errors";
+import {
+  generationKey,
+  initialFormState,
+  needsDeliberateRefresh,
+  reduceForm,
+} from "./hydration";
 import { readLocalDateStamp } from "./local-date";
 import {
-  EMPTY_DRAFT,
-  draftFromCheckIn,
   isDraftComplete,
   planSubmission,
   type CheckInDraft,
@@ -63,49 +67,46 @@ const PAIN_CHOICES: readonly Choice<PainStatus>[] = PAIN_STATUSES.map(
  * navigation entry, so pending, revoked, unauthenticated, and coach-only users
  * gain nothing from it. The database policies remain the actual boundary.
  *
- * Two pieces of state carry the whole behaviour:
- *
- * - `stamp` is the local calendar date the form was created for. It is part of
- *   the query key, so crossing midnight or a timezone loads a different day
- *   rather than reusing this one.
- * - `draft` holds the three answers, in memory only. It starts empty with no
- *   preselected value, is prefilled once from a loaded row, and is never
- *   persisted, queued, or retried. Closing the app loses it, which is the
- *   intended online-only behaviour.
+ * All state decisions are delegated: `hydration.ts` decides when server data may
+ * replace what the athlete sees, and `submission.ts` decides what a save press
+ * does. Both are pure and tested directly, which is what keeps this component to
+ * wiring only. The three answers live in this component's state and nowhere else
+ * — never persisted, queued, or retried.
  */
 export function DailyCheckInCard() {
-  const [stamp, setStamp] = useState(() => readLocalDateStamp());
-  const [draft, setDraft] = useState<CheckInDraft>(EMPTY_DRAFT);
-  const [rolledOver, setRolledOver] = useState(false);
+  const [form, dispatch] = useReducer(reduceForm, undefined, () =>
+    initialFormState(readLocalDateStamp()),
+  );
 
-  const query = useDailyCheckInQuery(stamp.date);
+  // The key carries the date only, so an offset-only rollover keeps the same
+  // entry and must be refreshed deliberately; see `needsDeliberateRefresh`.
+  const query = useDailyCheckInQuery(form.stamp.date);
   const mutation = useSaveDailyCheckIn();
 
-  // The date whose loaded value has already been copied into the draft. A ref,
-  // so re-prefilling is decided without adding a render.
-  const prefilledFor = useRef<string | null>(null);
+  const generation = generationKey(form.stamp);
 
   useEffect(() => {
-    if (!query.isSuccess || prefilledFor.current === stamp.date) {
+    if (!query.isSuccess) {
       return;
     }
 
-    prefilledFor.current = stamp.date;
-    // `null` means no row today, which yields the empty draft — an existing row
-    // yields an editable prefill. Both come from the same call, so the empty and
-    // the edit state cannot drift apart.
-    setDraft(draftFromCheckIn(query.data ?? null));
-  }, [query.isSuccess, query.data, stamp.date]);
+    // The reducer decides whether to adopt this, and returns the same state
+    // reference when it does not, which is what keeps this effect from looping.
+    dispatch({
+      kind: "server-data",
+      generation,
+      checkIn: query.data ?? null,
+    });
+  }, [query.isSuccess, query.data, query.dataUpdatedAt, generation]);
 
   const busy = mutation.isPending;
   const locked = busy || query.isPending || query.isError;
 
-  // Any edit clears the previous outcome, so a stale "saved" or error banner is
-  // never shown next to unsaved changes.
-  const change = (next: CheckInDraft) => {
-    setDraft(next);
-    setRolledOver(false);
+  const choose = (draft: CheckInDraft) => {
+    dispatch({ kind: "answer-chosen", draft });
 
+    // Any edit clears the previous outcome, so a stale "saved" or error banner is
+    // never shown next to unsaved changes.
     if (mutation.isSuccess || mutation.isError) {
       mutation.reset();
     }
@@ -113,22 +114,25 @@ export function DailyCheckInCard() {
 
   const submit = () => {
     const plan = planSubmission({
-      captured: stamp,
+      captured: form.stamp,
       // Recomputed here, not reused from render, so the check reflects the moment
       // of submission.
       current: readLocalDateStamp(),
-      draft,
+      draft: form.draft,
     });
 
     if (plan.kind === "rollover") {
-      // The answers are dropped rather than filed under the previous day. The
-      // new date drives a fresh query, and the draft resets so nothing is
-      // carried across the boundary.
-      setStamp(plan.stamp);
-      prefilledFor.current = null;
-      setDraft(EMPTY_DRAFT);
-      setRolledOver(true);
+      const refreshNeeded = needsDeliberateRefresh(form.stamp, plan.stamp);
+
+      // The answers are dropped rather than filed under the previous day.
+      dispatch({ kind: "rollover", stamp: plan.stamp });
       mutation.reset();
+
+      if (refreshNeeded) {
+        // Same calendar date, new offset: the query key is unchanged, so nothing
+        // would refetch on its own and the existing row could never rehydrate.
+        void query.refetch();
+      }
 
       return;
     }
@@ -137,8 +141,16 @@ export function DailyCheckInCard() {
       return;
     }
 
-    setRolledOver(false);
-    mutation.mutate({ localDate: plan.localDate, input: plan.input });
+    mutation.mutate(
+      { localDate: plan.localDate, input: plan.input },
+      {
+        // Marks the draft clean and opts the following refetch in, so the
+        // controls end up showing what the database actually stored.
+        onSuccess: () => {
+          dispatch({ kind: "save-succeeded" });
+        },
+      },
+    );
   };
 
   return (
@@ -147,7 +159,7 @@ export function DailyCheckInCard() {
       <Text style={styles.title}>{CHECK_IN_COPY.title}</Text>
       <Text style={styles.intro}>{CHECK_IN_COPY.intro}</Text>
       <Text style={styles.date}>
-        {CHECK_IN_COPY.dateLabel} {stamp.date}
+        {CHECK_IN_COPY.dateLabel} {form.stamp.date}
       </Text>
 
       {query.isPending ? (
@@ -170,7 +182,7 @@ export function DailyCheckInCard() {
         </View>
       ) : null}
 
-      {query.isSuccess ? (
+      {query.isSuccess && form.hydratedFor === generation ? (
         <Text style={styles.status}>
           {query.data === null
             ? CHECK_IN_COPY.emptyState
@@ -182,12 +194,12 @@ export function DailyCheckInCard() {
         legend={CHECK_IN_COPY.rpeLegend}
         hint={CHECK_IN_COPY.rpeHint}
         choices={RPE_CHOICES}
-        selected={draft.rpe}
+        selected={form.draft.rpe}
         disabled={locked}
         busy={busy}
         layout="wrap"
         onSelect={(rpe) => {
-          change({ ...draft, rpe });
+          choose({ ...form.draft, rpe });
         }}
       />
 
@@ -195,37 +207,37 @@ export function DailyCheckInCard() {
         legend={CHECK_IN_COPY.feelingLegend}
         hint={CHECK_IN_COPY.feelingHint}
         choices={FEELING_CHOICES}
-        selected={draft.overallFeeling}
+        selected={form.draft.overallFeeling}
         disabled={locked}
         busy={busy}
         layout="wrap"
         onSelect={(overallFeeling) => {
-          change({ ...draft, overallFeeling });
+          choose({ ...form.draft, overallFeeling });
         }}
       />
 
       <ChoiceGroup
         legend={CHECK_IN_COPY.painLegend}
         choices={PAIN_CHOICES}
-        selected={draft.painStatus}
+        selected={form.draft.painStatus}
         disabled={locked}
         busy={busy}
         layout="stack"
         onSelect={(painStatus) => {
-          change({ ...draft, painStatus });
+          choose({ ...form.draft, painStatus });
         }}
       />
 
       <Text style={styles.safety}>{CHECK_IN_COPY.painSafety}</Text>
 
-      {rolledOver ? (
+      {form.rolledOver ? (
         <Notice
           title={CHECK_IN_COPY.rolloverTitle}
           message={CHECK_IN_COPY.rolloverMessage}
         />
       ) : null}
 
-      {mutation.isSuccess && !rolledOver ? (
+      {mutation.isSuccess && !form.rolledOver ? (
         <Notice
           title={CHECK_IN_COPY.savedTitle}
           message={CHECK_IN_COPY.savedMessage}
@@ -244,11 +256,11 @@ export function DailyCheckInCard() {
         busy={busy}
         // Disabled until all three answers exist, and while a save is in flight,
         // which is the duplicate-submission guard.
-        disabled={locked || !isDraftComplete(draft)}
+        disabled={locked || !isDraftComplete(form.draft)}
         onPress={submit}
       />
 
-      {isDraftComplete(draft) ? null : (
+      {isDraftComplete(form.draft) ? null : (
         <Text style={styles.status}>{CHECK_IN_COPY.incompleteHint}</Text>
       )}
     </View>
