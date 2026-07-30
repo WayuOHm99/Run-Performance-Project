@@ -30,6 +30,21 @@ export const authScopedKeys = {
    */
   dailyCheckIn: (userId: string, localDate: string) =>
     [AUTH_SCOPE, userId, "daily-check-in", localDate] as const,
+  /**
+   * One athlete's own check-in sharing state, for every team they actively play
+   * for.
+   *
+   * There is deliberately **no team id in the key**: the whole list is one cache
+   * entry, so a grant or revoke for one team refreshes the same server-confirmed
+   * view that every other team's control is read from. Per-team keys would let two
+   * controls disagree about what the database says.
+   *
+   * The cached value is consent metadata and team names — no health value, and no
+   * health value in the key either. It is memory-only and dropped outright by
+   * `clearAuthScopedQueries`.
+   */
+  checkInSharing: (userId: string) =>
+    [AUTH_SCOPE, userId, "check-in-sharing"] as const,
 } as const;
 
 /** True for any key produced by `authScopedKeys`. */

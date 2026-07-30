@@ -15,6 +15,7 @@ describe("authScopedKeys", () => {
     expect(authScopedKeys.account(USER_A)).toContain(USER_A);
     expect(authScopedKeys.user(USER_A)).toContain(USER_A);
     expect(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)).toContain(USER_A);
+    expect(authScopedKeys.checkInSharing(USER_A)).toContain(USER_A);
   });
 
   it("produces different keys for different users", () => {
@@ -44,9 +45,87 @@ describe("authScopedKeys", () => {
       authScopedKeys.memberships(USER_A),
       authScopedKeys.account(USER_A),
       authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE),
+      authScopedKeys.checkInSharing(USER_A),
     ]) {
       expect(isAuthScopedKey(key)).toBe(true);
     }
+  });
+});
+
+/**
+ * The check-in-sharing key.
+ *
+ * Assertions are reduced to fixed literals, an owner *label*, and a length, so a
+ * failure prints `auth-scoped|owner-a|check-in-sharing|3` rather than an
+ * identifier. Sharing metadata is not a health measurement but it is sensitive
+ * authorization data, so it gets the same discipline.
+ */
+describe("authScopedKeys.checkInSharing", () => {
+  const OWNER_LABELS = new Map<unknown, string>([
+    [USER_A, "owner-a"],
+    [USER_B, "owner-b"],
+  ]);
+
+  const describeKey = (key: readonly unknown[]): string =>
+    `${String(key[0])}|${OWNER_LABELS.get(key[1]) ?? "unknown"}|${String(
+      key[2],
+    )}|${String(key.length)}`;
+
+  it("carries the user id and the resource, and nothing else", () => {
+    expect(describeKey(authScopedKeys.checkInSharing(USER_A))).toBe(
+      "auth-scoped|owner-a|check-in-sharing|3",
+    );
+  });
+
+  it("holds no health value and no team identifier", () => {
+    // One entry covers the whole list, so no team id belongs in the key. This
+    // feature never reads a check-in value at all, so none can appear here either.
+    const key = authScopedKeys.checkInSharing(USER_A);
+
+    expect(key.length).toBe(3);
+    expect(key.every((part) => typeof part === "string")).toBe(true);
+
+    const serialized = JSON.stringify(key);
+    const leaks = ["rpe", "pain", "feeling", "team", "grant"].filter(
+      (fragment) => serialized.includes(fragment),
+    );
+
+    // Fragment names only.
+    expect(leaks).toEqual([]);
+  });
+
+  it("separates users", () => {
+    expect(describeKey(authScopedKeys.checkInSharing(USER_A))).not.toBe(
+      describeKey(authScopedKeys.checkInSharing(USER_B)),
+    );
+  });
+
+  it("is owned by the user it names", () => {
+    expect(
+      authScopedUserId(authScopedKeys.checkInSharing(USER_A)) === USER_A,
+    ).toBe(true);
+  });
+
+  it("does not collide with the other keys of one user", () => {
+    const distinct = new Set(
+      [
+        authScopedKeys.profile(USER_A),
+        authScopedKeys.memberships(USER_A),
+        authScopedKeys.account(USER_A),
+        authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE),
+        authScopedKeys.checkInSharing(USER_A),
+      ].map((key) => JSON.stringify(key)),
+    );
+
+    // A count only.
+    expect(distinct.size).toBe(5);
+  });
+
+  it("is stable across calls", () => {
+    expect(
+      JSON.stringify(authScopedKeys.checkInSharing(USER_A)) ===
+        JSON.stringify(authScopedKeys.checkInSharing(USER_A)),
+    ).toBe(true);
   });
 });
 

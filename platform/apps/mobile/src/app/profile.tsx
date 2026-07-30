@@ -23,14 +23,20 @@ import {
   useAccountQuery,
   useSaveDisplayName,
 } from "@/features/profile/use-account";
+import { CheckInSharingSection } from "@/features/sharing/sharing-section";
 import { spacing } from "@/theme/tokens";
 
 /**
- * Authenticated profile editing and global sign-out.
+ * Authenticated profile editing, check-in sharing controls, and global sign-out.
  *
  * Reachable by a user with an active membership and by one without, because a
  * revoked user keeps exactly this capability: they may still correct their own
  * name even though no role area is open to them.
+ *
+ * The sharing section lives here rather than behind a new route because the
+ * charter puts sharing controls on `Me`, and because a user with no active athlete
+ * membership — pending, revoked, or coach-only — reaches this screen and must see
+ * the honest empty state rather than a control they cannot use.
  */
 export default function ProfileScreen() {
   const { signOut } = useAuth();
@@ -105,6 +111,11 @@ export default function ProfileScreen() {
         ) : null}
 
         <PrimaryButton label="บันทึก" onPress={submit} busy={busy} />
+      </View>
+
+      <View style={styles.form}>
+        <CheckInSharingSection />
+
         <PrimaryButton
           label="ออกจากระบบทุกอุปกรณ์"
           variant="quiet"
