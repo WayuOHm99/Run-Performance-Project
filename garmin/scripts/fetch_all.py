@@ -16,10 +16,13 @@
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +39,46 @@ TOKENS_DIR = PROJECT_ROOT / "tokens"
 BACKFILL = SCRIPTS_DIR / "03_backfill.py"
 STATUS_DIR = PROJECT_ROOT / "data" / "sync_status"          # สถานะรายคน (03_backfill เขียน)
 STATUS_FILE = PROJECT_ROOT / "data" / "sync_status.json"    # สถานะรวมรอบล่าสุด (ไฟล์นี้เขียน)
+LOCK_FILE = PROJECT_ROOT / "data" / "sync.lock"
+
+
+@contextmanager
+def run_lock(timeout_seconds):
+    """กัน fast/full/reconcile sync เขียน DB พร้อมกันข้าม Scheduled Task."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle = LOCK_FILE.open("a+b")
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+
+    deadline = time.monotonic() + timeout_seconds
+    acquired = False
+    while True:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(1)
+
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def read_athlete_status(slug: str, not_before: datetime) -> dict | None:
@@ -62,6 +105,32 @@ def list_athletes() -> list[str]:
     return result
 
 
+def run_athlete(slug, args, passthrough, run_started):
+    """รัน sync หนึ่งบัญชีและคืนผลแบบมาตรฐาน โดยไม่ให้ความล้มเหลวลามไปบัญชีอื่น."""
+    print(f"\n▶ {slug}")
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(BACKFILL), "--athlete", slug,
+             "--days", str(args.days), *passthrough],
+            cwd=str(PROJECT_ROOT),
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            timeout=1200,
+        )
+        status = read_athlete_status(slug, run_started)
+        if proc.returncode == 0:
+            return {"slug": slug, "ok": True, "reason": "ok",
+                    "warnings": (status or {}).get("warnings", [])}
+        reason = (status or {}).get("reason") or \
+            ("token" if proc.returncode == 2 else "error")
+        return {"slug": slug, "ok": False, "reason": reason, "warnings": []}
+    except subprocess.TimeoutExpired:
+        print(f"   ❌ {slug}: เกิน 20 นาที — ยกเลิกแล้ว")
+        return {"slug": slug, "ok": False, "reason": "timeout", "warnings": []}
+    except Exception as e:
+        print(f"   ❌ {slug}: {type(e).__name__}: {e}")
+        return {"slug": slug, "ok": False, "reason": "error", "warnings": []}
+
+
 def main():
     parser = argparse.ArgumentParser(description="ดึงข้อมูล Garmin ทุกคน (incremental)")
     parser.add_argument("--days", type=int, default=3,
@@ -74,7 +143,21 @@ def main():
     parser.add_argument("--reconcile", action="store_true",
                         help="ส่งต่อให้ 03_backfill — โหมดเช็คกิจกรรมถูกลบฝั่ง Garmin "
                              "(ใช้ทำ reconciliation รายสัปดาห์ เช่น --days 90 --reconcile)")
+    parser.add_argument("--activities-only", action="store_true",
+                        help="fast sync: ดึงเฉพาะ activity summary ล่าสุด")
+    parser.add_argument("--max-workers", type=int, default=3,
+                        help="จำนวนบัญชีที่ดึงพร้อมกัน (ค่าเริ่มต้น 3, ขั้นต่ำ 1)")
+    parser.add_argument("--lock-timeout", type=int, default=600,
+                        help="วินาทีที่รอ sync รอบอื่น (fast path ใช้ 0 แล้วข้าม)")
     args = parser.parse_args()
+    if args.days < 0:
+        parser.error("--days ต้องไม่น้อยกว่า 0")
+    if args.max_workers < 1:
+        parser.error("--max-workers ต้องไม่น้อยกว่า 1")
+    if args.lock_timeout < 0:
+        parser.error("--lock-timeout ต้องไม่น้อยกว่า 0")
+    if args.activities_only and (args.skip_activities or args.reconcile):
+        parser.error("--activities-only ใช้ร่วมกับ --skip-activities/--reconcile ไม่ได้")
 
     # ธงที่ส่งต่อให้ subprocess 03_backfill ต่อคน
     passthrough = []
@@ -82,6 +165,8 @@ def main():
         passthrough.append("--skip-activities")
     if args.reconcile:
         passthrough.append("--reconcile")
+    if args.activities_only:
+        passthrough.append("--activities-only")
 
     athletes = [args.athlete] if args.athlete else list_athletes()
 
@@ -90,7 +175,8 @@ def main():
     print(f"  FETCH ALL — {stamp}")
     print(f"  นักกีฬา: {', '.join(athletes) if athletes else '(ไม่พบ token)'}")
     _mode = "reconcile (เช็คกิจกรรมถูกลบ)" if args.reconcile else \
-            ("deep resync wellness (ข้ามกิจกรรม)" if args.skip_activities else "ปกติ")
+            ("fast activity summary" if args.activities_only else
+             ("deep resync wellness (ข้ามกิจกรรม)" if args.skip_activities else "ปกติ"))
     print(f"  ช่วง: {args.days} วันล่าสุด | โหมด: {_mode}")
     print("=" * 60)
 
@@ -98,56 +184,41 @@ def main():
         print("⚠️  ไม่พบ token ใน tokens/ — ยังไม่มีใครให้ดึง")
         sys.exit(0)
 
-    run_started = datetime.now()
-    ok, failed = [], []
-    results = []            # สถานะละเอียดรายคน → data/sync_status.json (toast/dashboard อ่าน)
-    for slug in athletes:
-        print(f"\n▶ {slug}")
-        # เพดานเวลา 20 นาที/คน (daily --days 3 ปกติเสร็จใน <1 นาที เพราะมี socket timeout 30 วิ
-        # ใน 03_backfill) — กันเผื่อลูกกระบวนการค้าง ไม่ให้คนเดียวลากทั้งทีมค้างข้ามวัน
-        try:
-            proc = subprocess.run(
-                [sys.executable, str(BACKFILL), "--athlete", slug,
-                 "--days", str(args.days), *passthrough],
-                cwd=str(PROJECT_ROOT),
-                env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
-                timeout=1200,
-            )
-            status = read_athlete_status(slug, run_started)
-            if proc.returncode == 0:
-                ok.append(slug)
-                results.append({"slug": slug, "ok": True, "reason": "ok",
-                                "warnings": (status or {}).get("warnings", [])})
-            else:
-                failed.append(slug)
-                # exit 2 = token เสีย (03_backfill แยกให้แล้ว) — บอกวิธีแก้ได้ตรงจุด
-                reason = (status or {}).get("reason") or \
-                    ("token" if proc.returncode == 2 else "error")
-                results.append({"slug": slug, "ok": False, "reason": reason,
-                                "warnings": []})
-        except subprocess.TimeoutExpired:
-            print(f"   ❌ {slug}: เกิน 20 นาที — ยกเลิกแล้วไปคนถัดไป")
-            failed.append(slug)
-            results.append({"slug": slug, "ok": False, "reason": "timeout", "warnings": []})
-        except Exception as e:
-            # คนเดียวพังต้องไม่ลากทั้งทีม — log แล้วไปคนถัดไป (เคยเกิด 21 ก.ค. 69:
-            # dan พังกลางทางทำให้ tong/p'kao ในคิวเดียวกันไม่ถูกดึงเลยทั้งรอบ)
-            print(f"   ❌ {slug}: {type(e).__name__}: {e} — ข้ามไปคนถัดไป")
-            failed.append(slug)
-            results.append({"slug": slug, "ok": False, "reason": "error", "warnings": []})
+    with run_lock(args.lock_timeout) as acquired:
+        if not acquired:
+            print("⏭️  มี Garmin sync อีกรอบทำงานอยู่ — ข้ามรอบนี้")
+            sys.exit(75)
 
-    # สรุปรวมรอบนี้ให้ notify_sync.ps1 (toast) กับ dashboard อ่าน
-    try:
-        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = STATUS_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({
-            "run_at": run_started.isoformat(timespec="seconds"),
-            "days": args.days,
-            "results": results,
-        }, ensure_ascii=False, indent=1), encoding="utf-8")
-        tmp.replace(STATUS_FILE)
-    except Exception as e:
-        print(f"⚠️  เขียน sync_status.json ไม่สำเร็จ: {e}")
+        # truncate microseconds เพราะไฟล์สถานะบันทึก finished_at ความละเอียดวินาที
+        run_started = datetime.now().replace(microsecond=0)
+        workers = min(args.max_workers, len(athletes))
+        by_slug = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(run_athlete, slug, args, passthrough, run_started): slug
+                for slug in athletes
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                by_slug[result["slug"]] = result
+
+        # คงลำดับ deterministic ตาม list_athletes แม้งานจบไม่พร้อมกัน
+        results = [by_slug[slug] for slug in athletes]
+        ok = [r["slug"] for r in results if r["ok"]]
+        failed = [r["slug"] for r in results if not r["ok"]]
+
+        # เขียน aggregate ก่อนปล่อย cross-task lock กันรอบถัดไปแข่งเขียนสถานะ
+        try:
+            STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = STATUS_FILE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({
+                "run_at": run_started.isoformat(timespec="seconds"),
+                "days": args.days,
+                "results": results,
+            }, ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.replace(STATUS_FILE)
+        except Exception as e:
+            print(f"⚠️  เขียน sync_status.json ไม่สำเร็จ: {e}")
 
     n_warn = sum(len(r["warnings"]) for r in results)
     print("\n" + "=" * 60)

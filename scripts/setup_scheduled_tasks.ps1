@@ -10,6 +10,7 @@
 #   คลิกขวาที่ไฟล์ → Run with PowerShell
 #   หรือ:  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup_scheduled_tasks.ps1
 #   เพิ่ม -IncludeOptional เพื่อตั้ง reconcile รายสัปดาห์ + deepsync รายเดือนด้วย
+#   เพิ่ม -TaskName <ชื่อ> เพื่อตั้งเฉพาะ task ที่ระบุ
 #   เพิ่ม -DryRun เพื่อดูว่าจะตั้งอะไรบ้างโดยไม่แตะของจริง
 #
 # หมายเหตุ
@@ -20,6 +21,7 @@
 [CmdletBinding()]
 param(
     [switch]$IncludeOptional,
+    [string]$TaskName,
     [switch]$DryRun
 )
 
@@ -45,6 +47,18 @@ $tasks = @(
         Script      = Join-Path $scripts 'sync-hidden.vbs'
         TimeLimit   = 'PT10M'
         OnBattery   = $true          # ให้รันแม้ใช้แบตเตอรี่
+        Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:00' `
+                            -RepetitionInterval (New-TimeSpan -Minutes 15) `
+                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
+        Optional    = $false
+    },
+    @{
+        Name        = 'Run-Performance-Garmin-Fast'
+        Desc        = 'ดึง activity summary วันนี้จาก Garmin ทุก 15 นาที (ไม่มีหน้าต่าง)'
+        Exe         = 'wscript.exe'
+        Script      = Join-Path $garmin 'garmin-fast-sync-hidden.vbs'
+        TimeLimit   = 'PT10M'
+        OnBattery   = $true
         Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:00' `
                             -RepetitionInterval (New-TimeSpan -Minutes 15) `
                             -RepetitionDuration (New-TimeSpan -Days 3650)) }
@@ -102,6 +116,11 @@ $tasks = @(
 $ok = 0; $skipped = 0; $failed = 0
 
 foreach ($t in $tasks) {
+
+    if ($TaskName -and $t.Name -ne $TaskName) {
+        $skipped++
+        continue
+    }
 
     if ($t.Optional -and -not $IncludeOptional) {
         Write-Host "[ข้าม]  $($t.Name)  (ใส่ -IncludeOptional ถ้าต้องการ)" -ForegroundColor DarkGray

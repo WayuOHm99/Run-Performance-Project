@@ -88,6 +88,25 @@ def safe_call(api_method, *args, **kwargs):
 
 # ── Activity Fetching ────────────────────────────────────────
 
+ACTIVITY_WRITE_COLUMNS = (
+    "activity_id", "athlete_id", "activity_type", "activity_name",
+    "start_time_local", "start_time_utc", "duration_sec", "moving_duration_sec",
+    "distance_m", "avg_hr", "max_hr", "min_hr", "avg_pace_min_per_km",
+    "avg_speed_mps", "max_speed_mps", "avg_grade_adjusted_speed_mps",
+    "calories", "bmr_calories", "training_effect_aerobic",
+    "training_effect_anaerobic", "training_effect_label", "vo2max_value",
+    "avg_cadence", "max_cadence", "avg_stride_length_cm",
+    "avg_ground_contact_time_ms", "avg_vertical_oscillation_cm",
+    "avg_vertical_ratio", "elevation_gain_m", "elevation_loss_m",
+    "min_elevation_m", "max_elevation_m", "avg_power", "max_power",
+    "normalized_power", "training_load", "impact_load", "begin_stamina",
+    "end_stamina", "hr_zone1_sec", "hr_zone2_sec", "hr_zone3_sec",
+    "hr_zone4_sec", "hr_zone5_sec", "steps", "moderate_intensity_min",
+    "vigorous_intensity_min", "diff_body_battery", "sweat_loss_ml",
+    "start_latitude", "start_longitude", "location_name", "weather_temp_c",
+    "weather_apparent_temp_c", "weather_humidity", "weather_wind_kph",
+)
+
 def _f_to_c(f):
     """แปลงองศา F → C (Garmin คืนอุณหภูมิเป็น Fahrenheit)"""
     return round((f - 32) * 5.0 / 9.0, 1) if isinstance(f, (int, float)) else None
@@ -112,9 +131,15 @@ def fetch_activity_detail(garmin, activity_id):
             s.get("beginPotentialStamina"), s.get("endPotentialStamina"))
 
 
-def fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date):
+def fetch_and_insert_activities(
+    garmin, conn, athlete_id, start_date, end_date, *, fast=False
+):
     """Fetch activities by date range and insert into fact_activity (ละเอียด: running dynamics,
-    HR time-in-zone, weather, stamina/impact load สำหรับกิจกรรมวิ่ง)."""
+    HR time-in-zone, weather, stamina/impact load สำหรับกิจกรรมวิ่ง).
+
+    fast=True ใช้กับ polling ถี่: ดึง activity summary เพียง endpoint เดียว ไม่ดึง
+    detail/weather/splits และไม่ reconcile. ถ้า activity มีอยู่แล้ว จะเก็บ enrichment
+    จาก full sync เดิมไว้ ไม่เขียน NULL ทับ."""
     print(f"\n📊 Fetching activities from {start_date} to {end_date}...")
 
     activities = safe_call(
@@ -151,34 +176,25 @@ def fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date):
         # ── เรียกข้อมูลเสริมเฉพาะกิจกรรม "วิ่ง" (คุม API load — cross-training ไม่ต้อง) ──
         min_hr = impact_load = begin_stamina = end_stamina = None
         w_temp = w_apparent = w_humidity = w_wind = None
-        if is_run:
+        if fast:
+            existing = cur.execute(
+                """SELECT min_hr, impact_load, begin_stamina, end_stamina,
+                          weather_temp_c, weather_apparent_temp_c,
+                          weather_humidity, weather_wind_kph
+                   FROM fact_activity WHERE activity_id = ?""",
+                (activity_id,),
+            ).fetchone()
+            if existing:
+                (min_hr, impact_load, begin_stamina, end_stamina,
+                 w_temp, w_apparent, w_humidity, w_wind) = existing
+        elif is_run:
             time.sleep(0.3)
             min_hr, impact_load, begin_stamina, end_stamina = fetch_activity_detail(garmin, activity_id)
             if act.get("startLatitude") is not None:  # outdoor เท่านั้นถึงมี weather
                 time.sleep(0.3)
                 w_temp, w_apparent, w_humidity, w_wind = fetch_weather(garmin, activity_id)
 
-        cur.execute("""
-            INSERT OR REPLACE INTO fact_activity (
-                activity_id, athlete_id, activity_type, activity_name,
-                start_time_local, start_time_utc, duration_sec, moving_duration_sec,
-                distance_m, avg_hr, max_hr, min_hr, avg_pace_min_per_km,
-                avg_speed_mps, max_speed_mps, avg_grade_adjusted_speed_mps,
-                calories, bmr_calories, training_effect_aerobic, training_effect_anaerobic,
-                training_effect_label, vo2max_value, avg_cadence, max_cadence,
-                avg_stride_length_cm, avg_ground_contact_time_ms,
-                avg_vertical_oscillation_cm, avg_vertical_ratio,
-                elevation_gain_m, elevation_loss_m, min_elevation_m, max_elevation_m,
-                avg_power, max_power, normalized_power, training_load,
-                impact_load, begin_stamina, end_stamina,
-                hr_zone1_sec, hr_zone2_sec, hr_zone3_sec, hr_zone4_sec, hr_zone5_sec,
-                steps, moderate_intensity_min, vigorous_intensity_min,
-                diff_body_battery, sweat_loss_ml, start_latitude, start_longitude, location_name,
-                weather_temp_c, weather_apparent_temp_c, weather_humidity, weather_wind_kph
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?)
-        """, (
+        values = (
             activity_id, athlete_id, type_key, act.get("activityName"),
             act.get("startTimeLocal"), act.get("startTimeGMT"),
             duration, act.get("movingDuration"),
@@ -201,19 +217,46 @@ def fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date):
             act.get("differenceBodyBattery"), act.get("waterEstimated"),
             act.get("startLatitude"), act.get("startLongitude"), act.get("locationName"),
             w_temp, w_apparent, w_humidity, w_wind,
-        ))
+        )
+        columns_sql = ", ".join(ACTIVITY_WRITE_COLUMNS)
+        placeholders = ", ".join("?" for _ in ACTIVITY_WRITE_COLUMNS)
+        if fast:
+            # Garmin อาจส่ง summary บาง field เป็น NULL ชั่วคราวระหว่างประมวลผล.
+            # COALESCE ป้องกัน fast polling ล้างค่าที่ full sync เคยเติมไว้
+            # (รวม running dynamics, HR zones, load และ weather).
+            updates = ", ".join(
+                f"{column}=COALESCE(excluded.{column}, fact_activity.{column})"
+                for column in ACTIVITY_WRITE_COLUMNS
+                if column not in ("activity_id", "athlete_id")
+            )
+            sql = (
+                f"INSERT INTO fact_activity ({columns_sql}) VALUES ({placeholders}) "
+                f"ON CONFLICT(activity_id) DO UPDATE SET athlete_id=excluded.athlete_id, "
+                f"{updates}, deleted_at=NULL, fetched_at=datetime('now')"
+            )
+        else:
+            sql = (
+                f"INSERT OR REPLACE INTO fact_activity ({columns_sql}) "
+                f"VALUES ({placeholders})"
+            )
+        cur.execute(sql, values)
+        # ปล่อย SQLite write lock ก่อนยิง endpoint ถัดไป เพื่อให้ subprocess
+        # ของนักกีฬาคนอื่นเขียนแทรกได้เมื่อ fetch_all รันแบบขนาน
+        conn.commit()
         count += 1
 
         # ดึง splits เฉพาะกิจกรรมที่มีระยะทาง (วิ่ง/เดิน) — cross-training ไม่มี split ที่มีความหมาย
-        if has_dist:
+        if has_dist and not fast:
             time.sleep(0.5)
             fetch_and_insert_splits(garmin, conn, activity_id)
+            conn.commit()
 
     conn.commit()
     print(f"   ✅ Inserted {count} activities")
     # reconcile ช่วงที่เพิ่งดึง (ฟรี — ใช้รายการที่ดึงมาแล้ว): กิจกรรมใน DB ช่วงนี้ที่ไม่อยู่
     # ในรายการจริงของ Garmin = ถูกลบฝั่งแอป → mark deleted_at (daily 3 วันจับการลบล่าสุดได้เอง)
-    reconcile_activities(conn, athlete_id, start_date, end_date, present_ids)
+    if not fast:
+        reconcile_activities(conn, athlete_id, start_date, end_date, present_ids)
     return count
 
 
@@ -546,6 +589,8 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
             vo2max_trend, fitness_age, endurance_score,
             hill_overall, hill_strength, hill_endurance,
         ))
+        # ไม่ถือ write transaction ค้างระหว่าง network calls ของวันถัดไป
+        conn.commit()
         count += 1
         print(" ✓")
 
@@ -609,6 +654,7 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
                            WHERE athlete_id = ? AND calendar_date = ?""",
                         (lt_hr, lt_pace, athlete_id, lt_date))
             print(f"   ✅ LT ล่าสุด ({lt_date}): HR {lt_hr}, pace {lt_pace} นาที/กม.")
+    conn.commit()
     time.sleep(0.3)
 
     # ── Race predictions รายวันทั้งช่วง (call เดียวครอบทุกวัน) ──
@@ -628,6 +674,7 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
         n_pred += 1
     if n_pred:
         print(f"   ✅ Race predictions: {n_pred} วัน")
+    conn.commit()
     time.sleep(0.3)
 
     # ── Body composition ทั้งช่วง (call เดียว) — มีค่าเฉพาะคนที่ชั่ง/กรอกน้ำหนัก ──
@@ -653,6 +700,7 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
             n_body += 1
     if n_body:
         print(f"   ✅ Body composition: {n_body} รายการ")
+    conn.commit()
     time.sleep(0.3)
 
     # ── Personal records (snapshot ทั้งบัญชี — ทับของเก่าด้วยค่าปัจจุบันเสมอ) ──
@@ -674,6 +722,7 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
         n_pr += 1
     if n_pr:
         print(f"   ✅ Personal records: {n_pr} รายการ")
+    conn.commit()
     time.sleep(0.3)
 
     # ── Gear (รองเท้า) — ระยะสะสมต่อคู่ ไว้เตือนรองเท้าหมดสภาพ ──
@@ -700,6 +749,7 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
                 (athlete_id, g["uuid"], g.get("displayName") or g.get("customMakeModel"),
                  g.get("gearTypeName"), g.get("customMakeModel"), g.get("dateBegin"),
                  retired, stats.get("totalDistance"), stats.get("totalActivities")))
+            conn.commit()
             n_gear += 1
     if n_gear:
         print(f"   ✅ Gear: {n_gear} ชิ้น")
@@ -729,7 +779,7 @@ def write_status(slug, ok, reason="ok", error=None,
     tmp.replace(STATUS_DIR / f"{slug}.json")
 
 
-def sanity_check(conn, athlete_id, start_date, end_date):
+def sanity_check(conn, athlete_id, start_date, end_date, *, include_wellness=True):
     """ตรวจความสมบูรณ์ของข้อมูลช่วงที่เพิ่งดึง — คืน list ข้อความเตือน (ว่าง = ปกติ).
 
     หลักการ: Garmin ส่ง response แปลก ๆ มาได้ (ค่าหลักหาย/เป็นศูนย์) แล้วระบบจะเก็บเงียบ ๆ
@@ -755,16 +805,17 @@ def sanity_check(conn, athlete_id, start_date, end_date):
 
     # 2) วัน wellness ที่ว่างทั้งแถว เฉพาะวันที่จบไปแล้ว — วันนี้ยังไม่จบวัน ค่าอาจยังไม่มา ไม่นับ
     #    (ปกติ = นักกีฬายังไม่เปิดแอป Garmin ให้นาฬิกา sync ขึ้น cloud — ตามคนได้ตรงจุด)
-    rows = conn.execute(
-        """SELECT calendar_date FROM fact_daily_wellness
-           WHERE athlete_id = ? AND calendar_date BETWEEN ? AND ?
-             AND calendar_date < date('now', 'localtime')
-             AND resting_hr IS NULL AND sleep_score IS NULL AND body_battery_high IS NULL
-           ORDER BY calendar_date""",
-        (athlete_id, str(start_date), str(end_date))).fetchall()
-    if rows:
-        days = ", ".join(r[0] for r in rows)
-        warns.append(f"wellness ว่างทั้งวัน: {days} — นักกีฬาอาจยังไม่ได้ sync นาฬิกาเข้าแอป")
+    if include_wellness:
+        rows = conn.execute(
+            """SELECT calendar_date FROM fact_daily_wellness
+               WHERE athlete_id = ? AND calendar_date BETWEEN ? AND ?
+                 AND calendar_date < date('now', 'localtime')
+                 AND resting_hr IS NULL AND sleep_score IS NULL AND body_battery_high IS NULL
+               ORDER BY calendar_date""",
+            (athlete_id, str(start_date), str(end_date))).fetchall()
+        if rows:
+            days = ", ".join(r[0] for r in rows)
+            warns.append(f"wellness ว่างทั้งวัน: {days} — นักกีฬาอาจยังไม่ได้ sync นาฬิกาเข้าแอป")
 
     return warns
 
@@ -781,7 +832,14 @@ def main():
     parser.add_argument("--reconcile", action="store_true",
                         help="โหมดเช็คกิจกรรมถูกลบฝั่ง Garmin (ดึงแค่รายชื่อ ไม่ดึงรายละเอียด/ไม่ insert) "
                              "→ mark deleted_at ตัวที่หายไป. ใช้รันรายสัปดาห์ (เช่น --days 90 --reconcile)")
+    parser.add_argument("--activities-only", action="store_true",
+                        help="fast sync: ดึง activity summary เท่านั้น ไม่ดึง detail/weather/splits, "
+                             "wellness, extras หรือ reconcile")
     args = parser.parse_args()
+    if args.days < 0:
+        parser.error("--days ต้องไม่น้อยกว่า 0")
+    if args.activities_only and (args.skip_activities or args.reconcile):
+        parser.error("--activities-only ใช้ร่วมกับ --skip-activities/--reconcile ไม่ได้")
 
     # Set up token path
     token_dir = PROJECT_ROOT / "tokens" / args.athlete
@@ -859,11 +917,24 @@ def main():
         print("\n📊 (ข้ามการดึงกิจกรรม — --skip-activities)")
         activity_count = 0
     else:
-        activity_count = fetch_and_insert_activities(garmin, conn, athlete_id, start_date, end_date)
-    wellness_count = fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date)
-    fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
+        activity_count = fetch_and_insert_activities(
+            garmin, conn, athlete_id, start_date, end_date,
+            fast=args.activities_only,
+        )
 
-    warnings = sanity_check(conn, athlete_id, start_date, end_date)
+    if args.activities_only:
+        wellness_count = None
+        print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
+    else:
+        wellness_count = fetch_and_insert_wellness(
+            garmin, conn, athlete_id, start_date, end_date
+        )
+        fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
+
+    warnings = sanity_check(
+        conn, athlete_id, start_date, end_date,
+        include_wellness=not args.activities_only,
+    )
     if warnings:
         print("\n⚠️  Sanity check พบจุดน่าสงสัย:")
         for w in warnings:

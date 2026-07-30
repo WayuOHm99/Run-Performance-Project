@@ -13,7 +13,10 @@
 #
 # กติกา: สคริปต์แจ้งเตือนต้องไม่ทำให้ Task ล้มเอง — ทุก error ในนี้กลืนเงียบ (exit 0 เสมอ)
 
-param([int]$SyncExit = 0)
+param(
+    [int]$SyncExit = 0,
+    [string]$StartMarker = "sync_run_start.txt"
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -40,7 +43,7 @@ function Show-Toast([string]$Title, [string]$Body) {
 try {
     $dataDir = Join-Path (Split-Path $PSScriptRoot -Parent) "data"
     $statusPath = Join-Path $dataDir "sync_status.json"
-    $startPath = Join-Path $dataDir "sync_run_start.txt"
+    $startPath = Join-Path $dataDir $StartMarker
 
     # เวลาเริ่มรอบนี้ (bat เขียนก่อนรัน fetch_all) — ใช้ตัดสินว่าสถานะถูกเขียน "รอบนี้" จริงไหม
     $runStart = $null
