@@ -1,6 +1,10 @@
 # TASK-014: Athlete Check-in Sharing Controls Mobile
 
-Status: Approved, not yet implemented
+Status: **Implemented and verified locally. Awaiting GPT/Codex read-only
+review.**
+
+Implementation commit: `107bea825a10a7b97917b1d9aa41d5f390c2900d`. The handoff
+with the full evidence is at `docs/app/handoffs/TASK-014.md`.
 
 Writer: Claude Code (sole writer)
 
@@ -251,32 +255,95 @@ No raw team id, database wording, error code, RPC name, or raw server message is
 ever shown to the user. Coach-only, pending, revoked, and unauthenticated states
 gain no grant capability.
 
+## As implemented
+
+Every file below is inside the owned paths. Nothing else was created or changed.
+
+| Module                                       | Responsibility                                                                                 |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `features/sharing/domain.ts`                 | the `check_in` constant, fail-closed validation of both responses, the branded `SharingTarget` |
+| `features/sharing/errors.ts`                 | sanitized `load`/`grant`/`revoke` failures from fixed tables                                   |
+| `features/sharing/sharing-repository.ts`     | the two scoped reads and the two approved RPCs                                                 |
+| `features/sharing/action-plan.ts`            | the press decision: refuse while busy, direction from loaded state                             |
+| `features/sharing/query-options.ts`          | the auth-scoped key, `networkMode`, `retry`, the captured-key refetch                          |
+| `features/sharing/use-check-in-sharing.ts`   | binds the above to the verified identity and the query client                                  |
+| `features/sharing/copy.ts`                   | every user-facing string, plus the two accessible-label builders                               |
+| `features/sharing/sharing-section.tsx`       | the Profile/Me section and all seven display states                                            |
+| `features/sharing/sharing-action-button.tsx` | the per-team control, with its own accessible label                                            |
+| `features/sharing/failure-probe.ts`          | test support; reduces a rejection to a safe vocabulary                                         |
+| `app/profile.tsx`                            | renders the section between the name form and sign-out                                         |
+| `lib/query/keys.ts`                          | the `checkInSharing` auth-scoped key                                                           |
+
+Six test files accompany them: `domain.test.ts`, `sharing-repository.test.ts`,
+`query-options.test.ts`, `action-plan.test.ts`, `source-safety.test.ts`, and
+`logging.test.ts`, plus additions to `lib/query/keys.test.ts`.
+
+Two design points are worth a reviewer's attention because they differ from the
+obvious reading of the contract:
+
+1. **There is no `onSuccess`.** The contract asks that an identity change cannot
+   redirect invalidation. Rather than guard a settle-time callback, the callback
+   was removed: `mutationFn` is read once when execution begins, so the key it
+   captures and the refetch it awaits both belong to the identity the write was
+   made as. The mutation options are exactly `mutationFn`, `networkMode`, and
+   `retry`.
+2. **A failed refresh does not fail a successful action.** If the RPC succeeded
+   and the refetch then failed, reporting the action as failed would tell the
+   athlete sharing is still off when it is on. The refetch rejection is therefore
+   swallowed inside `mutationFn`; the query owns its own error state and the
+   section shows the load error and its retry instead.
+
 ## Acceptance criteria
 
-1. An active athlete sees every active athlete team by name.
-2. Each team shows its own independently server-confirmed `check_in` sharing
-   state.
-3. A missing grant means off and creates nothing.
-4. Grant calls only the approved RPC, with the selected team and the constant
-   category.
-5. Revoke calls only the approved revoke RPC with the same scope.
-6. An action on Team A does not change Team B.
-7. Sharing state is refetched from the server; there is no optimistic update.
-8. A load failure is shown as an error, never as off and never as empty.
-9. Malformed or inconsistent rows fail closed.
-10. Identity always comes from verified auth state.
-11. Account replacement during an in-flight action cannot redirect the refresh.
-12. Offline actions are not paused, queued, retried, or executed on reconnect.
-13. Duplicate presses produce one operation.
-14. A revoked membership loses its control on the next successful load, and no
-    old grant revives.
-15. No health value, raw error, payload, token, or credential is logged, cached
-    optimistically, persisted, or printed in failing test output.
-16. No database, generated-type, dependency, lockfile, navigation, or
-    shared-theme change.
-17. Existing unit and database authorization suites remain passing.
-18. Documentation matches the implementation and Git finishes clean.
-19. Nothing is merged, pushed, deployed, linked, or remotely migrated.
+All nineteen are satisfied. The evidence column names the test or check that
+proves each one; full counts are in the handoff.
+
+- [x] 1. An active athlete sees every active athlete team by name — the
+      membership read embeds `teams(name)` and a row without a visible team name
+      is refused (`domain.test.ts`, `sharing-repository.test.ts`).
+- [x] 2. Each team shows its own independently server-confirmed `check_in`
+      sharing state — `parseCheckInSharingList` composes per team and both
+      cross-team directions are asserted.
+- [x] 3. A missing grant means off and creates nothing — the read is a `SELECT`
+      only; no write happens on any load path, including every failure path.
+- [x] 4. Grant calls only the approved RPC, with the selected team and the
+      constant category — the RPC name, its two argument keys, its team argument,
+      and its category are all asserted.
+- [x] 5. Revoke calls only the approved revoke RPC with the same scope — same
+      assertions for `revoke_team_data_sharing`.
+- [x] 6. An action on Team A does not change Team B — asserted in the domain
+      composition, the repository, the mutation options, and `action-plan.ts`.
+- [x] 7. Sharing state is refetched from the server; there is no optimistic
+      update — the options object has exactly `mutationFn`, `networkMode`, and
+      `retry`, and the refetch is awaited inside `mutationFn`.
+- [x] 8. A load failure is shown as an error, never as off and never as empty —
+      seventeen repository failure cases each raise a sanitized `load` error, and
+      the section's error branch precedes and replaces the list branch.
+- [x] 9. Malformed or inconsistent rows fail closed — 49 rejection cases.
+- [x] 10. Identity always comes from verified auth state — the user id comes only
+      from `useAuth`; five non-identity values are refused before any query.
+- [x] 11. Account replacement during an in-flight action cannot redirect the
+      refresh — proved with `MutationObserver.setOptions` mid-flight.
+- [x] 12. Offline actions are not paused, queued, retried, or executed on
+      reconnect — plus a positive control showing the library default _would_
+      pause.
+- [x] 13. Duplicate presses produce one operation — `planSharingAction` refuses
+      while busy, for the same team and for any other team.
+- [x] 14. A revoked membership loses its control on the next successful load, and
+      no old grant revives — the control, the write target, and the press are all
+      refused once the team stops being returned; the grant revocation itself is
+      the TASK-011 trigger, still covered by the passing pgTAP suite.
+- [x] 15. No health value, raw error, payload, token, or credential is logged,
+      cached optimistically, persisted, or printed in failing test output — an
+      AST source scan, a runtime console-silence suite, and a programmatic leak
+      scan of the captured mutation output reporting zero occurrences.
+- [x] 16. No database, generated-type, dependency, lockfile, navigation, or
+      shared-theme change — confirmed by an exact changed-file audit; the web
+      export still reports the same 13 static routes.
+- [x] 17. Existing unit and database authorization suites remain passing — 596
+      workspace tests and 5 pgTAP files / 583 assertions.
+- [x] 18. Documentation matches the implementation and Git finishes clean.
+- [x] 19. Nothing is merged, pushed, deployed, linked, or remotely migrated.
 
 ## Required negative tests
 
@@ -400,6 +467,32 @@ controls are actually tested. At minimum:
 Output is captured without printing sensitive content, the exact file is
 restored, and the final unmutated suite is confirmed passing.
 
+### Result
+
+Twelve mutations were applied one at a time. Each changed the file (verified by
+hash), was detected by at least one failing test, and was restored
+byte-identically (verified by hash). The captured runner output was scanned
+programmatically for synthetic team ids, user ids, grant ids, team names, and raw
+server messages; every mutation reported a leak count of **0**.
+
+| Mutation                                                            | Failing tests | Files |
+| ------------------------------------------------------------------- | ------------- | ----- |
+| remove `networkMode: "always"`                                      | 4             | 1     |
+| enable mutation retry (`retry: 3`)                                  | 2             | 1     |
+| move the refresh into a swappable `onSuccess` that rebuilds the key | 6             | 1     |
+| treat a membership-read failure as an empty list                    | 2             | 1     |
+| let the grant category vary from `check_in`                         | 4             | 2     |
+| add optimistic state (`onMutate`)                                   | 2             | 2     |
+| let a raw thrown error escape the load                              | 2             | 1     |
+| weaken cross-team independence                                      | 3             | 2     |
+| skip a malformed membership row instead of failing closed           | 3             | 2     |
+| skip a malformed grant row instead of failing closed                | 3             | 2     |
+| accept any grant response instead of the sentinel                   | 1             | 1     |
+| accept a forged team id as a write target                           | 6             | 2     |
+
+The unmutated suite was re-run afterwards: 128 focused and 596 workspace tests
+pass.
+
 ## Known limitations (recorded before implementation)
 
 - Sharing is per team by TASK-011 decision 1. An athlete cannot exclude one coach
@@ -420,6 +513,21 @@ restored, and the final unmutated suite is confirmed passing.
   once rather than a partial list.
 - The section renders its loading state while no identity exists. The route is
   gated upstream, so this is unreachable in the running app.
+
+### Found during verification
+
+- `expo-doctor` reports 20 of 21 checks passing. The one failure is a
+  **pre-existing** patch-version drift unrelated to this task: the installed
+  `expo` 56.0.17 and `expo-router` 56.2.16 are behind the SDK's current
+  `~56.0.18` and `~56.2.17`. TASK-014 owns no dependency manifest and no
+  lockfile, and all three files were confirmed byte-identical to the approved
+  base, so this is reported rather than fixed. It needs a separate dependency
+  task with a serial owner for the lockfile.
+- The load orders the membership read before the grant read specifically to
+  avoid a false fail-closed. Reading grants first would let a membership
+  activated between the two reads produce a grant with no matching membership,
+  which the validation refuses. The residual window in the chosen order is a
+  membership activated _between_ the reads, which shows one retryable error.
 
 ## Rollback
 
