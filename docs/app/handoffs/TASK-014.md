@@ -1,9 +1,22 @@
 # TASK-014 Handoff — Athlete Check-in Sharing Controls Mobile
 
-Status: Implemented and verified locally. **Awaiting GPT/Codex read-only
-review.**
+Status: Round 2 finding fixed and verified locally. **Awaiting GPT/Codex
+read-only Round 2 review.**
 
-This is the Round 1 handoff. No reviewer finding has been raised yet.
+GPT/Codex reviewed Round 1 and raised **one Medium** finding — cross-account
+mutation observer state. The Product Owner approved it and it is **fixed**; see
+"Round 2 — Codex finding and fix" at the end of this document, which carries the
+reproduction, the implementation, the lifecycle regression, the mutation evidence,
+and the commit SHA.
+
+The Round 1 record below is retained as written. Where Round 2 supersedes a Round 1
+figure or claim, the correction is made in place with the earlier value noted, and
+the superseded text is not silently rewritten.
+
+Round 2 changed no database contract, no dependency, and no file outside the
+already-owned paths. A gap found in this task's own Round 2 mutation testing — one
+mutation initially escaping detection — is recorded in full rather than quietly
+corrected.
 
 One process correction is recorded in full rather than quietly fixed: Codex
 inspected the worktree mid-task and correctly found the implementation still
@@ -25,6 +38,33 @@ Privacy/security:  consent metadata and team names only; no health measurement
 Known limitations: 8 recorded
 Rollback:          git revert the three TASK-014 commits; additive and file-scoped
 Reviewer findings: none yet — this is Round 1
+```
+
+The block above is the Round 1 record, retained as written. The current state of the
+task is:
+
+```text
+Task:              docs/app/tasks/TASK-014-athlete-check-in-sharing-controls-mobile.md
+Writer:            Claude Code (sole writer)
+Branch/worktree:   feat/TASK-014-athlete-check-in-sharing-controls-mobile
+                   .claude/worktrees/task-014-athlete-check-in-sharing-controls-mobile
+Commit SHA:        2929bf76f049e2f1fefc23d6e844c87311b67b3c (Round 2 fix)
+                   full ledger in "Round 2 commit ledger"
+Changed files:     23 against the approved base (21 in Round 1, 6 touched in
+                   Round 2 of which 2 are new)
+Acceptance:        19 of 19 satisfied; criterion 11 extended in Round 2
+Commands run:      format:check, lint, typecheck, focused Vitest (146), full
+                   Vitest (614), expo web export, git diff --check, changed-file
+                   and forbidden-path audits. The local database stack was not
+                   started in Round 2 — the database contract is unchanged and the
+                   Round 1 pgTAP evidence stands.
+Privacy/security:  consent metadata and team names only; no health measurement.
+                   Round 2 reduces exposure: the previous account's user id, team
+                   id, and query key are no longer reachable from observer state.
+Known limitations: 10 recorded (8 from Round 1, 2 added in Round 2)
+Rollback:          git revert the four TASK-014 commits; additive and file-scoped
+Reviewer findings: Round 1 Medium "cross-account mutation observer state" — fixed
+                   in 2929bf7. No finding outstanding.
 ```
 
 ## Task and ownership
@@ -477,5 +517,335 @@ holds only what `db reset` produced from the committed migrations.
 7. **Is the per-team accessible label wording correct in Thai**, given the visible
    label is identical on every row and only the spoken label names the team?
 
-Stopping here for **GPT/Codex read-only review**. Nothing is merged and the
-worktree is preserved.
+That concluded Round 1. Codex then reviewed it and raised the finding below.
+
+---
+
+# Round 2 — Codex finding and fix
+
+Status: **fixed and verified locally.** Awaiting GPT/Codex read-only Round 2
+review.
+
+Codex raised one **Medium** finding against Round 1. The Product Owner approved it.
+It is fixed in commit `2929bf76f049e2f1fefc23d6e844c87311b67b3c`.
+
+## Pre-flight, confirmed before the first Round 2 edit
+
+| Gate                                           | Result                                                   |
+| ---------------------------------------------- | -------------------------------------------------------- |
+| worktree                                       | the existing TASK-014 worktree, still locked             |
+| branch                                         | `feat/TASK-014-athlete-check-in-sharing-controls-mobile` |
+| starting `HEAD`                                | `ffcca606441f1223aa594fe7ff7ae90d81df9a5e` exactly       |
+| worktree clean                                 | yes, `git status --porcelain` empty                      |
+| approved base still an ancestor                | yes, `git merge-base --is-ancestor` exit 0               |
+| `feat/mobile-foundation` unchanged at the base | yes, `3b94742c3a5f28f82e8583b29957159fce9343a2`          |
+| existing commits amended, rebased, or squashed | no                                                       |
+
+## The finding
+
+`CheckInSharingSection` consumed three pieces of mutation state without proving
+they belonged to the current verified identity: `mutation.isPending`,
+`mutation.isSuccess` / `mutation.data`, and `mutation.isError` /
+`mutation.variables`.
+
+## Root cause
+
+An **active** `MutationObserver` survives the removal of its mutation from the
+`MutationCache`. `clearAuthScopedQueries` calls `MutationCache.clear()`, which
+removes the mutation from the cache but neither aborts it nor detaches its
+observers. The observer keeps pointing at the old mutation, so when that mutation
+settles the observer transitions to success or error and reports the **previous
+account's** result and variables.
+
+I reproduced this independently against the installed TanStack version before
+writing any fix, with a throwaway probe that was deleted afterwards. Asserted
+directly, and all assertions passed:
+
+1. the old action is in flight — `client.isMutating()` is 1;
+2. `MutationCache.clear()` runs — `getAll().length` is 0;
+3. the observer's options are replaced for a new identity;
+4. the old action settles;
+5. the **same** observer reports `status: "success"`, holds the old result, and
+   holds the old variables;
+6. a **freshly constructed** observer, by contrast, is `status: "idle"` with no
+   data, no variables, and not pending.
+
+Step 5 is the defect and step 6 is the fix, both established as facts about the
+installed library rather than assumptions.
+
+Consequences, as Codex described them:
+
+- the new account could receive the previous account's success or failure banner;
+- the new account's controls could stay disabled by the previous account's pending
+  request;
+- the previous account's user id, team id, and query key remained readable from
+  observer state.
+
+The database write and the refetch key remained correctly scoped to the original
+account. **This was a UI, privacy, and correctness defect, not a cross-account
+database write.** Round 1's guarantees on the write and the refetch were correct,
+and their tests are untouched and still pass.
+
+## The fix
+
+Three changes, all inside `features/sharing/`.
+
+### 1. An identity-keyed observer boundary
+
+`sharingIdentityBoundaryKey(userId)` produces a React `key` for the subtree that
+owns the hooks. `CheckInSharingSection` is now **only** the boundary: it reads the
+verified identity from `useAuth` and renders `SharingControls` under that key.
+`SharingControls` owns `useCheckInSharingQuery` and `useSharingAction`.
+
+On a verified identity change the key changes, so React unmounts the old subtree —
+destroying its mutation observer and its query observer — and mounts fresh ones. A
+freshly constructed observer holds no current mutation, so the new identity begins
+fully idle.
+
+Keyed, **not** reset by an effect. A reset effect would render one frame of the
+previous account's outcome before clearing it; a changed key means the old observer
+does not exist when the new one is created. Signing out is an identity change like
+any other, so it also remounts.
+
+`MutationCache.clear()` is unchanged and still necessary — it stops the old
+mutation being found again — but relying on it alone was the defect.
+
+### 2. One place observer state becomes something rendered
+
+`readSharingOutcome` maps mutation state to exactly what the section renders:
+`busy`, `busyTeamId`, `successAction`, `failedAction`. Pure, total, and defensive —
+each branch requires **both** the status flag and the value it uses, so a state
+claiming success without data, or an error without variables, renders no banner
+rather than a partial one. Busy is checked first, so a second action starting
+disables everything even if a previous outcome lingers.
+
+This makes "the new identity begins fully idle" a property of a tested function
+rather than a hope about lifecycle ordering, and it is what lets the regression feed
+a **genuine `MutationObserver` result** through the exact function the component
+uses.
+
+### 3. Mutation data minimized
+
+`SharingActionResult` is now `{ action }`. The auth-scoped key, the owner, and the
+team were only ever needed _inside_ `mutationFn`, and mutation data outlives its
+identity on an active observer, so keeping authorization metadata there was part of
+the leak. They are now locals; the captured key is still proved to be used, by the
+existing refetch assertion.
+
+## What was NOT changed
+
+`auth-provider.tsx`, `lib/query/client.ts`, and their tests are outside TASK-014
+ownership and were **not modified**. The regression _imports_ the real
+`clearAuthScopedQueries` rather than reimplementing or changing it.
+
+The Round 1 pending-options test is **not weakened**. It still proves the old
+action and its key cannot be redirected. The new tests prove the separate property
+that the old observer's state cannot appear in the new account.
+
+## Changed files
+
+Six, all inside the already-owned paths.
+
+| File                                         | Change                                                                              |
+| -------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `features/sharing/identity-boundary.ts`      | **new** — the boundary key and `readSharingOutcome`                                 |
+| `features/sharing/identity-boundary.test.ts` | **new** — the lifecycle regression and the outcome audit                            |
+| `features/sharing/sharing-section.tsx`       | split into the boundary and `SharingControls`; reads state via `readSharingOutcome` |
+| `features/sharing/query-options.ts`          | `SharingActionResult` minimized to `{ action }`; key kept as a local                |
+| `features/sharing/query-options.test.ts`     | updated for the minimized result                                                    |
+| `features/sharing/source-safety.test.ts`     | two AST guards for the boundary; scanned-file count 9 → 10                          |
+
+No database file, generated type, dependency, lockfile, navigation, shared
+component, theme file, or runtime auth/cache module was touched — audited
+explicitly with `git status --porcelain` over each forbidden path.
+
+## The lifecycle regression
+
+`features/sharing/identity-boundary.test.ts`, using the installed TanStack
+implementation and no component renderer.
+
+The core test drives the real sequence for **both** old-action success and
+old-action failure:
+
+1. the old identity's action starts; `client.isMutating()` is asserted to be 1, so
+   it is genuinely in flight;
+2. the real `clearAuthScopedQueries(client)` runs; the mutation cache is asserted
+   empty;
+3. `sharingBoundaryChanged(OLD, NEW)` is asserted true — the key changed, which is
+   what makes React remount — and the old observer is detached exactly as an unmount
+   detaches it;
+4. the new identity's observer is created fresh and subscribed;
+5. only then does the old action settle;
+6. assertions, all reduced to safe values:
+   - the new observer received **zero notifications**;
+   - the new observer reduces to
+     `idle|no-data|no-error|no-variables|not-pending|not-success|not-failure`;
+   - the derived outcome reduces to `idle|no-busy-team|no-success|no-failure`, and
+     `isIdleSharingOutcome` is true, so the new account's controls are not disabled;
+   - the old write recorded only `grant:A`;
+   - the old refetch owner label is only `owner-old`, never `owner-new` or
+     `unknown`;
+   - the replacement identity was never written to and never refreshed.
+
+Supporting tests:
+
+- **the positive control** — reusing the same observer with swapped options, which
+  is what `clearAuthScopedQueries` alone leaves you with, is asserted to notify the
+  observer and to leave it non-idle. This is the guard required by the task: it
+  fails if TanStack ever starts detaching observers on `MutationCache.clear()`, at
+  which point the boundary would be belt-and-braces rather than load-bearing;
+- **an unchanged identity keeps a live action visible** — the boundary must not be
+  so eager that an ordinary rerender cancels an action or hides its busy state.
+  Asserted as `busy|busy-team-A|no-success|no-failure` then
+  `idle|no-busy-team|success-grant|no-failure`;
+- **boundary key behaviour** — distinct per identity, distinct for signed out,
+  stable for an unchanged identity, empty id treated as no identity, and three
+  distinct keys across the four transitions the app can make (a count only);
+- **the outcome audit** — success path, error path, busy-team selection, busy
+  preferred over a lingering outcome, no banner from an inconsistent state, and no
+  busy team when pending variables are absent;
+- **result minimization** — `Object.keys(result)` is exactly `["action"]`, and the
+  serialized result is scanned for the old user id, the new user id, both team ids,
+  `auth-scoped`, and the team-name fragment, reporting no leaks.
+
+### Structural guards for the `key` prop
+
+The boundary is a `key` prop, which cannot be exercised behaviourally without a
+component renderer this task may not add. Two AST guards in `source-safety.test.ts`
+pin it instead:
+
+- exactly **one** JSX `key` in `sharing-section.tsx` is derived from
+  `sharingIdentityBoundaryKey`, and the section names `useAuth`;
+- the only properties read off `mutation` in the section are `error` and `mutate`,
+  so every piece of mutation _state_ must arrive through `readSharingOutcome`.
+
+## Safe mutation evidence
+
+Five reversible mutations, applied one at a time with the Round 1 harness: hash the
+file, mutate, verify changed, run the focused suite with output captured to a file
+that is never printed, restore from backup, compare hashes. Every restore was
+byte-identical and every leak scan returned **0**.
+
+| Mutation                                                | Failing tests | Files | Leak count | Restored |
+| ------------------------------------------------------- | ------------- | ----- | ---------- | -------- |
+| make the boundary key constant                          | 4             | 1     | 0          | yes      |
+| remove the boundary key from the section                | 1             | 1     | 0          | yes      |
+| read `mutation.isPending` directly in the section again | 1             | 1     | 0          | yes      |
+| put the user id and team id back into mutation data     | 2             | 2     | 0          | yes      |
+| make the outcome ignore the busy state                  | 4             | 1     | 0          | yes      |
+
+The two boundary mutations were additionally confirmed to fail **for the intended
+reason** by extracting the failing test _names_. Test titles are fixed English
+strings authored in this repository, so printing them discloses nothing; assertion
+diffs were still never printed and the leak scan still ran over the full output.
+
+- constant key → `distinguishes two verified identities`,
+  `distinguishes signing out from being signed in`,
+  `never collides across the transitions the app can make`, and the lifecycle
+  regression `never updates the new identity's rendered state`;
+- removed key → `keys the hook-owning subtree by the verified identity`.
+
+### A gap found in this task's own tests
+
+Recorded rather than quietly corrected.
+
+On its first run, the mutation that **removes the boundary key from the section**
+was **not detected**: 0 failing tests, 144 passing. The behavioural regression
+constructs its observers directly, so it could not see a missing `key` prop in JSX,
+and this task may not add a component renderer.
+
+The two AST guards above were added specifically to close that gap, and the mutation
+was re-run to confirm it now fails with 1 failing test in
+`source-safety.test.ts > keys the hook-owning subtree by the verified identity`.
+Both the escape and its closure happened before the fix was committed.
+
+After the last restore, the unmutated suite was re-run and passes.
+
+## Commands run and results — Round 2
+
+The database contract is unchanged, so per the task instruction the local Supabase
+stack was **not started** for Round 2. No database dependency was discovered. The
+Round 1 pgTAP evidence stands as recorded: 5 files, 583 assertions,
+`Result: PASS`, DB lint 0 warnings, stack stopped with 0 containers remaining.
+
+| Command                                                               | Result                                                          |
+| --------------------------------------------------------------------- | --------------------------------------------------------------- |
+| focused Vitest (`src/features/sharing`, `src/lib/query/keys.test.ts`) | **8 files, 146 tests, all passing** (Round 1: 7 / 128)          |
+| `corepack pnpm test`                                                  | **34 files, 614 tests, all passing** (Round 1: 33 / 596)        |
+| `corepack pnpm format:check`                                          | exit 0, all files match Prettier style                          |
+| `corepack pnpm lint`                                                  | exit 0, no ESLint output                                        |
+| `corepack pnpm typecheck`                                             | exit 0, `tsc --noEmit` clean                                    |
+| `corepack pnpm exec expo export --platform web`                       | exit 0, 34 output files, **13 static routes — still unchanged** |
+| `git diff --check`                                                    | clean                                                           |
+| changed-file audit                                                    | 6 files, all inside the owned paths                             |
+| forbidden-path audit                                                  | none touched                                                    |
+| `git status --short`                                                  | empty                                                           |
+
+## Round 2 commit ledger
+
+| Commit                                       | Purpose                                          | Changed files |
+| -------------------------------------------- | ------------------------------------------------ | ------------- |
+| `ffcca606441f1223aa594fe7ff7ae90d81df9a5e`   | Round 1 documentation closeout (starting `HEAD`) | 2             |
+| `2929bf76f049e2f1fefc23d6e844c87311b67b3c`   | Round 2 fix and regression                       | 6             |
+| branch `HEAD`                                | Round 2 documentation closeout                   | 2             |
+| **Complete TASK-014 diff against `3b94742`** |                                                  | **23**        |
+
+No commit was amended, rebased, squashed, or rewritten. `0974b43`, `107bea8`, and
+`ffcca60` are all untouched.
+
+## Privacy impact — Round 2
+
+Round 2 **reduces** exposure; it adds none.
+
+- The previous account's user id, team id, and query key are no longer reachable
+  from observer state, because they are no longer in mutation data.
+- One person can no longer be shown another person's consent outcome, busy control,
+  or disabled control.
+- Still no health measurement anywhere in this feature, still nothing logged, still
+  nothing persisted to disk, and the cache remains memory-only and auth-scoped.
+- No new dependency, so no new supply-chain surface.
+- All identifiers and names in the new tests are synthetic. Observer results,
+  variables, keys, user ids, team ids, and captured errors are reduced to fixed
+  words, booleans, counts, owner labels, or case names before any assertion; no
+  `MutationObserverResult` is ever passed to `expect`.
+
+## Remaining limitations — Round 2
+
+The eight Round 1 limitations stand. Round 2 adds two:
+
+9. **The `key`-prop boundary is verified structurally, not by rendering.** The
+   behavioural regression proves that a fresh observer is idle and that the old
+   action cannot notify it; the AST guards prove the section actually wires the key
+   and never reads mutation state directly. Neither renders the component, because
+   this task may not add a component renderer. A component-level test would close
+   the last inch and needs a task that owns a renderer dependency.
+10. **The old action is allowed to run to completion** under its original scope
+    rather than being aborted. That is deliberate — the athlete asked for it and its
+    write and refetch are correctly scoped — but it means a revoke started just
+    before signing out still completes, invisibly to the new session. Aborting it
+    instead would need an abort signal threaded through the repository and is a
+    product decision, not a bug fix.
+
+## Remaining reviewer questions — Round 2
+
+The seven Round 1 questions stand where not superseded. Question 1 is partly
+answered by this round: removing `onSuccess` was necessary but not sufficient, and
+the observer boundary is the other half.
+
+New:
+
+8. **Is the identity-keyed remount the right boundary**, or would you prefer the
+   inner component to take the verified user id as an explicit prop as well, so the
+   dependency is visible in its signature rather than only in its key?
+9. **Should the old in-flight action be aborted** on an identity change rather than
+   allowed to finish under its original scope? See limitation 10.
+10. **Are the two AST guards an acceptable substitute** for a rendered assertion on
+    the `key` prop, given the no-renderer constraint — and should a follow-up task
+    own a component renderer so this and the section's other display rules can be
+    tested by rendering?
+11. **Is `readSharingOutcome` preferring `busy` over a lingering success the right
+    precedence** for the moment a second action starts while a previous banner is
+    still shown?
+
+Stopping here for **GPT/Codex read-only Round 2 review**. Nothing is merged, the
+worktree is preserved, and nothing in the Round 1 record above has been rewritten.

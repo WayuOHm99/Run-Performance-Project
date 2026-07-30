@@ -1,10 +1,18 @@
 # TASK-014: Athlete Check-in Sharing Controls Mobile
 
-Status: **Implemented and verified locally. Awaiting GPT/Codex read-only
-review.**
+Status: **Round 2 finding fixed and verified locally. Awaiting GPT/Codex
+read-only Round 2 review.**
 
-Implementation commit: `107bea825a10a7b97917b1d9aa41d5f390c2900d`. The handoff
-with the full evidence is at `docs/app/handoffs/TASK-014.md`.
+- Round 1 implementation commit: `107bea825a10a7b97917b1d9aa41d5f390c2900d`
+- Round 2 fix commit: `2929bf76f049e2f1fefc23d6e844c87311b67b3c`
+
+GPT/Codex reviewed Round 1 and raised **one Medium** finding — cross-account
+mutation observer state. The Product Owner approved it and it is **fixed**; see
+"Round 2" below and the Round 2 section of `docs/app/handoffs/TASK-014.md`, which
+carries the reproduction, the test counts, and the mutation evidence.
+
+Round 2 changed no database contract, no dependency, and no file outside the
+already-owned paths.
 
 Writer: Claude Code (sole writer)
 
@@ -270,13 +278,15 @@ Every file below is inside the owned paths. Nothing else was created or changed.
 | `features/sharing/copy.ts`                   | every user-facing string, plus the two accessible-label builders                               |
 | `features/sharing/sharing-section.tsx`       | the Profile/Me section and all seven display states                                            |
 | `features/sharing/sharing-action-button.tsx` | the per-team control, with its own accessible label                                            |
+| `features/sharing/identity-boundary.ts`      | the identity-keyed observer boundary and `readSharingOutcome` (Round 2)                        |
 | `features/sharing/failure-probe.ts`          | test support; reduces a rejection to a safe vocabulary                                         |
 | `app/profile.tsx`                            | renders the section between the name form and sign-out                                         |
 | `lib/query/keys.ts`                          | the `checkInSharing` auth-scoped key                                                           |
 
-Six test files accompany them: `domain.test.ts`, `sharing-repository.test.ts`,
-`query-options.test.ts`, `action-plan.test.ts`, `source-safety.test.ts`, and
-`logging.test.ts`, plus additions to `lib/query/keys.test.ts`.
+Seven test files accompany them: `domain.test.ts`, `sharing-repository.test.ts`,
+`query-options.test.ts`, `action-plan.test.ts`, `identity-boundary.test.ts`,
+`source-safety.test.ts`, and `logging.test.ts`, plus additions to
+`lib/query/keys.test.ts`.
 
 Two design points are worth a reviewer's attention because they differ from the
 obvious reading of the contract:
@@ -292,6 +302,89 @@ obvious reading of the contract:
    athlete sharing is still off when it is on. The refetch rejection is therefore
    swallowed inside `mutationFn`; the query owns its own error state and the
    section shows the load error and its retry instead.
+3. **The section is an identity boundary, not a hook holder** (Round 2). The
+   exported component reads the verified identity and renders the hook-owning
+   subtree under a key derived from it. See "Round 2" below.
+
+## Round 2 — cross-account mutation observer state
+
+Status: **fixed and proved by a lifecycle regression.** Approved by the Product
+Owner. Fix commit `2929bf76f049e2f1fefc23d6e844c87311b67b3c`.
+
+### The finding
+
+`CheckInSharingSection` consumed `mutation.isPending`, `mutation.isSuccess` /
+`mutation.data`, and `mutation.isError` / `mutation.variables` without proving they
+belonged to the current verified identity.
+
+An **active** `MutationObserver` survives removal of its mutation from the
+`MutationCache`. `clearAuthScopedQueries` calls `MutationCache.clear()`, which
+removes the mutation but neither aborts it nor detaches its observers. Reproduced
+against the installed TanStack version:
+
+1. an old-identity action starts and stays pending;
+2. the auth-scoped query and mutation caches are cleared;
+3. the observer's options are replaced for a new identity;
+4. the old action settles;
+5. the still-active observer becomes **success with the old result**, even though
+   the mutation cache is empty.
+
+Consequences: the new account could receive the previous account's success or
+failure banner; its controls could stay disabled by the previous account's pending
+request; and the previous account's user id, team id, and query key remained
+readable from observer state.
+
+The database write and the refetch key remained correctly scoped to the original
+account, so this was a **UI, privacy, and correctness defect, not a cross-account
+database write.** Round 1's guarantees on the write and the refetch were correct
+and are unchanged.
+
+### The fix
+
+`sharingIdentityBoundaryKey(userId)` produces a React `key` for the subtree that
+owns the hooks. On a verified identity change the key changes, React **unmounts**
+the old subtree — destroying its mutation and query observers — and mounts fresh
+ones. A freshly constructed observer holds no current mutation, so the new identity
+begins fully idle.
+
+Keyed rather than reset by an effect: a reset effect would render one frame of the
+previous account's outcome before clearing it, whereas a changed key means the old
+observer no longer exists when the new one is created.
+
+`MutationCache.clear()` is unchanged and still necessary — it stops the old
+mutation being found again — but relying on it alone was the defect.
+
+`readSharingOutcome` is now the single place observer state becomes something
+rendered. It is pure and total, and each branch requires **both** the status flag
+and the value it uses, so a state claiming success without data renders no banner.
+
+`SharingActionResult` is minimized to `{ action }`. The key, owner, and team were
+only ever needed inside `mutationFn`, and mutation data outlives its identity on an
+active observer, so they are now locals.
+
+### Required behaviour, and where it is proved
+
+| Requirement                                                                  | Proof                                                                                                      |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| a verified identity change creates a fresh observer boundary                 | `sharingBoundaryChanged` is true across identities and false for an unchanged one                          |
+| the new identity begins not busy, with no banner, no old variables or result | the new observer reduces to `idle\|no-data\|no-error\|no-variables\|not-pending\|not-success\|not-failure` |
+| controls not disabled by the previous account                                | the derived outcome reduces to `idle\|no-busy-team\|no-success\|no-failure`                                |
+| the old action may finish but never updates the new rendered state           | the new observer receives **zero** notifications while the old action settles                              |
+| the old write is never redirected                                            | the old harness recorded only `grant:A`                                                                    |
+| the old refetch is never redirected                                          | the old refetch owner label is only `owner-old`; never `owner-new`                                         |
+| query state stays auth-scoped and cleared by the existing mechanism          | the real `clearAuthScopedQueries` is invoked and the mutation cache is asserted empty                      |
+| removing the boundary makes the regression fail                              | a positive control proves the hazard is still reproducible, and two mutations make the regression fail     |
+
+Both directions of the old action are covered — success and failure — and the
+signed-out transition is covered as an identity change like any other.
+
+Because the boundary is a `key` prop and this task may not add a component
+renderer, two AST guards pin it structurally: exactly one JSX `key` in the section
+is derived from `sharingIdentityBoundaryKey`, and the only properties read off
+`mutation` are `error` and `mutate`.
+
+`auth-provider.tsx`, `lib/query/client.ts`, and their tests were **not modified**.
+`clearAuthScopedQueries` is imported by the regression, not changed.
 
 ## Acceptance criteria
 
@@ -323,7 +416,11 @@ proves each one; full counts are in the handoff.
 - [x] 10. Identity always comes from verified auth state — the user id comes only
       from `useAuth`; five non-identity values are refused before any query.
 - [x] 11. Account replacement during an in-flight action cannot redirect the
-      refresh — proved with `MutationObserver.setOptions` mid-flight.
+      refresh — proved with `MutationObserver.setOptions` mid-flight. **Extended in
+      Round 2:** the old action's observer state also cannot appear under the new
+      identity, proved by the lifecycle regression driving the real
+      `clearAuthScopedQueries` and asserting the new observer receives zero
+      notifications and stays fully idle, for both old-action success and failure.
 - [x] 12. Offline actions are not paused, queued, retried, or executed on
       reconnect — plus a positive control showing the library default _would_
       pause.
@@ -491,6 +588,38 @@ server messages; every mutation reported a leak count of **0**.
 | accept a forged team id as a write target                           | 6             | 2     |
 
 The unmutated suite was re-run afterwards: 128 focused and 596 workspace tests
+pass.
+
+### Round 2 result
+
+Five further mutations, same harness and same discipline. Each changed the file,
+was detected, and was restored byte-identically; every leak scan returned **0**.
+
+| Mutation                                                | Failing tests | Files |
+| ------------------------------------------------------- | ------------- | ----- |
+| make the boundary key constant                          | 4             | 1     |
+| remove the boundary key from the section                | 1             | 1     |
+| read `mutation.isPending` directly in the section again | 1             | 1     |
+| put the user id and team id back into mutation data     | 2             | 2     |
+| make the outcome ignore the busy state                  | 4             | 1     |
+
+The two boundary mutations were additionally confirmed to fail **for the intended
+reason** by extracting the failing test _names_ — fixed English titles authored in
+this repo, so printing them discloses nothing:
+
+- constant key → `distinguishes two verified identities`,
+  `distinguishes signing out from being signed in`,
+  `never collides across the transitions the app can make`, and the lifecycle
+  regression `never updates the new identity's rendered state`;
+- removed key → `keys the hook-owning subtree by the verified identity`.
+
+Removing the boundary key from the section initially escaped detection, because no
+test renders the component and this task may not add a component renderer. That gap
+was closed with the two AST guards before the fix was committed, and the mutation
+was re-run to confirm it now fails. The gap and its closure are recorded rather
+than quietly fixed.
+
+The unmutated suite was re-run afterwards: 146 focused and 614 workspace tests
 pass.
 
 ## Known limitations (recorded before implementation)
