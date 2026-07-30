@@ -2,6 +2,7 @@ import { StyleSheet, Text, View } from "react-native";
 
 import { Notice } from "@/components/notice";
 import { PrimaryButton } from "@/components/primary-button";
+import { useAuth } from "@/features/auth/auth-provider";
 import { colors, radius, spacing, type } from "@/theme/tokens";
 
 import { planSharingAction } from "./action-plan";
@@ -12,6 +13,10 @@ import {
 } from "./copy";
 import type { TeamSharingState } from "./domain";
 import { sharingErrorMessage } from "./errors";
+import {
+  readSharingOutcome,
+  sharingIdentityBoundaryKey,
+} from "./identity-boundary";
 import { SharingActionButton } from "./sharing-action-button";
 import {
   useCheckInSharingQuery,
@@ -44,8 +49,30 @@ const NO_TEAMS: readonly TeamSharingState[] = [];
  * 3. **One action at a time.** Any in-flight action disables every control,
  *    including other teams', which is both the duplicate-press guard and the
  *    reason a Team A action can never be confused with a Team B one.
+ *
+ * This component is only the identity boundary. It reads the verified identity and
+ * renders the hook-owning subtree under a key derived from it, so a verified
+ * identity change **unmounts** the old query and mutation observers and mounts fresh
+ * ones. That is what stops the previous account's in-flight action from settling
+ * into the new account's rendered state; see `identity-boundary.ts` for why
+ * `clearAuthScopedQueries` alone does not achieve it.
  */
 export function CheckInSharingSection() {
+  const { identity } = useAuth();
+
+  // Keyed, not reset by an effect. A reset effect would render one frame of the
+  // previous account's outcome before clearing it; a changed key means the old
+  // observer no longer exists when the new one is created.
+  return <SharingControls key={sharingIdentityBoundaryKey(identity?.userId)} />;
+}
+
+/**
+ * The sharing controls for exactly one verified identity.
+ *
+ * Owns the query and the mutation. Mounted under an identity-derived key, so every
+ * piece of observer state it can read belongs to the identity it was mounted for.
+ */
+function SharingControls() {
   const query = useCheckInSharingQuery();
 
   // The loaded list is also what authorizes a write: `useSharingAction` resolves
@@ -53,8 +80,12 @@ export function CheckInSharingSection() {
   const teams = query.data ?? NO_TEAMS;
   const mutation = useSharingAction(teams);
 
-  const busy = mutation.isPending;
-  const busyTeamId = busy ? mutation.variables?.teamId : undefined;
+  // The single place observer state becomes something rendered. Pure and total, so
+  // "a fresh observer renders nothing" is asserted directly against a real observer
+  // result rather than inferred from a rendered tree.
+  const outcome = readSharingOutcome(mutation);
+  const busy = outcome.busy;
+  const busyTeamId = outcome.busyTeamId;
 
   const press = (teamId: string) => {
     // The plan is where "refuse a press while busy" and "take the direction from
@@ -69,11 +100,6 @@ export function CheckInSharingSection() {
 
     mutation.mutate(plan.variables);
   };
-
-  const outcome = mutation.isSuccess ? mutation.data : null;
-  const failedAction = mutation.isError
-    ? mutation.variables?.action
-    : undefined;
 
   return (
     <View style={styles.section}>
@@ -146,25 +172,25 @@ export function CheckInSharingSection() {
             <Text style={styles.status}>{SHARING_COPY.waitHint}</Text>
           ) : null}
 
-          {outcome === null ? null : (
+          {outcome.successAction === null ? null : (
             <Notice
               title={
-                outcome.action === "grant"
+                outcome.successAction === "grant"
                   ? SHARING_COPY.grantedTitle
                   : SHARING_COPY.revokedTitle
               }
               message={
-                outcome.action === "grant"
+                outcome.successAction === "grant"
                   ? SHARING_COPY.grantedMessage
                   : SHARING_COPY.revokedMessage
               }
             />
           )}
 
-          {failedAction === undefined ? null : (
+          {outcome.failedAction === null ? null : (
             <Notice
               title={
-                failedAction === "grant"
+                outcome.failedAction === "grant"
                   ? SHARING_COPY.grantErrorTitle
                   : SHARING_COPY.revokeErrorTitle
               }

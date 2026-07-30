@@ -63,17 +63,19 @@ export type SharingActionVariables = {
 };
 
 /**
- * What a completed action reports back.
+ * What a completed action reports back: the direction, and nothing else.
  *
- * The exact auth-scoped key that was refreshed, plus the owner, the team, and the
- * direction. All non-health, all safe to hold as mutation data — and deliberately
- * **not** a sharing state: the state the UI shows comes only from the refetched
- * query, never from this value.
+ * Deliberately minimal. Earlier this also carried the auth-scoped key, the owner,
+ * and the team, which were only ever needed *inside* `mutationFn` — and mutation
+ * data outlives the identity that produced it on an active observer, so keeping
+ * authorization metadata here meant the previous account's user id, team id, and
+ * query key could still be read from observer state after an account change. They
+ * are now locals; the only field that survives is the one the success banner needs.
+ *
+ * Deliberately **not** a sharing state either: what the section shows comes only
+ * from the refetched query, never from this value.
  */
 export type SharingActionResult = {
-  readonly queryKey: readonly unknown[];
-  readonly userId: string;
-  readonly teamId: string;
   readonly action: SharingAction;
 };
 
@@ -141,13 +143,10 @@ export function sharingActionMutationOptions(args: {
         throw new SharingDataError(intent, "denied");
       }
 
-      // Captured before the await, from the identity this attempt belongs to.
-      const result: SharingActionResult = {
-        queryKey: authScopedKeys.checkInSharing(userId),
-        userId,
-        teamId: variables.teamId,
-        action: variables.action,
-      };
+      // Captured before the await, from the identity this attempt belongs to, and
+      // kept as a local rather than returned: nothing downstream needs it, and
+      // mutation data outlives its identity on an active observer.
+      const invalidationKey = authScopedKeys.checkInSharing(userId);
 
       if (variables.action === "grant") {
         await args.grant(target);
@@ -158,7 +157,7 @@ export function sharingActionMutationOptions(args: {
       try {
         // Awaited here, not in a callback, so success is reported only after the
         // server's own list has been re-read under the captured key.
-        await args.refetchKey(result.queryKey);
+        await args.refetchKey(invalidationKey);
       } catch {
         // The write already succeeded, so a failed refresh must not be reported as
         // a failed consent change — that wording would tell the athlete sharing is
@@ -166,7 +165,7 @@ export function sharingActionMutationOptions(args: {
         // section shows the load error and its retry instead.
       }
 
-      return result;
+      return { action: variables.action };
     },
   };
 }

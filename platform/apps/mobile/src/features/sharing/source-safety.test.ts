@@ -8,6 +8,7 @@ import actionPlanSource from "./action-plan.ts?raw";
 import copySource from "./copy.ts?raw";
 import domainSource from "./domain.ts?raw";
 import errorsSource from "./errors.ts?raw";
+import identityBoundarySource from "./identity-boundary.ts?raw";
 import queryOptionsSource from "./query-options.ts?raw";
 import actionButtonSource from "./sharing-action-button.tsx?raw";
 import repositorySource from "./sharing-repository.ts?raw";
@@ -46,6 +47,7 @@ const FEATURE_SOURCES: readonly SourceFile[] = [
   ["copy.ts", copySource],
   ["domain.ts", domainSource],
   ["errors.ts", errorsSource],
+  ["identity-boundary.ts", identityBoundarySource],
   ["query-options.ts", queryOptionsSource],
   ["sharing-action-button.tsx", actionButtonSource],
   ["sharing-repository.ts", repositorySource],
@@ -116,6 +118,86 @@ function stringLiteralsIn(source: ts.SourceFile): ReadonlySet<string> {
   ts.forEachChild(source, visit);
 
   return values;
+}
+
+/**
+ * The property names read off one object identifier.
+ *
+ * Used to prove the section never touches mutation *state* directly: every piece of
+ * it must arrive through `readSharingOutcome`, which is what the identity boundary
+ * is asserted against in `identity-boundary.test.ts`.
+ */
+function propertyAccessesOn(
+  source: ts.SourceFile,
+  objectName: string,
+): ReadonlySet<string> {
+  const properties = new Set<string>();
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === objectName
+    ) {
+      properties.add(node.name.text);
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  ts.forEachChild(source, visit);
+
+  return properties;
+}
+
+/**
+ * How many JSX `key` attributes call the given function.
+ *
+ * The identity boundary is a `key` prop, so it cannot be verified behaviourally
+ * without a component renderer, which this task may not add. Asserting it
+ * structurally is what makes deleting the prop a test failure rather than a silent
+ * regression — see the mutation evidence in the handoff.
+ */
+function jsxKeysCalling(source: ts.SourceFile, functionName: string): number {
+  let found = 0;
+
+  const callsFunction = (node: ts.Node): boolean => {
+    let calls = false;
+
+    const walk = (inner: ts.Node): void => {
+      if (
+        ts.isCallExpression(inner) &&
+        ts.isIdentifier(inner.expression) &&
+        inner.expression.text === functionName
+      ) {
+        calls = true;
+      }
+
+      ts.forEachChild(inner, walk);
+    };
+
+    walk(node);
+
+    return calls;
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isJsxAttribute(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "key" &&
+      node.initializer !== undefined &&
+      callsFunction(node.initializer)
+    ) {
+      found += 1;
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  ts.forEachChild(source, visit);
+
+  return found;
 }
 
 /** Module specifiers of every import and export-from declaration. */
@@ -264,7 +346,7 @@ describe("the TASK-014 source scan", () => {
     );
 
     expect(empty).toEqual([]);
-    expect(FEATURE_SOURCES.length).toBe(9);
+    expect(FEATURE_SOURCES.length).toBe(10);
     expect(OUTSIDE_SOURCES.length).toBe(2);
   });
 
@@ -324,6 +406,32 @@ describe("the TASK-014 source scan", () => {
         identifiers.has(field),
       ),
     ).toEqual([]);
+  });
+
+  it("keys the hook-owning subtree by the verified identity", () => {
+    // The Round 2 fix is a `key` prop, which cannot be exercised without a
+    // component renderer this task may not add. Structurally: exactly one JSX `key`
+    // in the section is derived from `sharingIdentityBoundaryKey`. Deleting it —
+    // which is what reusing the observer across accounts looks like — fails here.
+    const source = parse("sharing-section.tsx", sectionSource);
+
+    expect(jsxKeysCalling(source, "sharingIdentityBoundaryKey")).toBe(1);
+    // And the identity it keys on comes from the auth provider, not a prop.
+    expect(identifiersIn(source).has("useAuth")).toBe(true);
+  });
+
+  it("never reads mutation state directly in the section", () => {
+    // `isPending`, `isSuccess`, `isError`, `data`, and `variables` must arrive
+    // through `readSharingOutcome`, which is the function the identity-boundary
+    // regression asserts against a real observer result. `error` is passed straight
+    // to the sanitizer and `mutate` starts an action; nothing else is allowed.
+    const accessed = propertyAccessesOn(
+      parse("sharing-section.tsx", sectionSource),
+      "mutation",
+    );
+
+    // Property names only.
+    expect([...accessed].sort()).toEqual(["error", "mutate"]);
   });
 
   it("declares networkMode and retry in the mutation options module", () => {

@@ -336,24 +336,19 @@ describe("sharingActionMutationOptions", () => {
     expect(harness.refetchLeaks()).toEqual([]);
   });
 
-  it("returns the captured key and no sharing state", async () => {
+  it("returns only the direction, and no sharing state", async () => {
     const harness = createHarness(USER_ID);
 
     const result = await harness.options.mutationFn(GRANT_A);
 
     // Field names only. There is deliberately no `sharing` field: the state the UI
-    // shows comes from the refetched query, never from this value.
-    expect(Object.keys(result).sort()).toEqual([
-      "action",
-      "queryKey",
-      "teamId",
-      "userId",
-    ]);
-    expect(describeKey(result.queryKey)).toBe(
-      "auth-scoped|owner-a|check-in-sharing|3",
-    );
+    // shows comes from the refetched query, never from this value. There is also no
+    // key, owner, or team, because mutation data outlives the identity that produced
+    // it on an active observer — see `identity-boundary.test.ts`. The captured key is
+    // still proved to be used, by the refetch assertion above.
+    expect(Object.keys(result).sort()).toEqual(["action"]);
     expect(result.action).toBe("grant");
-    expect(leakFragments(result.queryKey)).toEqual([]);
+    expect(leakFragments(result)).toEqual([]);
   });
 
   it("refuses to act without a verified identity", async () => {
