@@ -62,13 +62,17 @@ async function countConsoleCalls(run: () => Promise<void>): Promise<number> {
 
   try {
     await run();
+
+    // Counted here, before the `finally` restores the spies. `mockRestore` also
+    // resets the mock, which clears `mock.calls` — reading the totals after it
+    // made this helper report zero unconditionally, so the whole file passed
+    // vacuously. Returning from inside the `try` evaluates the count first.
+    return spies.reduce((total, spy) => total + spy.mock.calls.length, 0);
   } finally {
     for (const spy of spies) {
       spy.mockRestore();
     }
   }
-
-  return spies.reduce((total, spy) => total + spy.mock.calls.length, 0);
 }
 
 describe("no health value reaches a log", () => {
