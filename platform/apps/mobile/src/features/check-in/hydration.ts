@@ -15,17 +15,23 @@
  *    controls. When another device was the last-completed writer, the cache held
  *    the winning row while the athlete kept looking at their losing values.
  *
- * The fix is a generation key that includes the offset, plus explicit `dirty` and
- * `awaitingRefresh` flags. The precedence in `shouldHydrate` is the whole policy:
+ * The fix is a generation key that includes the offset, plus one `dirty` flag.
+ * The precedence in `shouldHydrate` is the whole policy:
  *
  *   - data for another generation is ignored outright;
- *   - a generation that has never been hydrated always hydrates;
- *   - a deliberately requested refresh always hydrates, which is what carries a
- *     post-save confirmation and an offset-only rollover;
+ *   - a generation that has never been hydrated always hydrates, which is what
+ *     carries a first load and either kind of rollover;
  *   - otherwise unsaved edits win, so an ordinary background refetch never
  *     discards deliberate typing;
- *   - otherwise an ordinary refetch hydrates, which is how a concurrent
- *     last-completed write becomes visible.
+ *   - otherwise the refetch hydrates, which is how a post-save confirmation and a
+ *     concurrent last-completed write become visible.
+ *
+ * A completed save is expressed as "the draft is no longer dirty" rather than as
+ * a separate "expecting a refresh" flag. An earlier version carried both; the
+ * flag turned out never to change an outcome, because clearing `dirty` already
+ * opts the following refetch in — and dropping it is also better behaviour, since
+ * an edit made between pressing save and the refetch landing is now protected
+ * rather than overwritten.
  *
  * Everything here is pure. The draft lives in component state only and is never
  * persisted, queued, or written anywhere outside the approved server row.
@@ -56,8 +62,6 @@ export type CheckInFormState = {
   readonly hydratedFor: GenerationKey | null;
   /** The athlete changed an answer since the last hydration. */
   readonly dirty: boolean;
-  /** A refresh was deliberately requested and its result should be adopted. */
-  readonly awaitingRefresh: boolean;
   /** Show the rollover notice. */
   readonly rolledOver: boolean;
 };
@@ -68,7 +72,6 @@ export function initialFormState(stamp: LocalDateStamp): CheckInFormState {
     draft: EMPTY_DRAFT,
     hydratedFor: null,
     dirty: false,
-    awaitingRefresh: false,
     rolledOver: false,
   };
 }
@@ -106,11 +109,8 @@ export function shouldHydrate(
     return true;
   }
 
-  if (state.awaitingRefresh) {
-    return true;
-  }
-
-  // Deliberate unsaved edits outrank an ordinary background refetch.
+  // Deliberate unsaved edits outrank a refetch. A completed save clears `dirty`,
+  // which is what lets its own confirming refetch through.
   return !state.dirty;
 }
 
@@ -141,7 +141,6 @@ function sameFormState(a: CheckInFormState, b: CheckInFormState): boolean {
     a.stamp === b.stamp &&
     a.hydratedFor === b.hydratedFor &&
     a.dirty === b.dirty &&
-    a.awaitingRefresh === b.awaitingRefresh &&
     a.rolledOver === b.rolledOver &&
     draftsEqual(a.draft, b.draft)
   );
@@ -168,7 +167,6 @@ function reduce(state: CheckInFormState, event: FormEvent): CheckInFormState {
         draft: draftFromCheckIn(event.checkIn),
         hydratedFor: event.generation,
         dirty: false,
-        awaitingRefresh: false,
       };
     }
 
@@ -181,17 +179,18 @@ function reduce(state: CheckInFormState, event: FormEvent): CheckInFormState {
       };
 
     case "save-succeeded":
-      // Not dirty any more, and the invalidation's refetch is wanted: it carries
+      // Clearing `dirty` is what opts the invalidation's refetch in: it carries
       // whatever the database actually stored, including another device's win.
-      return { ...state, dirty: false, awaitingRefresh: true };
+      return { ...state, dirty: false };
 
     case "rollover":
+      // `hydratedFor: null` is what forces the next data for the new generation
+      // to be adopted, for a date change and an offset-only change alike.
       return {
         stamp: event.stamp,
         draft: EMPTY_DRAFT,
         hydratedFor: null,
         dirty: false,
-        awaitingRefresh: true,
         rolledOver: true,
       };
   }

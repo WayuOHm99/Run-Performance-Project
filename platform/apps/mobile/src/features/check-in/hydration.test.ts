@@ -42,6 +42,12 @@ const LOCAL_EDIT: CheckInDraft = {
   painStatus: "none",
 };
 
+const SECOND_EDIT: CheckInDraft = {
+  rpe: 4,
+  overallFeeling: 4,
+  painStatus: "present",
+};
+
 /** Whether the visible draft is exactly this check-in. Boolean only. */
 function showing(state: CheckInFormState, checkIn: DailyCheckIn): boolean {
   return (
@@ -122,14 +128,30 @@ describe("shouldHydrate", () => {
     expect(shouldHydrate(state, generationKey(BANGKOK))).toBe(false);
   });
 
-  it("adopts a deliberately requested refresh even over unsaved edits", () => {
+  it("adopts the refetch that follows a completed save", () => {
     const state = run(initialFormState(BANGKOK), [
       serverData(BANGKOK, SERVER_ROW),
       { kind: "answer-chosen", draft: LOCAL_EDIT },
       { kind: "save-succeeded" },
     ]);
 
+    // `save-succeeded` is what clears `dirty`, and clearing `dirty` is what lets
+    // the confirming refetch through. Without it the athlete would keep seeing
+    // their submitted values even if the database stored something else.
+    expect(state.dirty).toBe(false);
     expect(shouldHydrate(state, generationKey(BANGKOK))).toBe(true);
+  });
+
+  it("still protects an edit made after saving but before the refetch lands", () => {
+    const state = run(initialFormState(BANGKOK), [
+      serverData(BANGKOK, SERVER_ROW),
+      { kind: "answer-chosen", draft: LOCAL_EDIT },
+      { kind: "save-succeeded" },
+      // The athlete changed their mind while the refresh was in flight.
+      { kind: "answer-chosen", draft: SECOND_EDIT },
+    ]);
+
+    expect(shouldHydrate(state, generationKey(BANGKOK))).toBe(false);
   });
 
   it("adopts an ordinary refetch when there are no unsaved edits", () => {
@@ -271,7 +293,20 @@ describe("after a successful save", () => {
 
     expect(showing(state, SERVER_ROW)).toBe(true);
     expect(state.dirty).toBe(false);
-    expect(state.awaitingRefresh).toBe(false);
+  });
+
+  it("cannot hydrate from the confirming refetch without save-succeeded", () => {
+    // The same sequence with the save-completion event omitted: the draft stays
+    // dirty, so the server-confirmed row is correctly held back. This is what
+    // makes the event above load-bearing rather than decorative.
+    const state = run(initialFormState(BANGKOK), [
+      serverData(BANGKOK, null),
+      { kind: "answer-chosen", draft: LOCAL_EDIT },
+      serverData(BANGKOK, SERVER_ROW),
+    ]);
+
+    expect(showing(state, SERVER_ROW)).toBe(false);
+    expect(showingDraft(state, LOCAL_EDIT)).toBe(true);
   });
 
   it("shows a concurrent last-completed write rather than the losing values", () => {
