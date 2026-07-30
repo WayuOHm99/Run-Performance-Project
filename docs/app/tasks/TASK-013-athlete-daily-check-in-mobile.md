@@ -1,9 +1,17 @@
 # TASK-013: Athlete Daily Check-In Mobile Vertical Slice
 
-Status: **Implemented and verified locally. Awaiting GPT/Codex read-only review.**
+Status: **Round 2 findings fixed and verified locally. Awaiting GPT/Codex
+read-only Round 2 review.**
+
 The Product Owner approved the complete scope and product/security decisions 1–10
-below before implementation started. Results, evidence, and the mutation record
-are in `docs/app/handoffs/TASK-013.md`.
+below before implementation started, and approved all eight Round 2 findings
+(one high, five medium, two low) before those fixes started. Results, evidence,
+the verification record, and the mutation record for both rounds are in
+`docs/app/handoffs/TASK-013.md`.
+
+No approved decision was changed in Round 2. Every fix stayed inside the owned
+paths listed below, and `src/test-support/capture-error.ts` was deliberately not
+modified.
 
 Date: 2026-07-30
 
@@ -254,7 +262,28 @@ terminology and no raw error is exposed to the athlete.
 
 ## Acceptance criteria
 
-All met. Evidence per criterion is tabulated in `docs/app/handoffs/TASK-013.md`.
+All met, re-checked against the Round 2 evidence. Evidence per criterion is
+tabulated in `docs/app/handoffs/TASK-013.md`.
+
+Round 2 strengthened criteria 5, 6, 8, and 10 in particular:
+
+- **10** — the highest-severity Round 1 defect was found here: the mutation
+  inherited TanStack's default `networkMode: "online"`, which paused an offline
+  write and held the three health values in memory for automatic execution on
+  reconnect. That in-memory outbox is gone; the mutation declares
+  `networkMode: "always"` and its offline behaviour is proved with a positive
+  control.
+- **5** — the exact auth-scoped key is now captured before the write and
+  invalidated from the returned value, so replacing a pending mutation's options
+  cannot redirect the invalidation to another account.
+- **6** — every unexpected throw or rejection from the client is now sanitized,
+  not only resolved `{ error }` responses.
+- **8** — an offset-only rollover now refreshes and rehydrates the same calendar
+  date, so the form can no longer claim today was checked in while the controls
+  sit empty.
+
+Criterion 12 still carries one pre-existing `expo-doctor` patch-version finding
+that lies outside the owned paths and is reported rather than fixed.
 
 - [x] 1. An authenticated active athlete can load today's check-in from Athlete
       Today.
