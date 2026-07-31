@@ -12,9 +12,16 @@
     "lint": "corepack pnpm --filter @run-performance/mobile lint",
     "typecheck": "corepack pnpm --filter @run-performance/mobile typecheck",
     "test": "corepack pnpm --filter @run-performance/mobile test",
+    "test:tooling": "node --test \"tooling/local-demo/*.test.mjs\"",
     "db:start": "supabase start",
     "db:stop": "supabase stop",
-    "db:status": "supabase status"
+    "db:status": "supabase status",
+    "demo:reset": "node tooling/local-demo/demo-reset.mjs",
+    "demo:web": "node tooling/local-demo/demo-web.mjs",
+    "demo:android": "node tooling/local-demo/demo-android.mjs",
+    "demo:stop": "node tooling/local-demo/demo-stop.mjs",
+    "demo:verify": "node tooling/local-demo/demo-verify.mjs",
+    "demo:verify:consent": "node tooling/local-demo/demo-verify-consent.mjs"
   },
   "prettier": {
     "endOfLine": "auto"

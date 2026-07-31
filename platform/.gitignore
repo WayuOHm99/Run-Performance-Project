@@ -12,3 +12,8 @@ expo-env.d.ts
 !.env.example
 apps/mobile/android/
 apps/mobile/ios/
+
+# TASK-017 local demo credentials. Contains the generated local demo password
+# for the two synthetic example.test accounts. Regenerated on every
+# `demo:reset`, and never committed.
+.local-demo/
