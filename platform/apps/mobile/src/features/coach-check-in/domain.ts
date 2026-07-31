@@ -304,13 +304,33 @@ export function parseGrantPairs(args: {
 }
 
 /**
- * The stable identity of one consent pair.
+ * The stable, **unambiguous** identity of one consent pair.
  *
- * The separator is a plain space, which neither part can contain: both are
- * database identifiers and `isNonEmptyString` has already rejected anything blank.
+ * `JSON.stringify` of the two parts as an array, because a delimiter-joined string
+ * is not injective unless the delimiter is provably absent from both parts — and
+ * nothing here proves that. `isNonEmptyString` only requires a non-blank *trimmed*
+ * value, so `"team a"` is a perfectly acceptable identifier as far as this module's
+ * validation is concerned, and these values are not shape-checked as UUIDs anywhere
+ * in this feature.
+ *
+ * Under the previous `` `${teamId} ${athleteProfileId}` `` encoding, the distinct
+ * pairs `("team a", "b")` and `("team", "a b")` both produced `"team a b"`. Two
+ * consequences, both wrong:
+ *
+ *   - `pairsStillActive` would report consent as intact when the pair it was asked
+ *     about had actually been revoked and a *different* pair happened to collide
+ *     with it — the exact failure stage d exists to prevent;
+ *   - `parseGrantPairs` would reject two genuinely distinct grants as a duplicate,
+ *     failing a load that should have succeeded.
+ *
+ * `JSON.stringify` escapes quotes and backslashes inside each element, so no
+ * element content can forge the array structure. Fixing the encoding is the right
+ * layer for this: tightening `isNonEmptyString` to forbid whitespace would make the
+ * key safe only as long as nobody relaxes that guard again, whereas an injective
+ * encoding is safe regardless of what the identifiers turn out to contain.
  */
 function pairKey(pair: GrantPair): string {
-  return `${pair.teamId} ${pair.athleteProfileId}`;
+  return JSON.stringify([pair.teamId, pair.athleteProfileId]);
 }
 
 /**

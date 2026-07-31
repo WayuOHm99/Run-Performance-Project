@@ -489,3 +489,103 @@ describe("pairsStillActive", () => {
     expect(pairsStillActive([pairC], [pairA])).toBe(false);
   });
 });
+
+/**
+ * The Round 4 regression: the consent-pair key must be **injective**.
+ *
+ * The pair key was `` `${teamId} ${athleteProfileId}` ``, which is only unique if
+ * neither part can contain the delimiter. Nothing enforces that:
+ * `isNonEmptyString` accepts any value with a non-blank trimmed form, and this
+ * feature never shape-checks an identifier as a UUID. So the distinct pairs
+ * `("team a", "b")` and `("team", "a b")` both encoded to `"team a b"`.
+ *
+ * Every fixture below is chosen so that the two pairs **collide under the old
+ * encoding and only under the old encoding**. `COLLIDING_KEY` asserts that premise
+ * directly, so if someone "fixes" these fixtures into non-colliding values the
+ * suite says so instead of quietly testing nothing.
+ */
+describe("the consent-pair key is collision-free", () => {
+  // Both encode to "team a b" when joined with a single space.
+  const SPLIT_LEFT: GrantPair = { teamId: "team a", athleteProfileId: "b" };
+  const SPLIT_RIGHT: GrantPair = { teamId: "team", athleteProfileId: "a b" };
+
+  /** The old encoding, reproduced here so the premise is checkable. */
+  const spaceJoined = (pair: GrantPair): string =>
+    `${pair.teamId} ${pair.athleteProfileId}`;
+
+  it("uses fixtures that genuinely collide under the old encoding", () => {
+    // Guards the guard. Without this the regressions below could pass because the
+    // fixtures stopped colliding, not because the encoding was fixed.
+    expect(spaceJoined(SPLIT_LEFT)).toBe(spaceJoined(SPLIT_RIGHT));
+    expect(SPLIT_LEFT.teamId === SPLIT_RIGHT.teamId).toBe(false);
+    expect(SPLIT_LEFT.athleteProfileId === SPLIT_RIGHT.athleteProfileId).toBe(
+      false,
+    );
+  });
+
+  it("reports a revoked pair as gone even when another pair collides with it", () => {
+    // THE regression. The original pair was revoked; a different pair is active.
+    // Under the old encoding both hashed to "team a b", so the revocation was
+    // reported as consent intact and the health values were rendered.
+    expect(pairsStillActive([SPLIT_LEFT], [SPLIT_RIGHT])).toBe(false);
+    expect(pairsStillActive([SPLIT_RIGHT], [SPLIT_LEFT])).toBe(false);
+  });
+
+  it("still matches a colliding pair against its own exact self", () => {
+    // The fix must not overshoot into rejecting a genuine match.
+    expect(pairsStillActive([SPLIT_LEFT], [SPLIT_LEFT])).toBe(true);
+    expect(pairsStillActive([SPLIT_RIGHT], [SPLIT_RIGHT])).toBe(true);
+  });
+
+  it("keeps the one-directional rule for colliding pairs", () => {
+    // A newly added pair alone must never fail the load, collision or not.
+    expect(pairsStillActive([SPLIT_LEFT], [SPLIT_LEFT, SPLIT_RIGHT])).toBe(
+      true,
+    );
+    expect(pairsStillActive([], [SPLIT_LEFT, SPLIT_RIGHT])).toBe(true);
+  });
+
+  it("fails when one of two colliding pairs is revoked", () => {
+    expect(pairsStillActive([SPLIT_LEFT, SPLIT_RIGHT], [SPLIT_LEFT])).toBe(
+      false,
+    );
+  });
+
+  it("does not read two colliding grants as one duplicate", () => {
+    // The same ambiguity in `parseGrantPairs`. Two distinct grants that collide
+    // were rejected as a duplicate, failing a load that should have succeeded.
+    const parsed = parseGrantPairs({
+      rows: [
+        grantRow({ team_id: "team a", athlete_profile_id: "b" }),
+        grantRow({ team_id: "team", athlete_profile_id: "a b" }),
+      ],
+      coachedTeamIds: new Set(["team a", "team"]),
+      callerUserId: COACH_ID,
+    });
+
+    expect(outcome(parsed)).toBe("ok");
+    expect(parsed.ok ? parsed.value.length : -1).toBe(2);
+  });
+
+  it("still rejects a genuine duplicate of a whitespace-bearing pair", () => {
+    const parsed = parseGrantPairs({
+      rows: [
+        grantRow({ team_id: "team a", athlete_profile_id: "b" }),
+        grantRow({ team_id: "team a", athlete_profile_id: "b" }),
+      ],
+      coachedTeamIds: new Set(["team a"]),
+      callerUserId: COACH_ID,
+    });
+
+    expect(outcome(parsed)).toBe("invalid");
+  });
+
+  it("is unambiguous for quotes and backslashes too", () => {
+    // JSON.stringify escapes both, so no element content can forge the structure.
+    const quoted: GrantPair = { teamId: 'a","b', athleteProfileId: "c" };
+    const plain: GrantPair = { teamId: "a", athleteProfileId: 'b","c' };
+
+    expect(pairsStillActive([quoted], [plain])).toBe(false);
+    expect(pairsStillActive([quoted], [quoted])).toBe(true);
+  });
+});
