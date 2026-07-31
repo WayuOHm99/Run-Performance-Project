@@ -596,13 +596,21 @@ describe("the consent-pair key is collision-free", () => {
  * The fixtures above pin the *reported* collision, which was space-specific. That
  * alone would let a future edit swap the space for a pipe and still pass — mutation
  * evidence confirmed exactly that before this test existed. This asserts the
- * property the key actually needs: for **any** single character a naive encoding
- * might join on, the two pairs that would collide under it must stay distinct.
+ * property the key actually needs, sampled rather than proved: for each of a set
+ * of **representative single-character delimiters** a naive encoding might join
+ * on, the two pairs that would collide under it must stay distinct.
+ *
+ * This is **not** an exhaustive proof of injectivity. It samples seventeen
+ * characters — punctuation, whitespace, and the two that JSON itself must escape —
+ * so it catches any plausible delimiter someone might reach for, but a character
+ * outside the list would go untested. The actual guarantee comes from the encoding:
+ * `JSON.stringify` of a two-element array is injective for all inputs, and this
+ * suite's job is to notice if someone replaces it with something that is not.
  *
  * A failure prints escaped delimiter literals, which carry no health value and no
  * identifier.
  */
-describe("the consent-pair key is injective for any joining character", () => {
+describe("the consent-pair key is injective for representative delimiters", () => {
   const CANDIDATE_DELIMITERS: readonly string[] = [
     " ",
     "|",
@@ -618,12 +626,12 @@ describe("the consent-pair key is injective for any joining character", () => {
     "+",
     "\t",
     "\n",
-    " ",
+    "\0",
     '"',
     "\\",
   ];
 
-  it("keeps the two pairs that would collide under each one distinct", () => {
+  it("keeps the two pairs that would collide under each sampled one distinct", () => {
     const leaking = CANDIDATE_DELIMITERS.filter((delimiter) => {
       const left: GrantPair = {
         teamId: `team${delimiter}a`,
@@ -644,7 +652,7 @@ describe("the consent-pair key is injective for any joining character", () => {
     expect(leaking.map((delimiter) => JSON.stringify(delimiter))).toEqual([]);
   });
 
-  it("still matches each such pair against itself", () => {
+  it("still matches each such sampled pair against itself", () => {
     const broken = CANDIDATE_DELIMITERS.filter((delimiter) => {
       const pair: GrantPair = {
         teamId: `team${delimiter}a`,
