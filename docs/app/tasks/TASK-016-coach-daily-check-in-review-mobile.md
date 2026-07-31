@@ -102,13 +102,26 @@ Rules:
 
 ### 6. Load contract
 
-Three stages, fail-safe order, each fully validated before the next begins:
+Four stages, fail-safe order, each fully validated before the next begins:
 
 | Stage | Reads | Purpose |
 | --- | --- | --- |
 | a | `team_memberships` + embedded `teams(name)` | the verified caller's active coach memberships and team names |
 | b | `sharing_grants` | active `check_in` grants visible to that coach, restricted to stage-a team ids |
 | c | `profiles` + embedded `daily_check_ins` | the strictly required athlete profiles and their latest visible check-in |
+| d | `sharing_grants` | **consent revalidation** — the same read as stage b, repeated after the health values have arrived |
+
+**Stage d was added in Round 3** by approved scope deviation, to close the Medium
+revoked-grant race. Stage b authorizes the health-bearing read but cannot speak
+for the moment that read *finishes*. If consent is withdrawn in between — an
+athlete pressing "stop sharing", or a membership revocation firing the TASK-011
+trigger that revokes their grants — RLS immediately refuses the embedded rows,
+and **a refused embed is indistinguishable from an empty one**. Without stage d
+the athlete would render as `ยังไม่ได้เช็กอิน`, which states as fact that they had
+not checked in when what actually happened is that they withdrew consent.
+
+This is a **presentation** defect, not an access-control one: no unauthorized row
+was ever returned at any point.
 
 Rules:
 
@@ -125,6 +138,18 @@ Rules:
   `101` so overflow is *detectable*; `101` rows raise a sanitized capacity error.
   The list is **never silently truncated** and a partial list is **never** returned.
 - Stage c is **not issued at all** when stage b yields no active grants.
+- Stage d issues **the same query as stage b**, through the same function, against
+  the same stage-a team ids, with the same filters, the same validation, and the
+  same capacity rule. A revalidation that asked a weaker question than the
+  authorization would be worse than none, because it would look like a check.
+- Stage d is **not issued** when stage b yields no active grants: there was no
+  health-bearing read to protect.
+- The stage-d comparison is **one-directional**:
+  - a pair present in stage b but **absent** in stage d fails the **entire** load —
+    no athlete and no health value is rendered, not even for surviving pairs;
+  - a pair **newly present** in stage d is **ignored**. Stage c never read for it,
+    so attaching it would mean rendering a row assembled from a read that did not
+    cover it. It is picked up by the next deliberate query.
 
 ### 7. Fail-closed states
 
@@ -266,6 +291,14 @@ stage c  profiles                                         -- skipped when stage 
          .in("id", <deduplicated athlete ids>)
          .order("check_in_date", { referencedTable: "daily_check_ins", ascending: false })
          .limit(1, { referencedTable: "daily_check_ins" })
+
+stage d  sharing_grants                                  -- skipped when stage b is empty
+         -- byte-for-byte the stage-b query, issued through the same function
+         .select("team_id, athlete_profile_id, data_category")
+         .eq("data_category", "check_in")
+         .is("revoked_at", null)
+         .in("team_id", <stage-a team ids>)
+         .limit(101)
 ```
 
 Post-response validation, all fail-closed:
@@ -285,7 +318,9 @@ Post-response validation, all fail-closed:
 10. the embedded `daily_check_ins` array has length `0` or `1` — `≥ 2` is refused;
 11. a present check-in passes `isLocalDateString(check_in_date)` and
     `parseCheckInRow` (RPE 0–10 integer, feeling 1–5 integer, pain status in
-    `{none, present}`).
+    `{none, present}`);
+12. rules 3 through 7 apply again, unchanged, to the stage-d response;
+13. every stage-b pair is still present in the validated stage-d pairs.
 
 Stable order: team name, then team id, then athlete display name, then athlete id.
 
@@ -310,7 +345,7 @@ Stable order: team name, then team id, then athlete display name, then athlete i
 2. No route, detail screen, or tab is added.
 3. Only the six fields in decision 5 are selected and displayed.
 4. No `select("*")` anywhere in the feature.
-5. Stage c is not issued when there are no active grants.
+5. Stage c is not issued when there are no active grants, and neither is stage d.
 6. Overflow above 100 pairs fails with a sanitized capacity error and never
    truncates.
 7. Every fail-closed condition in decision 7 rejects the entire load.
@@ -321,7 +356,11 @@ Stable order: team name, then team id, then athlete display name, then athlete i
 11. Nothing in the feature logs, persists, or writes.
 12. Every failure message is one of a fixed sanitized Thai set.
 13. All verification commands pass.
-14. Mutation evidence is recorded for the four required safeguards.
+14. Mutation evidence is recorded for the four required safeguards, plus the
+    Round 3 stage-d revalidation.
+15. A grant or membership revoked between stage b and stage c fails the entire
+    load; a grant newly activated in that window is not attached to the current
+    result.
 
 ## Negative matrix
 
@@ -351,6 +390,12 @@ Stable order: team name, then team id, then athlete display name, then athlete i
 | 22 | failure at stage b | sanitized load error, not an empty list |
 | 23 | failure at stage c | sanitized load error, not an empty list |
 | 24 | more than 100 pairs | sanitized capacity error, no partial list |
+| 24a | grant revoked between stage b and stage c | stage d misses the pair → whole load fails, nothing rendered |
+| 24b | membership revoked in that window (trigger revokes the grant) | same — whole load fails |
+| 24c | consent moved to another coached team in that window | pair changed, not merely added → whole load fails |
+| 24d | one of two grants revoked in that window | the surviving athlete is **not** rendered either |
+| 24e | grant newly activated in that window | ignored this load, no error, picked up next query |
+| 24f | stage d refused / rejected / malformed / over capacity | sanitized failure, capacity keeps its own wording |
 | 25 | account change during an in-flight query | old observer destroyed; new identity starts idle |
 | 26 | refresh failure with old health data internally present | health values hidden |
 | 27 | resolved `{ error }` | sanitized |
@@ -386,7 +431,9 @@ Temporarily weaken each safeguard, confirm a test fails, then restore:
 1. exact `check_in` category filtering;
 2. grant-to-team association validation;
 3. latest-row referenced-table order/limit;
-4. account-scoped cache isolation / hiding stale data during refresh.
+4. account-scoped cache isolation / hiding stale data during refresh;
+5. the stage-d consent revalidation (Round 3): removing the check, making it
+   bidirectional, and reusing the stage-b result instead of re-reading.
 
 Every mutation is reverted before final verification. **No mutated code is
 committed.** Only safe scalar results are recorded.
@@ -425,12 +472,22 @@ count of remaining Supabase containers.
 ## Known limitations
 
 1. Already-delivered screen data cannot be remotely recalled without Realtime.
+   Stage d narrows this window — it now ends when the revalidation returns rather
+   than when the health read does — but it cannot close it. A revocation landing
+   after stage d is reflected on the next successful query.
 2. An athlete with a null or blank `display_name` fails the whole load rather than
    rendering, because a raw UUID must never be displayed as a name.
 3. Capacity is capped at 100 active pairs; beyond that the screen fails closed
-   rather than paginating.
-4. A grant activated between stage a and stage b produces one retryable error.
-5. Known pre-existing Expo/Expo Router patch drift is **out of scope**; it is
+   rather than paginating. The wording differs from a generic failure and points at
+   escalation, but the deliberate retry control is still offered.
+4. A revocation landing between stage b and stage c now fails the whole load as one
+   retryable error, rather than rendering the athlete as "not submitted yet". A
+   coach whose athletes revoke frequently therefore sees a retry instead of a
+   silently wrong list — the deliberate trade, since the previous behaviour stated
+   something false about a person's health record.
+5. Stage d costs one extra `sharing_grants` read per load. Accepted: it is a small,
+   indexed, non-health read, and it is skipped entirely when nobody shares.
+6. Known pre-existing Expo/Expo Router patch drift is **out of scope**; it is
    reported if Expo Doctor still finds it, and no dependency is changed.
 
 ## Rollback

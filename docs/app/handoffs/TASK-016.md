@@ -4,11 +4,18 @@ Status: **Implementation complete. All verification complete, including the loca
 database authorization suite.** Stopped for GPT/Codex read-only review. Not
 merged. Worktree not removed.
 
-Round 1 recorded the database suite as **blocked** — the Docker daemon was
-unreachable in that session. **Round 2 was verification and documentation only:**
-the suite has now been run in full and passed, and the corrections below bring
-this document into line with the actual Git state and the actual implementation.
-No implementation code, test, or migration was changed in Round 2.
+Round history:
+
+- **Round 1** — implementation. The database suite was recorded as **blocked**;
+  the Docker daemon was unreachable in that session.
+- **Round 2** — verification and documentation only. The database suite was run in
+  full and passed. No implementation code, test, or migration changed.
+- **Round 3** — the Medium revoked-grant race is **fixed**, by approved scope
+  deviation, with one final active-consent revalidation (**stage d**) after the
+  health-bearing read. All verification re-run, including pgTAP and database lint.
+
+Corrections in this document are written as explicit "Round *n* said X, here is
+why it was wrong" notes rather than silent overwrites, so the change is auditable.
 
 Writer: **Claude Code** (sole writer)
 Reviewer: **GPT/Codex** (read-only)
@@ -50,16 +57,19 @@ was not deleted. No history was rewritten to achieve this.
 | 1 | `a6229ff` | 1 | `docs(task-016): add the coach daily check-in review packet` |
 | 2 | `c31dbdb` | 1 | `feat(coach): show the latest check-in shared with a coached team` |
 | 3 | `fadf512` | 1 | `docs(task-016): record the implementation handoff` |
-| 4 | *this commit* | 2 | `docs(task-016): close out verification and correct the handoff` |
+| 4 | `d67d71d` | 2 | `docs(task-016): close out verification and correct the handoff` |
+| 5 | `458b3ed` | 3 | `fix(coach): revalidate consent after the health-bearing read` |
+| 6 | *this commit* | 3 | `docs(task-016): document stage d and correct the final statistics` |
 
-All four are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
-`4ac2bfe`. **No existing commit was amended or rewritten.** Commit 4 is the only
-Round 2 change and touches this file alone; its SHA cannot be printed inside
-itself, so it is identified by position here and resolvable with
-`git log --oneline 4ac2bfe..HEAD`.
+All six are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
+`4ac2bfe`. **No existing commit was amended or rewritten.** Commit 6 touches only
+`docs/`; its SHA cannot be printed inside itself, so it is identified by position
+and resolvable with `git log --oneline 4ac2bfe..HEAD`.
 
-Exactly **one** commit (`c31dbdb`) contains implementation. The other three are
-documentation.
+**Two** commits contain implementation — `c31dbdb` (the feature) and `458b3ed`
+(the stage-d fix). The other four are documentation. Round 3 kept them separate as
+instructed: `458b3ed` contains no documentation-only edit, and commit 6 contains
+no code.
 
 One correction to disclose: the packet commit was first created with a shell
 here-string that the Bash tool mangled into the literal subject `@`. It was
@@ -70,22 +80,41 @@ altered. `a6229ff` is the corrected commit.
 
 ## Changed files
 
-**22 files changed, 5378 insertions(+), 6 deletions(−)** against the approved
-base `4ac2bfe` (`git diff --shortstat 4ac2bfe..HEAD`).
+**22 files changed, 5875 insertions(+), 6 deletions(−)** against the approved
+base `4ac2bfe`, measured at `458b3ed` — the final commit containing code
+(`git diff --shortstat 4ac2bfe..458b3ed`).
 
-Round 1 stated 21 files and +5079/−6. That was measured *before* the handoff was
-committed, so it omitted `docs/app/handoffs/TASK-016.md` itself. The figures
-above are the actual ones and include this document.
+Round 3 adds **no new file**: stage d lives inside the existing repository and
+domain modules. The file count is unchanged at 22; the insertion count grew from
+Round 2's 5378 because of the stage-d code, its regression tests, and the
+per-call scripting added to the test double.
 
-Line counts per file, from `git diff --numstat 4ac2bfe..HEAD`:
+Round 1 stated 21 files and +5079/−6, measured before the handoff was committed
+so it omitted `docs/app/handoffs/TASK-016.md` itself. Round 2 corrected the file
+count to 22.
+
+**On the self-referential figures.** The documentation commit that follows
+`458b3ed` edits the packet and this handoff, so the final totals are higher than
+the table below by exactly those two files' edits — which cannot be printed
+inside one of them. Reviewers should run `git diff --shortstat 4ac2bfe..HEAD`
+for the true final numbers; the figures here are pinned to `458b3ed` so that
+every code statistic is exact.
+
+Line counts per file at `458b3ed`, from `git diff --numstat`:
 
 | File | + | − |
 | --- | --- | --- |
+| `.../coach-check-in/source-safety.test.ts` | 742 | 0 |
+| `.../coach-check-in/coach-review-repository.test.ts` | 681 | 0 |
+| `.../coach-check-in/domain.ts` | 543 | 0 |
+| `.../coach-check-in/domain.test.ts` | 491 | 0 |
 | `docs/app/tasks/TASK-016-coach-daily-check-in-review-mobile.md` | 454 | 0 |
-| `docs/app/handoffs/TASK-016.md` | 299 | 0 |
-| `platform/apps/mobile/src/app/coach/index.tsx` | 10 | 6 |
-| `.../coach-check-in/domain.ts` | 501 | 0 |
-| `.../coach-check-in/coach-review-repository.ts` | 270 | 0 |
+| `docs/app/handoffs/TASK-016.md` | 387 | 0 |
+| `.../coach-check-in/query-options.test.ts` | 358 | 0 |
+| `.../coach-check-in/coach-review-repository.ts` | 337 | 0 |
+| `.../coach-check-in/test-fixtures.ts` | 324 | 0 |
+| `.../coach-check-in/logging.test.ts` | 233 | 0 |
+| `.../coach-check-in/view-state.test.ts` | 215 | 0 |
 | `.../coach-check-in/coach-check-in-section.tsx` | 207 | 0 |
 | `.../coach-check-in/view-state.ts` | 184 | 0 |
 | `.../coach-check-in/failure-probe.ts` | 133 | 0 |
@@ -93,50 +122,20 @@ Line counts per file, from `git diff --numstat 4ac2bfe..HEAD`:
 | `.../coach-check-in/copy.ts` | 114 | 0 |
 | `.../coach-check-in/query-options.ts` | 98 | 0 |
 | `.../coach-check-in/errors.ts` | 94 | 0 |
-| `.../coach-check-in/use-coach-check-in-review.ts` | 36 | 0 |
-| `.../coach-check-in/test-fixtures.ts` | 297 | 0 |
-| `.../coach-check-in/source-safety.test.ts` | 742 | 0 |
-| `.../coach-check-in/coach-review-repository.test.ts` | 451 | 0 |
-| `.../coach-check-in/domain.test.ts` | 448 | 0 |
-| `.../coach-check-in/query-options.test.ts` | 358 | 0 |
-| `.../coach-check-in/logging.test.ts` | 233 | 0 |
-| `.../coach-check-in/view-state.test.ts` | 215 | 0 |
 | `platform/apps/mobile/src/lib/query/keys.test.ts` | 94 | 0 |
+| `.../coach-check-in/use-coach-check-in-review.ts` | 36 | 0 |
 | `platform/apps/mobile/src/lib/query/keys.ts` | 18 | 0 |
+| `platform/apps/mobile/src/app/coach/index.tsx` | 10 | 6 |
 
-The `docs/app/handoffs/TASK-016.md` row is Round 1's 299 lines; Round 2 edits
-this file further, so its final size is larger. `coach/index.tsx` is the **only**
-pre-existing file with deletions, and its 6 removed lines are exactly the Team
-placeholder `InfoCard`.
+`coach/index.tsx` is the **only** pre-existing file with deletions, and its 6
+removed lines are exactly the Team placeholder `InfoCard`.
 
-**Route wiring (owned):**
-
-- `platform/apps/mobile/src/app/coach/index.tsx` — Team placeholder replaced by
-  `<CoachCheckInReviewSection />`; the monitoring-flags and training-plan
-  `InfoCard`s are unchanged.
-
-**Feature (owned, all new) — `platform/apps/mobile/src/features/coach-check-in/`:**
-
-| File | Role |
-| --- | --- |
-| `domain.ts` | stage parsers, grant-pair composition, fail-closed validation |
-| `coach-review-repository.ts` | the three-stage read against an injected client |
-| `errors.ts` | sanitized failures, including the distinct `capacity` category |
-| `query-options.ts` | the cache contract |
-| `view-state.ts` | identity boundary + the only function that can carry a check-in |
-| `copy.ts` | every fixed Thai string |
-| `use-coach-check-in-review.ts` | the single hook |
-| `coach-check-in-section.tsx` | the section, and the identity boundary |
-| `athlete-check-in-card.tsx` | one athlete's latest reading |
-| `failure-probe.ts`, `test-fixtures.ts` | test support (not runtime, not bundled) |
-| `domain.test.ts`, `coach-review-repository.test.ts`, `query-options.test.ts`, `view-state.test.ts`, `source-safety.test.ts`, `logging.test.ts` | tests |
-
-**Query keys (owned):**
-
-- `platform/apps/mobile/src/lib/query/keys.ts` — added `coachCheckInReview`
-- `platform/apps/mobile/src/lib/query/keys.test.ts` — added its assertions
-
-**Docs (owned):** the packet and this handoff.
+Files changed by Round 3 (`git diff --name-only d67d71d..458b3ed`):
+`coach-check-in/domain.ts`, `coach-check-in/domain.test.ts`,
+`coach-check-in/coach-review-repository.ts`,
+`coach-check-in/coach-review-repository.test.ts`, and
+`coach-check-in/test-fixtures.ts`. Five files, all owned, all inside the feature
+directory.
 
 **Nothing else changed.** No migration, policy, grant, function, view, pgTAP
 file, config, or seed; no `database.types.ts`; no `package.json`,
@@ -152,7 +151,7 @@ navigation file; no protected legacy path.
 | 2 | No route, detail screen, or tab | **met** — AST-asserted; web export lists the same 10 routes |
 | 3 | Only the six approved fields selected and displayed | **met** — select lists pinned exactly in the scan |
 | 4 | No `select("*")` | **met** — exact and fragment scan, incl. `(*)` |
-| 5 | Stage c skipped with no active grants | **met** — asserted on the recorded table list |
+| 5 | Stage c skipped with no active grants (and stage d too) | **met** — asserted on the recorded table list |
 | 6 | Overflow above 100 fails, never truncates | **met** — `capacity` failure with its own escalation wording; retry control still offered per the packet |
 | 7 | Every fail-closed condition rejects the whole load | **met** |
 | 8 | Key auth-scoped and health-free | **met** |
@@ -161,7 +160,8 @@ navigation file; no protected legacy path.
 | 11 | No logging, persistence, or write | **met** — AST + runtime |
 | 12 | Every failure message from a fixed sanitized set | **met** |
 | 13 | All verification commands pass | **met** — including the local database suite, run in Round 2 |
-| 14 | Mutation evidence recorded | **met** — 7 mutations, all detected, all reverted |
+| 14 | Mutation evidence recorded | **met** — 10 mutations across rounds, all detected, all reverted |
+| 15 | Revocation between stage b and stage c fails the whole load; a new grant is not attached | **met** (Round 3) — 12 stage-d tests |
 
 ## Safe verification counts
 
@@ -173,19 +173,26 @@ Run from `platform/` unless noted.
 | `corepack pnpm format:check` | exit 0, all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test` | exit 0 — **40 test files, 720 tests, 0 failures** |
-| focused `vitest run src/features/coach-check-in src/lib/query` | exit 0 — **8 test files, 135 tests, 0 failures** |
+| `corepack pnpm test` | exit 0 — **40 test files, 738 tests, 0 failures** (was 720 before stage d) |
+| focused `vitest run src/features/coach-check-in src/lib/query` | exit 0 — **8 test files, 153 tests, 0 failures** (was 135) |
 | `corepack pnpm dlx expo-doctor@latest` (from `apps/mobile/`) | exit 1 — **20/21 checks pass**; the single failure is the known pre-existing patch drift (see limitations) |
 | Android Expo export | exit 0 — 1 bundle, 1 metadata file |
-| Web Expo export | exit 0 — **10 routes, unchanged from before this task** |
+| Web Expo export | exit 0 — **13 static routes, unchanged from before this task** |
 | `git diff --check` | exit 0, clean |
 | working tree after all verification | clean |
 
-Baseline before this task was 596 workspace tests (TASK-014) and 720 now,
-including TASK-015's additions; this task contributes the 135 focused tests
-above minus the pre-existing `src/lib/query` ones.
+Baseline before this task was 596 workspace tests (TASK-014); it is 738 now,
+including TASK-015's additions. Round 3 added **18** tests: 12 stage-d repository
+regressions and 6 `pairsStillActive` domain cases.
 
-### Local database authorization suite — **RUN AND PASSED** (Round 2)
+**A Round 1 figure is corrected here.** Round 1 and 2 reported the web export as
+"10 routes". The real count is **13 static routes** — the earlier number came
+from reading a truncated tail of the export output, not from a shortened list.
+The route list itself is unchanged by this task and always was: no file was added
+under `src/app/`, and `/coach` remains the only coach surface. The claim that
+followed from it — that no route was added — is unaffected and still holds.
+
+### Local database authorization suite — **RUN AND PASSED** (Round 2, re-run in Round 3)
 
 Run from `platform/` against the **local** stack only.
 
@@ -204,6 +211,15 @@ Counts match the TASK-014 baseline exactly — 5 files, 583 assertions, 0 lint
 findings — which is the expected outcome, because this task changed no
 `platform/supabase/` file. Round 1 cited that baseline; it is now
 **independently re-verified** rather than cited.
+
+**Round 3 re-ran the entire suite** after the stage-d change, with identical
+results: `db:start` 0, `reset --no-seed` 0, pgTAP **5 files / 583 assertions /
+`Result: PASS`**, `db lint` 0 findings, `db:stop` 0, **0 containers remaining**.
+Stage d touches no migration and no policy — it re-uses the existing
+`sharing_grants_select_active_for_coach` read — so an unchanged pgTAP result is
+the expected and correct outcome, not a sign the suite missed the change. What
+covers the change is the 12 new repository regressions and the mutation evidence
+below.
 
 Migrations applied by the reset, in order: `20260727120000_identity_teams_membership_rls`,
 `20260727130000_profile_display_name_self_update`,
@@ -231,8 +247,9 @@ The CLI also advised that Supabase CLI `v2.110.0` is available (installed
 ## Mutation evidence
 
 Each safeguard was weakened on the committed code, the focused suite was run,
-and the file was restored with `git checkout`. Baseline is **135 passed / 0
-failed**. Only counts are recorded.
+and the file was restored with `git checkout`. Rounds 1–2 baseline is **135
+passed / 0 failed**; the Round 3 baseline is **153 passed / 0 failed**. Only
+counts are recorded.
 
 | # | Safeguard weakened | File | Result |
 | --- | --- | --- | --- |
@@ -244,20 +261,44 @@ failed**. Only counts are recorded.
 | M4a | coach user id dropped from the cache key | `lib/query/keys.ts` | **2 files, 6 tests failed** |
 | M4b | failed refresh allowed to keep showing previous health values | `view-state.ts` | **2 files, 4 tests failed** |
 | M4c | in-flight refresh allowed to render the previous list | `view-state.ts` | **1 file, 2 tests failed** |
+| M5 | stage-d revalidation check neutralized — the exact Round 3 regression | `coach-review-repository.ts` | **1 file, 4 tests failed** |
+| M6 | `pairsStillActive` made bidirectional (a new grant also fails the load) | `domain.ts` | **2 files, 6 tests failed** |
+| M7 | stage d reuses the stage-b result instead of re-reading | `coach-review-repository.ts` | **1 file, 8 tests failed** |
 
 M2 and M3 were each run twice because the first variant left a second defence in
 place; M2b and M3b remove that too, which is what shows both layers are covered
 rather than only one.
+
+**M5 is the mutation the Round 3 requirement asks for**: with the revalidation
+removed, the revoked-grant regressions fail. **M7 matters just as much** — it
+proves the stage-d read is a genuine second query rather than a re-inspection of
+data already in hand, which is the way a revalidation most plausibly rots into
+theatre. **M6** proves the one-directionality is deliberate and covered: making
+the check symmetric breaks the "a newly granted pair is not attached" test.
 
 **Every mutation was reverted.** After the last revert, `git status --porcelain`
 was empty and the full suite returned 40 files / 720 tests / 0 failures. **No
 mutated code is committed**; the mutations were applied only after `c31dbdb`
 existed, precisely so `git checkout` could prove the restoration.
 
+**A defect I introduced and fixed, disclosed in full.** `c31dbdb` contained a
+literal NUL byte (`0x00`) in `domain.ts`, where the grant-pair key separator
+should have been a space — the result of a bad character in my original write, not
+of any mutation run. It made `file(1)` report the source as `data` rather than
+text. Runtime behaviour was correct throughout: a NUL is a valid JavaScript string
+character and worked as a separator, every test passed, and no output was
+affected. It is fixed in `458b3ed`; the separator is now a space produced by one
+named `pairKey` function shared by both call sites. Prettier, ESLint, and
+TypeScript all passed with the NUL present, so **no existing gate would have
+caught it** — worth noting for the reviewer. A scan of every TASK-016-owned file
+now reports zero NUL bytes, and `domain.ts` reports as UTF-8 text.
+
 One void run is disclosed for honesty: the first M4a attempt used a pattern that
 did not match (the file has CRLF endings), so nothing was mutated and the suite
 passed. That run proves nothing and was re-done correctly; the table records only
-the valid run.
+the valid run. Round 3's first M5 attempt likewise failed to match (CRLF plus a
+Prettier rewrap), was a no-op, and was re-done correctly; only the valid run is
+recorded.
 
 ## Privacy and security impact
 
@@ -272,6 +313,12 @@ below are stricter than anything else in the codebase.
   `daily_check_ins_select_shared_for_coach` and
   `sharing_grants_select_active_for_coach`. The route gate is UX only, and every
   client filter is re-validated against the response rather than trusted.
+- **Consent is re-checked after the health values arrive.** Stage d (Round 3)
+  repeats the stage-b grant read once stage c has returned and fails the whole
+  load if any pair it was performed for has gone. This never was an access-control
+  hole — RLS refuses the rows the instant consent lapses — but it removes a
+  **false statement about a person's health record**: the screen no longer says an
+  athlete "has not checked in" when what happened is that they revoked consent.
 - **Consent is the association, not the roster.** `profiles_select_self_or_coached`
   makes coached athletes' identities broadly visible and the check-in policy is
   athlete-scoped rather than team-scoped, so composing on visibility alone would
@@ -309,6 +356,10 @@ booleans, counts, fixed rule/case names, and identifier *labels* before `expect`
 1. **Already-delivered screen data cannot be remotely recalled without Realtime.**
    A revocation while a card is on screen takes effect on the next successful
    query, not instantly. Accepted for this task; Realtime is out of scope.
+   **Round 3 narrowed this window but did not close it:** stage d confirms consent
+   held up to the moment the revalidation returned, so the exposure now begins
+   there rather than at the health read. A revocation landing after stage d is
+   still only reflected on the next query.
 2. **A null or blank `display_name` fails the whole load** rather than rendering,
    because a raw UUID must never be shown as a person's name. If real accounts can
    have blank display names, this will surface as a retryable error for the whole
@@ -324,27 +375,22 @@ booleans, counts, fixed rule/case names, and identifier *labels* before `expect`
    rather than at retrying. *(Round 1 described this as "non-retryable wording",
    which overstated it: only the message differs, not the availability of the
    control.)*
-4. **A revoked grant racing the health-bearing read is shown as "not checked in
-   yet".** If consent is revoked between stage b and stage c, stage b has already
-   returned the pair, while `daily_check_ins_select_shared_for_coach` now refuses
-   the embedded row, so the athlete renders as `ยังไม่ได้เช็กอิน` until the next
-   successful load rather than disappearing. No health value is disclosed — the
-   database refuses it — but for one load the state is misleading in the *safe*
-   direction. A membership revocation in the same window instead makes an expected
-   profile invisible, which fails the whole load as one retryable error.
-
-   *(Round 1 claimed "a grant activated between stage a and stage b produces one
-   retryable error." That was wrong and is corrected here. Stage b is filtered
-   with `.in("team_id", <stage-a team ids>)` and re-validated against the same
-   set, so a grant for an uncoached team is never returned in the first place, and
-   a grant appearing for an already-coached team is simply included. That window
-   produces no error at all. The genuine races are the two described above, both
-   of which sit between stage b and stage c.)*
-5. **Known pre-existing Expo patch drift persists** and is **out of scope**:
+4. **FIXED in Round 3 — a revoked grant racing the health-bearing read.** Round 2
+   recorded this as an open Medium: a grant revoked between stage b and stage c
+   made the embed empty, and the athlete rendered as `ยังไม่ได้เช็กอิน` — stating as
+   fact that they had not checked in when they had actually withdrawn consent.
+   Stage d now re-reads consent after the health values arrive and fails the whole
+   load if any pair used by that read has gone. **The residual behaviour is a
+   retryable error rather than a wrong statement**, which is the intended trade.
+   A membership revocation in the same window was already failing the load, via a
+   missing expected profile, and still does.
+5. **Stage d costs one extra `sharing_grants` read per load.** Accepted: it is a
+   small, indexed, non-health read, and it is skipped entirely when nobody shares.
+6. **Known pre-existing Expo patch drift persists** and is **out of scope**:
    `expo` found `56.0.17` vs expected `~56.0.18`, `expo-router` found `56.2.16` vs
    expected `~56.2.17`. **No dependency was changed.** 20/21 Expo Doctor checks
    pass.
-6. **Supabase CLI `v2.110.0` is available; `v2.109.1` is pinned and installed.**
+7. **Supabase CLI `v2.110.0` is available; `v2.109.1` is pinned and installed.**
    Not upgraded — the pin lives in `platform/package.json`, which this task may
    not modify.
 
@@ -366,22 +412,26 @@ the packet, `git revert c31dbdb`.
 
 Suggested focus, highest value first:
 
-1. `domain.ts` — the grant-pair composition and every fail-closed branch. This is
+1. `coach-review-repository.ts` stage d and `pairsStillActive` — the Round 3 fix.
+   Specifically: is one-directionality right? It means a grant made mid-load is
+   silently deferred to the next query rather than surfaced. I believe deferring is
+   correct because no health value was fetched for that pair, but it is a
+   product-visible choice.
+2. `domain.ts` — the grant-pair composition and every fail-closed branch. This is
    where a wrong athlete could be attached to a team.
-2. `view-state.ts` — the branch order in `readCoachReviewView`. The error check
+3. `view-state.ts` — the branch order in `readCoachReviewView`. The error check
    preceding the data check is the whole "hide stale health on a failed refresh"
    guarantee.
-3. `coach-review-repository.ts` — stage ordering, the skip conditions, and the
+4. `coach-review-repository.ts` — stage ordering, the skip conditions, and the
    referenced-table `order`/`limit` pair.
-4. Whether limitation 2 (blank display name fails the load) is the right product
+5. Whether limitation 2 (blank display name fails the load) is the right product
    call.
-5. Whether the 100-pair cap is right, and whether offering the retry control on a
+6. Whether the 100-pair cap is right, and whether offering the retry control on a
    capacity failure — which the packet specifies and the UI does — is the
    behaviour you want, given that retrying cannot succeed until the number of
    active pairs drops.
-6. Limitation 4: a grant revoked between stage b and stage c renders as
-   "ยังไม่ได้เช็กอิน" for one load. No data is disclosed, but the wording is
-   briefly misleading.
+7. Whether trading the old wrong-wording behaviour for a retryable error is the
+   right call for a coach whose athletes revoke often (limitation 4).
 
 **Not done, deliberately:** no merge, push, deploy, publish, hosted-Supabase
 link, remote migration, branch deletion, or worktree removal.
