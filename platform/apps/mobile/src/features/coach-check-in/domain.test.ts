@@ -589,3 +589,71 @@ describe("the consent-pair key is collision-free", () => {
     expect(pairsStillActive([quoted], [quoted])).toBe(true);
   });
 });
+
+/**
+ * Injectivity as a property, not as one example.
+ *
+ * The fixtures above pin the *reported* collision, which was space-specific. That
+ * alone would let a future edit swap the space for a pipe and still pass — mutation
+ * evidence confirmed exactly that before this test existed. This asserts the
+ * property the key actually needs: for **any** single character a naive encoding
+ * might join on, the two pairs that would collide under it must stay distinct.
+ *
+ * A failure prints escaped delimiter literals, which carry no health value and no
+ * identifier.
+ */
+describe("the consent-pair key is injective for any joining character", () => {
+  const CANDIDATE_DELIMITERS: readonly string[] = [
+    " ",
+    "|",
+    ":",
+    "-",
+    "_",
+    ",",
+    ";",
+    "/",
+    ".",
+    "#",
+    "@",
+    "+",
+    "\t",
+    "\n",
+    " ",
+    '"',
+    "\\",
+  ];
+
+  it("keeps the two pairs that would collide under each one distinct", () => {
+    const leaking = CANDIDATE_DELIMITERS.filter((delimiter) => {
+      const left: GrantPair = {
+        teamId: `team${delimiter}a`,
+        athleteProfileId: "b",
+      };
+      const right: GrantPair = {
+        teamId: "team",
+        athleteProfileId: `a${delimiter}b`,
+      };
+
+      // A revoked `left` must never read as active because `right` is present.
+      return (
+        pairsStillActive([left], [right]) || pairsStillActive([right], [left])
+      );
+    });
+
+    // Escaped delimiter literals only.
+    expect(leaking.map((delimiter) => JSON.stringify(delimiter))).toEqual([]);
+  });
+
+  it("still matches each such pair against itself", () => {
+    const broken = CANDIDATE_DELIMITERS.filter((delimiter) => {
+      const pair: GrantPair = {
+        teamId: `team${delimiter}a`,
+        athleteProfileId: "b",
+      };
+
+      return !pairsStillActive([pair], [pair]);
+    });
+
+    expect(broken.map((delimiter) => JSON.stringify(delimiter))).toEqual([]);
+  });
+});
