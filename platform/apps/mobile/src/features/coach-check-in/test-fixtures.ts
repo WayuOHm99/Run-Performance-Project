@@ -144,6 +144,21 @@ export type ClientDouble = {
   readonly recording: () => ClientRecording;
 };
 
+/**
+ * How a table behaves across the load.
+ *
+ * A single behaviour is reused for **every** read of that table, which is what
+ * keeps the ordinary cases readable now that `sharing_grants` is read twice: the
+ * same grants come back both times, so consent held and the load succeeds.
+ *
+ * An array is consumed **in order**, one entry per read. That is what expresses a
+ * revocation landing mid-load — first read returns the pair, second does not —
+ * which is the whole point of stage d. Running past the end of an array throws,
+ * so a repository that issued more reads than the test described fails loudly
+ * instead of silently reusing the last response.
+ */
+export type StageScript = StageBehaviour | readonly StageBehaviour[];
+
 const WRITE_METHODS = ["insert", "update", "upsert", "delete"] as const;
 
 /**
@@ -155,18 +170,30 @@ const WRITE_METHODS = ["insert", "update", "upsert", "delete"] as const;
  * the test asserting the recording would fail on the table list.
  */
 export function clientDouble(
-  behaviours: Partial<Record<StageTable, StageBehaviour>>,
+  behaviours: Partial<Record<StageTable, StageScript>>,
 ): ClientDouble {
   const tables: string[] = [];
   const methods: string[] = [];
   const embeddedOptions: string[] = [];
+  const readsPerTable = new Map<string, number>();
   let rpcCalls = 0;
   let writeCalls = 0;
 
   const from = (table: string): unknown => {
     tables.push(table);
 
-    const behaviour = behaviours[table as StageTable];
+    const readIndex = readsPerTable.get(table) ?? 0;
+    readsPerTable.set(table, readIndex + 1);
+
+    const script = behaviours[table as StageTable];
+    // Written out rather than relying on `Array.isArray` narrowing, which widens a
+    // readonly array to `any[]` and would silently drop the element type.
+    const behaviour: StageBehaviour | undefined =
+      script === undefined
+        ? undefined
+        : Array.isArray(script)
+          ? (script as readonly StageBehaviour[])[readIndex]
+          : (script as StageBehaviour);
 
     if (behaviour === undefined) {
       throw new Error("test double: stage was not configured");

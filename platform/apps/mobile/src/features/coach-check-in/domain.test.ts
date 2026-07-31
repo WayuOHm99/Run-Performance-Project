@@ -5,6 +5,7 @@ import {
   athleteIdsToRead,
   composeCoachReview,
   parseCoachedTeams,
+  pairsStillActive,
   parseGrantPairs,
   sharedPairCount,
   type CoachedTeam,
@@ -444,5 +445,47 @@ describe("athleteIdsToRead", () => {
 
   it("is empty for no pairs, so no profile read is warranted", () => {
     expect(athleteIdsToRead([]).length).toBe(0);
+  });
+});
+
+describe("pairsStillActive", () => {
+  const pairA: GrantPair = { teamId: TEAM_A, athleteProfileId: ATHLETE_1 };
+  const pairB: GrantPair = { teamId: TEAM_B, athleteProfileId: ATHLETE_1 };
+  const pairC: GrantPair = { teamId: TEAM_A, athleteProfileId: ATHLETE_2 };
+
+  it("holds when consent is unchanged", () => {
+    expect(pairsStillActive([pairA, pairC], [pairA, pairC])).toBe(true);
+  });
+
+  it("holds regardless of the order the second read returns", () => {
+    expect(pairsStillActive([pairA, pairC], [pairC, pairA])).toBe(true);
+  });
+
+  it("fails when a pair disappeared", () => {
+    // The revocation case: the health read already happened under this pair.
+    expect(pairsStillActive([pairA, pairC], [pairA])).toBe(false);
+    expect(pairsStillActive([pairA], [])).toBe(false);
+  });
+
+  it("fails when the same athlete's consent moved to another team", () => {
+    // Still sharing, but not with the team the health read was performed for.
+    expect(pairsStillActive([pairA], [pairB])).toBe(false);
+  });
+
+  it("ignores a pair that appeared during the load", () => {
+    // No health value was fetched for it, so it must not be attached now. It is
+    // not an error either — consent grew, which is not a reason to fail.
+    expect(pairsStillActive([pairA], [pairA, pairC])).toBe(true);
+  });
+
+  it("holds vacuously when there was nothing to revalidate", () => {
+    expect(pairsStillActive([], [])).toBe(true);
+    expect(pairsStillActive([], [pairA])).toBe(true);
+  });
+
+  it("distinguishes the two halves of a pair", () => {
+    // A team match alone, or an athlete match alone, is not the same consent.
+    expect(pairsStillActive([pairA], [pairC])).toBe(false);
+    expect(pairsStillActive([pairC], [pairA])).toBe(false);
   });
 });

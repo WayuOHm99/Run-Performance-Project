@@ -1,10 +1,17 @@
 /**
- * The three-stage read that produces the coach's daily check-in review.
+ * The four-stage read that produces the coach's daily check-in review.
+ *
+ * ```text
+ *   a  team_memberships  the caller's active coach memberships and team names
+ *   b  sharing_grants    the active check_in consent pairs for those teams
+ *   c  profiles          the required profiles and their latest visible check-in
+ *   d  sharing_grants    the same read as b, repeated to confirm consent held
+ * ```
  *
  * The client is injected, so every path below is unit-tested against a
  * hand-written double with no network and no local database.
  *
- * Six rules this module exists to hold:
+ * Seven rules this module exists to hold:
  *
  * 1. **A failure is not an empty list.** "You coach no active team", "nobody
  *    shares with you", and "the read was refused" all produce zero usable rows,
@@ -35,7 +42,17 @@
  *    athlete, and `composeCoachReview` refuses a response carrying more. Without
  *    both halves, "latest" would be an arbitrary row from an athlete's history.
  *
- * 6. **Nothing raw escapes, and nothing logs.** Resolved `{ error }` responses,
+ * 6. **Consent is confirmed after the health values arrive, not only before.**
+ *    Stage b authorizes the read; stage d repeats it once stage c has returned and
+ *    refuses the whole load if any pair it was performed for has since gone. RLS
+ *    already guarantees nothing unauthorized is *returned* — the gap this closes is
+ *    a **presentation** one: a grant revoked mid-load makes the embed empty, which
+ *    is indistinguishable from "this athlete has not checked in yet", so without
+ *    stage d the screen would assert something false about a person's health
+ *    record. Newly granted pairs are deliberately **not** picked up here; see
+ *    `pairsStillActive`.
+ *
+ * 7. **Nothing raw escapes, and nothing logs.** Resolved `{ error }` responses,
  *    synchronous throws, rejected builders and thenables, and unexpected internal
  *    failures are all collapsed to a `CoachReviewDataError` carrying a fixed
  *    string.
@@ -51,10 +68,12 @@ import {
   MAX_EMBEDDED_CHECK_INS,
   athleteIdsToRead,
   composeCoachReview,
+  pairsStillActive,
   parseCoachedTeams,
   parseGrantPairs,
   type CoachReviewReject,
   type CoachReviewTeam,
+  type GrantPair,
 } from "./domain";
 import { CoachReviewDataError, coachReviewErrorFrom } from "./errors";
 
@@ -196,29 +215,7 @@ async function performLoad(
   // ---------------------------------------------------------------------------
   // Stage b — the active check_in consent pairs, scoped to those exact teams.
   // ---------------------------------------------------------------------------
-  const grantResult = await client
-    .from(GRANT_TABLE)
-    .select(GRANT_COLUMNS)
-    .eq("data_category", CHECK_IN_CATEGORY)
-    .is("revoked_at", null)
-    .in("team_id", coachedTeamIds)
-    .limit(GRANT_REQUEST_LIMIT);
-
-  if (grantResult.error) {
-    throw coachReviewErrorFrom("load", grantResult.error);
-  }
-
-  const parsedPairs = parseGrantPairs({
-    rows: grantResult.data,
-    coachedTeamIds: new Set(coachedTeamIds),
-    callerUserId: userId,
-  });
-
-  if (!parsedPairs.ok) {
-    throw rejection(parsedPairs.reason);
-  }
-
-  const pairs = parsedPairs.value;
+  const pairs = await readActiveGrantPairs(client, userId, coachedTeamIds);
 
   if (pairs.length === 0) {
     // Teams exist but nobody actively shares. Stage c — the only health-bearing
@@ -250,7 +247,77 @@ async function performLoad(
     throw coachReviewErrorFrom("load", profileResult.error);
   }
 
+  // ---------------------------------------------------------------------------
+  // Stage d — re-read consent, now that the health values are in hand.
+  // ---------------------------------------------------------------------------
+  // Stage b authorized the read; it cannot speak for the moment the read
+  // *finished*. Between the two, an athlete may have pressed "stop sharing", or a
+  // membership revocation may have fired the TASK-011 trigger that revokes their
+  // grants. RLS refuses the embedded rows the instant that happens, so nothing
+  // unauthorized is ever returned — but a refused embed is indistinguishable from
+  // an empty one, and without this stage the athlete would render as
+  // "ยังไม่ได้เช็กอิน", stating as fact that they had not checked in when what
+  // actually happened is that they withdrew consent.
+  //
+  // The same query as stage b, against the same stage-a teams, with the same
+  // validation and the same capacity rule.
+  const revalidated = await readActiveGrantPairs(
+    client,
+    userId,
+    coachedTeamIds,
+  );
+
+  if (!pairsStillActive(pairs, revalidated)) {
+    // A pair the health read was performed for is gone. Fail the whole load: no
+    // athlete and no health value is rendered, not even for the pairs that
+    // survived, because a partial list is exactly the misleading state this
+    // stage exists to prevent.
+    throw new CoachReviewDataError("load", "unknown");
+  }
+
   return composeOrThrow({ teams, pairs, profileRows: profileResult.data });
+}
+
+/**
+ * Reads and validates the active `check_in` consent pairs for the given teams.
+ *
+ * Shared by stage b and stage d **deliberately**: the revalidation is only
+ * meaningful if it asks exactly the question the authorization asked. Writing the
+ * two queries separately would let them drift — a different filter, a different
+ * limit, a different validation — and a revalidation that asks a weaker question
+ * than the authorization is worse than none, because it looks like a check.
+ *
+ * The capacity rule therefore applies to both. A stage-d response above the cap
+ * fails closed for the same reason a stage-b one does.
+ */
+async function readActiveGrantPairs(
+  client: AppSupabaseClient,
+  userId: string,
+  coachedTeamIds: readonly string[],
+): Promise<readonly GrantPair[]> {
+  const grantResult = await client
+    .from(GRANT_TABLE)
+    .select(GRANT_COLUMNS)
+    .eq("data_category", CHECK_IN_CATEGORY)
+    .is("revoked_at", null)
+    .in("team_id", coachedTeamIds)
+    .limit(GRANT_REQUEST_LIMIT);
+
+  if (grantResult.error) {
+    throw coachReviewErrorFrom("load", grantResult.error);
+  }
+
+  const parsed = parseGrantPairs({
+    rows: grantResult.data,
+    coachedTeamIds: new Set(coachedTeamIds),
+    callerUserId: userId,
+  });
+
+  if (!parsed.ok) {
+    throw rejection(parsed.reason);
+  }
+
+  return parsed.value;
 }
 
 function composeOrThrow(args: {

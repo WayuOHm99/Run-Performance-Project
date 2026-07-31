@@ -1,8 +1,8 @@
 /**
- * The coach-review domain: the three validated stages, and the composition that
+ * The coach-review domain: the four validated stages, and the composition that
  * turns them into the coach-facing list.
  *
- * This module is where decisions 3, 4, 5, 6, and 7 actually live. Six rules it
+ * This module is where decisions 3, 4, 5, 6, and 7 actually live. Seven rules it
  * exists to hold:
  *
  * 1. **The category is a constant, not a parameter.** `CHECK_IN_CATEGORY` is the
@@ -42,6 +42,14 @@
  *    It is validated by `isLocalDateString` and carried through as the string it
  *    arrived as; nothing here constructs a `Date`, and nothing here calls the
  *    result "today".
+ *
+ * 7. **Consent is re-checked after the health values arrive, not only before.**
+ *    Rule 2 decides *which* team a row belongs to; it cannot decide whether the
+ *    consent that authorized the read still exists by the time the read finishes.
+ *    `pairsStillActive` is the stage-d predicate that closes that window: a pair
+ *    revoked between the grant read and the health read fails the whole load
+ *    rather than rendering as "has not checked in yet". See its own comment for
+ *    why the check is deliberately one-directional.
  *
  * Nothing in this module logs, formats, or stringifies a health value.
  */
@@ -282,17 +290,51 @@ export function parseGrantPairs(args: {
       return INVALID;
     }
 
-    const pairKey = `${teamId} ${athleteProfileId}`;
+    const key = pairKey({ teamId, athleteProfileId });
 
-    if (seen.has(pairKey)) {
+    if (seen.has(key)) {
       return INVALID;
     }
 
-    seen.add(pairKey);
+    seen.add(key);
     pairs.push({ teamId, athleteProfileId });
   }
 
   return { ok: true, value: pairs };
+}
+
+/**
+ * The stable identity of one consent pair.
+ *
+ * The separator is a plain space, which neither part can contain: both are
+ * database identifiers and `isNonEmptyString` has already rejected anything blank.
+ */
+function pairKey(pair: GrantPair): string {
+  return `${pair.teamId} ${pair.athleteProfileId}`;
+}
+
+/**
+ * Whether every pair the health-bearing read was performed for is still active.
+ *
+ * The predicate behind stage d. Deliberately **one-directional**: it asks only
+ * whether each `original` pair is still present in `current`, and says nothing
+ * about a pair that appears in `current` alone.
+ *
+ * That asymmetry is the whole point of the stage. A pair that **disappeared** is a
+ * revocation that landed while this load was in flight, and the health values
+ * already fetched under it must not be rendered — so the caller fails the whole
+ * load. A pair that **appeared** is a grant made during the same window, for which
+ * stage c fetched nothing at all; attaching it now would mean rendering a row from
+ * a read that never covered it, so it is ignored and picked up by the next
+ * deliberate query instead.
+ */
+export function pairsStillActive(
+  original: readonly GrantPair[],
+  current: readonly GrantPair[],
+): boolean {
+  const active = new Set(current.map(pairKey));
+
+  return original.every((pair) => active.has(pairKey(pair)));
 }
 
 /** The distinct athlete profile ids stage c must read, in first-seen order. */
