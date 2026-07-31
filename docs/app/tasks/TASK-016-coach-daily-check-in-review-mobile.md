@@ -320,7 +320,10 @@ Post-response validation, all fail-closed:
     `parseCheckInRow` (RPE 0–10 integer, feeling 1–5 integer, pain status in
     `{none, present}`);
 12. rules 3 through 7 apply again, unchanged, to the stage-d response;
-13. every stage-b pair is still present in the validated stage-d pairs.
+13. every stage-b pair is still present in the validated stage-d pairs, compared
+    on an **injective** pair key (`JSON.stringify([teamId, athleteProfileId])`) —
+    never a delimiter-joined string, because no identifier validation in this
+    feature forbids the delimiter from appearing inside either part.
 
 Stable order: team name, then team id, then athlete display name, then athlete id.
 
@@ -396,6 +399,8 @@ Stable order: team name, then team id, then athlete display name, then athlete i
 | 24d | one of two grants revoked in that window | the surviving athlete is **not** rendered either |
 | 24e | grant newly activated in that window | ignored this load, no error, picked up next query |
 | 24f | stage d refused / rejected / malformed / over capacity | sanitized failure, capacity keeps its own wording |
+| 24g | two distinct pairs that collide under a delimiter-joined key | stay distinct; a revoked pair is never masked by a colliding active one |
+| 24h | two colliding-but-distinct grants in one response | accepted as two, not rejected as a duplicate |
 | 25 | account change during an in-flight query | old observer destroyed; new identity starts idle |
 | 26 | refresh failure with old health data internally present | health values hidden |
 | 27 | resolved `{ error }` | sanitized |
@@ -433,7 +438,9 @@ Temporarily weaken each safeguard, confirm a test fails, then restore:
 3. latest-row referenced-table order/limit;
 4. account-scoped cache isolation / hiding stale data during refresh;
 5. the stage-d consent revalidation (Round 3): removing the check, making it
-   bidirectional, and reusing the stage-b result instead of re-reading.
+   bidirectional, and reusing the stage-b result instead of re-reading;
+6. the injective pair key (Round 4): restoring the space-delimited encoding, and
+   any other single-character delimiter.
 
 Every mutation is reverted before final verification. **No mutated code is
 committed.** Only safe scalar results are recorded.

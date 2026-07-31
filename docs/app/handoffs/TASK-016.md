@@ -13,6 +13,9 @@ Round history:
 - **Round 3** — the Medium revoked-grant race is **fixed**, by approved scope
   deviation, with one final active-consent revalidation (**stage d**) after the
   health-bearing read. All verification re-run, including pgTAP and database lint.
+- **Round 4** — the Medium consent-pair **key collision** is fixed: the pair key is
+  now `JSON.stringify([teamId, athleteProfileId])` instead of a space-joined
+  string. All verification re-run again.
 
 Corrections in this document are written as explicit "Round *n* said X, here is
 why it was wrong" notes rather than silent overwrites, so the change is auditable.
@@ -59,17 +62,21 @@ was not deleted. No history was rewritten to achieve this.
 | 3 | `fadf512` | 1 | `docs(task-016): record the implementation handoff` |
 | 4 | `d67d71d` | 2 | `docs(task-016): close out verification and correct the handoff` |
 | 5 | `458b3ed` | 3 | `fix(coach): revalidate consent after the health-bearing read` |
-| 6 | *this commit* | 3 | `docs(task-016): document stage d and correct the final statistics` |
+| 6 | `8bbd647` | 3 | `docs(task-016): document stage d and correct the final statistics` |
+| 7 | `f7720d1` | 4 | `fix(coach): make the consent-pair key collision-free` |
+| 8 | `4ae445d` | 4 | `test(coach): assert pair-key injectivity as a property, not one example` |
+| 9 | *this commit* | 4 | `docs(task-016): record the collision fix and both statistic baselines` |
 
-All six are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
-`4ac2bfe`. **No existing commit was amended or rewritten.** Commit 6 touches only
+All nine are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
+`4ac2bfe`. **No existing commit was amended or rewritten.** Commit 9 touches only
 `docs/`; its SHA cannot be printed inside itself, so it is identified by position
 and resolvable with `git log --oneline 4ac2bfe..HEAD`.
 
-**Two** commits contain implementation — `c31dbdb` (the feature) and `458b3ed`
-(the stage-d fix). The other four are documentation. Round 3 kept them separate as
-instructed: `458b3ed` contains no documentation-only edit, and commit 6 contains
-no code.
+**Four** commits contain code — `c31dbdb` (the feature), `458b3ed` (stage d),
+`f7720d1` (the injective key), and `4ae445d` (the injectivity property test). The
+other five are documentation. Every round kept the two kinds separate as
+instructed: no code commit carries a documentation-only edit, and no documentation
+commit carries code.
 
 One correction to disclose: the packet commit was first created with a shell
 here-string that the Bash tool mangled into the literal subject `@`. It was
@@ -80,36 +87,43 @@ altered. `a6229ff` is the corrected commit.
 
 ## Changed files
 
-**22 files changed, 5875 insertions(+), 6 deletions(−)** against the approved
-base `4ac2bfe`, measured at `458b3ed` — the final commit containing code
-(`git diff --shortstat 4ac2bfe..458b3ed`).
+Two baselines are recorded, because they answer two different questions and one
+of them cannot be measured from inside this file without care.
 
-Round 3 adds **no new file**: stage d lives inside the existing repository and
-domain modules. The file count is unchanged at 22; the insertion count grew from
-Round 2's 5378 because of the stage-d code, its regression tests, and the
-per-call scripting added to the test double.
+**Final state at `HEAD`** — what the branch actually delivers:
 
-Round 1 stated 21 files and +5079/−6, measured before the handoff was committed
-so it omitted `docs/app/handoffs/TASK-016.md` itself. Round 2 corrected the file
-count to 22.
+> **22 files changed, 6236 insertions(+), 6 deletions(−)**
+> (`git diff --shortstat 4ac2bfe..HEAD`)
 
-**On the self-referential figures.** The documentation commit that follows
-`458b3ed` edits the packet and this handoff, so the final totals are higher than
-the table below by exactly those two files' edits — which cannot be printed
-inside one of them. Reviewers should run `git diff --shortstat 4ac2bfe..HEAD`
-for the true final numbers; the figures here are pinned to `458b3ed` so that
-every code statistic is exact.
+These figures were computed from the **staged** final documentation state — this
+file and the packet included, exactly as committed — and then written back in
+place without changing any line count, so they describe the commit they appear in.
+Earlier rounds sidestepped this by quoting code-only figures and calling them
+final; that was avoiding the problem rather than solving it.
 
-Line counts per file at `458b3ed`, from `git diff --numstat`:
+**Last code commit `4ae445d`** — what the implementation alone accounts for:
+
+> **22 files changed, 6170 insertions(+), 6 deletions(−)**
+> (`git diff --shortstat 4ac2bfe..4ae445d`)
+
+The difference between the two is documentation only.
+
+Round 4 adds **no new file**. The file count has been 22 since Round 1; every
+round since has changed existing files in place. Insertions grew 5079 → 5378 →
+5875 → 6170 as stage d, the collision fix, and their tests landed. *(Round 1's
+5079/21-file figure was measured before the handoff was committed and omitted this
+file; Round 2 corrected the count to 22.)*
+
+Line counts per file at `4ae445d`, from `git diff --numstat`:
 
 | File | + | − |
 | --- | --- | --- |
 | `.../coach-check-in/source-safety.test.ts` | 742 | 0 |
 | `.../coach-check-in/coach-review-repository.test.ts` | 681 | 0 |
-| `.../coach-check-in/domain.ts` | 543 | 0 |
-| `.../coach-check-in/domain.test.ts` | 491 | 0 |
-| `docs/app/tasks/TASK-016-coach-daily-check-in-review-mobile.md` | 454 | 0 |
-| `docs/app/handoffs/TASK-016.md` | 387 | 0 |
+| `.../coach-check-in/domain.test.ts` | 659 | 0 |
+| `.../coach-check-in/domain.ts` | 563 | 0 |
+| `docs/app/tasks/TASK-016-coach-daily-check-in-review-mobile.md` | 511 | 0 |
+| `docs/app/handoffs/TASK-016.md` | 437 | 0 |
 | `.../coach-check-in/query-options.test.ts` | 358 | 0 |
 | `.../coach-check-in/coach-review-repository.ts` | 337 | 0 |
 | `.../coach-check-in/test-fixtures.ts` | 324 | 0 |
@@ -121,8 +135,8 @@ Line counts per file at `458b3ed`, from `git diff --numstat`:
 | `.../coach-check-in/athlete-check-in-card.tsx` | 122 | 0 |
 | `.../coach-check-in/copy.ts` | 114 | 0 |
 | `.../coach-check-in/query-options.ts` | 98 | 0 |
-| `.../coach-check-in/errors.ts` | 94 | 0 |
 | `platform/apps/mobile/src/lib/query/keys.test.ts` | 94 | 0 |
+| `.../coach-check-in/errors.ts` | 94 | 0 |
 | `.../coach-check-in/use-coach-check-in-review.ts` | 36 | 0 |
 | `platform/apps/mobile/src/lib/query/keys.ts` | 18 | 0 |
 | `platform/apps/mobile/src/app/coach/index.tsx` | 10 | 6 |
@@ -130,12 +144,9 @@ Line counts per file at `458b3ed`, from `git diff --numstat`:
 `coach/index.tsx` is the **only** pre-existing file with deletions, and its 6
 removed lines are exactly the Team placeholder `InfoCard`.
 
-Files changed by Round 3 (`git diff --name-only d67d71d..458b3ed`):
-`coach-check-in/domain.ts`, `coach-check-in/domain.test.ts`,
-`coach-check-in/coach-review-repository.ts`,
-`coach-check-in/coach-review-repository.test.ts`, and
-`coach-check-in/test-fixtures.ts`. Five files, all owned, all inside the feature
-directory.
+Files changed by Round 4 (`git diff --name-only 8bbd647..4ae445d`):
+`coach-check-in/domain.ts` and `coach-check-in/domain.test.ts`. Two files, both
+owned, both inside the feature directory.
 
 **Nothing else changed.** No migration, policy, grant, function, view, pgTAP
 file, config, or seed; no `database.types.ts`; no `package.json`,
@@ -160,8 +171,9 @@ navigation file; no protected legacy path.
 | 11 | No logging, persistence, or write | **met** — AST + runtime |
 | 12 | Every failure message from a fixed sanitized set | **met** |
 | 13 | All verification commands pass | **met** — including the local database suite, run in Round 2 |
-| 14 | Mutation evidence recorded | **met** — 10 mutations across rounds, all detected, all reverted |
+| 14 | Mutation evidence recorded | **met** — 12 mutations across rounds, all detected, all reverted |
 | 15 | Revocation between stage b and stage c fails the whole load; a new grant is not attached | **met** (Round 3) — 12 stage-d tests |
+| 16 | The consent-pair key is injective; a revoked pair is never masked by a colliding one | **met** (Round 4) — 8 collision tests + 2 property tests over 17 candidate delimiters |
 
 ## Safe verification counts
 
@@ -173,17 +185,18 @@ Run from `platform/` unless noted.
 | `corepack pnpm format:check` | exit 0, all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test` | exit 0 — **40 test files, 738 tests, 0 failures** (was 720 before stage d) |
-| focused `vitest run src/features/coach-check-in src/lib/query` | exit 0 — **8 test files, 153 tests, 0 failures** (was 135) |
+| `corepack pnpm test` | exit 0 — **40 test files, 748 tests, 0 failures** (720 before stage d, 738 after it, 748 after the Round 4 collision work) |
+| focused `vitest run src/features/coach-check-in src/lib/query` | exit 0 — **8 test files, 163 tests, 0 failures** (135 → 153 → 163) |
 | `corepack pnpm dlx expo-doctor@latest` (from `apps/mobile/`) | exit 1 — **20/21 checks pass**; the single failure is the known pre-existing patch drift (see limitations) |
 | Android Expo export | exit 0 — 1 bundle, 1 metadata file |
 | Web Expo export | exit 0 — **13 static routes, unchanged from before this task** |
 | `git diff --check` | exit 0, clean |
 | working tree after all verification | clean |
 
-Baseline before this task was 596 workspace tests (TASK-014); it is 738 now,
-including TASK-015's additions. Round 3 added **18** tests: 12 stage-d repository
-regressions and 6 `pairsStillActive` domain cases.
+Baseline before this task was 596 workspace tests (TASK-014); it is **748** now,
+including TASK-015's additions. Round 3 added **18** tests (12 stage-d repository
+regressions, 6 `pairsStillActive` domain cases). Round 4 added **10** more: 8
+collision regressions and 2 injectivity property tests.
 
 **A Round 1 figure is corrected here.** Round 1 and 2 reported the web export as
 "10 routes". The real count is **13 static routes** — the earlier number came
@@ -192,7 +205,7 @@ The route list itself is unchanged by this task and always was: no file was adde
 under `src/app/`, and `/coach` remains the only coach surface. The claim that
 followed from it — that no route was added — is unaffected and still holds.
 
-### Local database authorization suite — **RUN AND PASSED** (Round 2, re-run in Round 3)
+### Local database authorization suite — **RUN AND PASSED** (Round 2; re-run in Rounds 3 and 4)
 
 Run from `platform/` against the **local** stack only.
 
@@ -220,6 +233,12 @@ Stage d touches no migration and no policy — it re-uses the existing
 the expected and correct outcome, not a sign the suite missed the change. What
 covers the change is the 12 new repository regressions and the mutation evidence
 below.
+
+**Round 4 re-ran it again** after the collision fix, with identical results:
+`db:start` 0, `reset --no-seed` 0, pgTAP **5 files / 583 assertions /
+`Result: PASS`**, `db lint` **0 findings**, `db:stop` 0, **0 containers
+remaining**. The pair key is a client-side data structure and touches no SQL, so
+an unchanged database result is again the expected outcome.
 
 Migrations applied by the reset, in order: `20260727120000_identity_teams_membership_rls`,
 `20260727130000_profile_display_name_self_update`,
@@ -264,10 +283,27 @@ counts are recorded.
 | M5 | stage-d revalidation check neutralized — the exact Round 3 regression | `coach-review-repository.ts` | **1 file, 4 tests failed** |
 | M6 | `pairsStillActive` made bidirectional (a new grant also fails the load) | `domain.ts` | **2 files, 6 tests failed** |
 | M7 | stage d reuses the stage-b result instead of re-reading | `coach-review-repository.ts` | **1 file, 8 tests failed** |
+| M8 | ambiguous space-delimited pair key restored — the exact Round 4 regression | `domain.ts` | **1 file, 3 tests failed** |
+| M9a | pair key joined on `\|` instead | `domain.ts` | **1 test failed** |
+| M9b | pair key joined on `:` instead | `domain.ts` | **1 test failed** |
+| M9c | pair key joined on `-` instead | `domain.ts` | **1 test failed** |
 
 M2 and M3 were each run twice because the first variant left a second defence in
 place; M2b and M3b remove that too, which is what shows both layers are covered
 rather than only one.
+
+**M8 is the mutation the Round 4 requirement asks for**: restoring the
+space-delimited encoding fails the collision regressions.
+
+**M9 is the more interesting result, and it exposed a real gap in my own test.**
+When first run — against the Round 4 fixtures alone — swapping `JSON.stringify`
+for a pipe- or colon-joined template left **all 161 tests passing**, because those
+fixtures collide only under a space. The regression proved the *reported* bug was
+fixed while leaving the whole class of bug undetected. Commit `4ae445d` therefore
+adds an injectivity **property** test over 17 candidate joining characters, and
+M9a–M9c are the re-run showing every delimiter is now caught. Reported here
+because the first M9 run is exactly the kind of near-miss that a summary claiming
+"all mutations detected" would have hidden.
 
 **M5 is the mutation the Round 3 requirement asks for**: with the revalidation
 removed, the revoked-grant regressions fail. **M7 matters just as much** — it
@@ -277,9 +313,16 @@ theatre. **M6** proves the one-directionality is deliberate and covered: making
 the check symmetric breaks the "a newly granted pair is not attached" test.
 
 **Every mutation was reverted.** After the last revert, `git status --porcelain`
-was empty and the full suite returned 40 files / 720 tests / 0 failures. **No
-mutated code is committed**; the mutations were applied only after `c31dbdb`
-existed, precisely so `git checkout` could prove the restoration.
+was empty and the full suite returned **40 files / 748 tests / 0 failures**.
+
+*(Rounds 1–2 recorded this line as 720, which was the count at the time they were
+written. It was left stale through Round 3, where the true post-revert count was
+738. It is now stated at the current value and will move again if the suite grows,
+so it is pinned to a round: **748 as of Round 4**.)*
+
+**No mutated code is committed**; in every round the mutations were applied only
+after the corresponding code commit existed, precisely so `git checkout` could
+prove the restoration.
 
 **A defect I introduced and fixed, disclosed in full.** `c31dbdb` contained a
 literal NUL byte (`0x00`) in `domain.ts`, where the grant-pair key separator
@@ -287,8 +330,9 @@ should have been a space — the result of a bad character in my original write,
 of any mutation run. It made `file(1)` report the source as `data` rather than
 text. Runtime behaviour was correct throughout: a NUL is a valid JavaScript string
 character and worked as a separator, every test passed, and no output was
-affected. It is fixed in `458b3ed`; the separator is now a space produced by one
-named `pairKey` function shared by both call sites. Prettier, ESLint, and
+affected. It is fixed in `458b3ed`, which routed both call sites through one named
+`pairKey` function; `f7720d1` then replaced the delimiter approach entirely with
+`JSON.stringify`, so there is no separator character left to get wrong. Prettier, ESLint, and
 TypeScript all passed with the NUL present, so **no existing gate would have
 caught it** — worth noting for the reviewer. A scan of every TASK-016-owned file
 now reports zero NUL bytes, and `domain.ts` reports as UTF-8 text.
@@ -319,6 +363,11 @@ below are stricter than anything else in the codebase.
   hole — RLS refuses the rows the instant consent lapses — but it removes a
   **false statement about a person's health record**: the screen no longer says an
   athlete "has not checked in" when what happened is that they revoked consent.
+- **The consent-pair comparison is unambiguous.** The stage-d check keys pairs by
+  `JSON.stringify([teamId, athleteProfileId])`. Under the previous space-joined
+  key, a revoked pair could be masked by a *different* active pair that happened to
+  collide with it, which would have re-opened the very disclosure stage d was added
+  to close. Fixed in `f7720d1`.
 - **Consent is the association, not the roster.** `profiles_select_self_or_coached`
   makes coached athletes' identities broadly visible and the check-in policy is
   athlete-scoped rather than team-scoped, so composing on visibility alone would
@@ -384,13 +433,19 @@ booleans, counts, fixed rule/case names, and identifier *labels* before `expect`
    retryable error rather than a wrong statement**, which is the intended trade.
    A membership revocation in the same window was already failing the load, via a
    missing expected profile, and still does.
-5. **Stage d costs one extra `sharing_grants` read per load.** Accepted: it is a
+5. **Identifiers are not shape-checked as UUIDs anywhere in this feature.**
+   `isNonEmptyString` accepts any value with a non-blank trimmed form, so
+   `"team a"` is a valid identifier as far as this code is concerned. That is what
+   made the old delimiter-joined key unsafe. The key is now injective regardless,
+   and no other code path in the feature joins identifiers into a string — but if a
+   future change adds one, it must not assume whitespace is absent.
+6. **Stage d costs one extra `sharing_grants` read per load.** Accepted: it is a
    small, indexed, non-health read, and it is skipped entirely when nobody shares.
-6. **Known pre-existing Expo patch drift persists** and is **out of scope**:
+7. **Known pre-existing Expo patch drift persists** and is **out of scope**:
    `expo` found `56.0.17` vs expected `~56.0.18`, `expo-router` found `56.2.16` vs
    expected `~56.2.17`. **No dependency was changed.** 20/21 Expo Doctor checks
    pass.
-7. **Supabase CLI `v2.110.0` is available; `v2.109.1` is pinned and installed.**
+8. **Supabase CLI `v2.110.0` is available; `v2.109.1` is pinned and installed.**
    Not upgraded — the pin lives in `platform/package.json`, which this task may
    not modify.
 
@@ -432,6 +487,10 @@ Suggested focus, highest value first:
    active pairs drops.
 7. Whether trading the old wrong-wording behaviour for a retryable error is the
    right call for a coach whose athletes revoke often (limitation 4).
+8. `pairKey` and its property test. The fix is at the encoding layer rather than in
+   `isNonEmptyString`; if you would rather the guard rejected whitespace outright,
+   that is a different and also-defensible design, and it would need its own
+   regression because it changes what counts as a valid grant row.
 
 **Not done, deliberately:** no merge, push, deploy, publish, hosted-Supabase
 link, remote migration, branch deletion, or worktree removal.
