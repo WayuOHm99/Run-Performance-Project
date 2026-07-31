@@ -16,6 +16,11 @@ Round history:
 - **Round 4** — the Medium consent-pair **key collision** is fixed: the pair key is
   now `JSON.stringify([teamId, athleteProfileId])` instead of a space-joined
   string. All verification re-run again.
+- **Round 5** — test hygiene and documentation only. A literal `0x00` byte is
+  removed from `domain.test.ts`, the injectivity test stops over-claiming, and the
+  stale zero-NUL assertion in this document is corrected against a fresh scan. No
+  runtime implementation changed; the database suite was not re-run, and Round 4's
+  passing evidence stands (see below).
 
 Corrections in this document are written as explicit "Round *n* said X, here is
 why it was wrong" notes rather than silent overwrites, so the change is auditable.
@@ -65,18 +70,22 @@ was not deleted. No history was rewritten to achieve this.
 | 6 | `8bbd647` | 3 | `docs(task-016): document stage d and correct the final statistics` |
 | 7 | `f7720d1` | 4 | `fix(coach): make the consent-pair key collision-free` |
 | 8 | `4ae445d` | 4 | `test(coach): assert pair-key injectivity as a property, not one example` |
-| 9 | *this commit* | 4 | `docs(task-016): record the collision fix and both statistic baselines` |
+| 9 | `9b6b1a7` | 4 | `docs(task-016): record the collision fix and both statistic baselines` |
+| 10 | `434d39b` | 5 | `test(coach): write the NUL delimiter as an escape, not a raw byte` |
+| 11 | *this commit* | 5 | `docs(task-016): correct the NUL claim and close out round 5` |
 
-All nine are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
-`4ac2bfe`. **No existing commit was amended or rewritten.** Commit 9 touches only
+All eleven are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
+`4ac2bfe`. **No existing commit was amended or rewritten.** Commit 11 touches only
 `docs/`; its SHA cannot be printed inside itself, so it is identified by position
 and resolvable with `git log --oneline 4ac2bfe..HEAD`.
 
-**Four** commits contain code — `c31dbdb` (the feature), `458b3ed` (stage d),
-`f7720d1` (the injective key), and `4ae445d` (the injectivity property test). The
-other five are documentation. Every round kept the two kinds separate as
-instructed: no code commit carries a documentation-only edit, and no documentation
-commit carries code.
+**Five** commits touch `platform/` — `c31dbdb` (the feature), `458b3ed` (stage d),
+`f7720d1` (the injective key), `4ae445d` (the injectivity property test), and
+`434d39b` (the Round 5 test-source hygiene fix). Of those, **four change runtime
+code**; `434d39b` changes a test source only. The other six commits are
+documentation. Every round kept the two kinds separate as instructed: no code
+commit carries a documentation-only edit, and no documentation commit carries
+code.
 
 One correction to disclose: the packet commit was first created with a shell
 here-string that the Bash tool mangled into the literal subject `@`. It was
@@ -92,38 +101,38 @@ of them cannot be measured from inside this file without care.
 
 **Final state at `HEAD`** — what the branch actually delivers:
 
-> **22 files changed, 6236 insertions(+), 6 deletions(−)**
+> **22 files changed, 6329 insertions(+), 6 deletions(-)**
 > (`git diff --shortstat 4ac2bfe..HEAD`)
 
 These figures were computed from the **staged** final documentation state — this
-file and the packet included, exactly as committed — and then written back in
-place without changing any line count, so they describe the commit they appear in.
-Earlier rounds sidestepped this by quoting code-only figures and calling them
-final; that was avoiding the problem rather than solving it.
+file and the packet included, exactly as committed — then written back in place
+without changing any line count, so they describe the commit they appear in. The
+substitution was re-staged and re-measured to confirm the number is a fixed point
+rather than a snapshot that its own insertion invalidated.
 
-**Last code commit `4ae445d`** — what the implementation alone accounts for:
+**Last commit touching `platform/`, `434d39b`** — everything except the closing
+documentation:
 
-> **22 files changed, 6170 insertions(+), 6 deletions(−)**
-> (`git diff --shortstat 4ac2bfe..4ae445d`)
+> **22 files changed, 6244 insertions(+), 6 deletions(-)**
+> (`git diff --shortstat 4ac2bfe..434d39b`)
 
 The difference between the two is documentation only.
 
-Round 4 adds **no new file**. The file count has been 22 since Round 1; every
-round since has changed existing files in place. Insertions grew 5079 → 5378 →
-5875 → 6170 as stage d, the collision fix, and their tests landed. *(Round 1's
-5079/21-file figure was measured before the handoff was committed and omitted this
-file; Round 2 corrected the count to 22.)*
+The file count has been **22 since Round 1**; every round since has changed
+existing files in place, adding none. Insertions grew 5079 -> 5378 -> 5875 -> 6170
+-> 6244 across the rounds. *(Round 1's 5079/21-file figure was measured before the
+handoff was committed and omitted this file; Round 2 corrected the count to 22.)*
 
-Line counts per file at `4ae445d`, from `git diff --numstat`:
+Line counts per file at `434d39b`, from `git diff --numstat`:
 
-| File | + | − |
+| File | + | - |
 | --- | --- | --- |
 | `.../coach-check-in/source-safety.test.ts` | 742 | 0 |
 | `.../coach-check-in/coach-review-repository.test.ts` | 681 | 0 |
-| `.../coach-check-in/domain.test.ts` | 659 | 0 |
+| `.../coach-check-in/domain.test.ts` | 667 | 0 |
 | `.../coach-check-in/domain.ts` | 563 | 0 |
 | `docs/app/tasks/TASK-016-coach-daily-check-in-review-mobile.md` | 511 | 0 |
-| `docs/app/handoffs/TASK-016.md` | 437 | 0 |
+| `docs/app/handoffs/TASK-016.md` | 496 | 0 |
 | `.../coach-check-in/query-options.test.ts` | 358 | 0 |
 | `.../coach-check-in/coach-review-repository.ts` | 337 | 0 |
 | `.../coach-check-in/test-fixtures.ts` | 324 | 0 |
@@ -140,6 +149,9 @@ Line counts per file at `4ae445d`, from `git diff --numstat`:
 | `.../coach-check-in/use-coach-check-in-review.ts` | 36 | 0 |
 | `platform/apps/mobile/src/lib/query/keys.ts` | 18 | 0 |
 | `platform/apps/mobile/src/app/coach/index.tsx` | 10 | 6 |
+
+Files changed by Round 5: `coach-check-in/domain.test.ts` (code commit), plus this
+handoff and the packet (documentation commit).
 
 `coach/index.tsx` is the **only** pre-existing file with deletions, and its 6
 removed lines are exactly the Team placeholder `InfoCard`.
@@ -205,7 +217,33 @@ The route list itself is unchanged by this task and always was: no file was adde
 under `src/app/`, and `/coach` remains the only coach surface. The claim that
 followed from it — that no route was added — is unaffected and still holds.
 
-### Local database authorization suite — **RUN AND PASSED** (Round 2; re-run in Rounds 3 and 4)
+### Round 5 verification
+
+Re-run after the test-source change (`434d39b`):
+
+| Command | Result |
+| --- | --- |
+| `corepack pnpm format:check` | exit 0 |
+| `corepack pnpm lint` | exit 0 |
+| `corepack pnpm typecheck` | exit 0 |
+| focused `vitest run src/features/coach-check-in src/lib/query` | exit 0 — **8 files, 163 tests, 0 failures** |
+| `corepack pnpm test` | exit 0 — **40 files, 748 tests, 0 failures** |
+| `git diff --check` | exit 0 |
+| byte-level NUL scan over 22 owned files | **0** |
+| `rg` text-file probe on `domain.test.ts` | 3 matches printed with line numbers and content |
+
+Counts are **identical** to Round 4 in both suites, which is the expected outcome:
+the change swapped a raw byte for the escape sequence denoting the same character,
+so the NUL delimiter case still runs and nothing else moved.
+
+**The local database suite was not re-run, by instruction.** Round 5 changed one
+test source and two documents; it touched no migration, policy, function, or
+runtime module, and nothing it changed can affect a pgTAP result. Round 4's
+evidence therefore stands unmodified and is preserved below rather than restated
+as if it had been re-executed: **5 files, 583 assertions, `Result: PASS`, 0 lint
+findings, 0 containers remaining**.
+
+### Local database authorization suite — **RUN AND PASSED** (Round 2; re-run in Rounds 3 and 4; not re-run in Round 5)
 
 Run from `platform/` against the **local** stack only.
 
@@ -334,8 +372,55 @@ affected. It is fixed in `458b3ed`, which routed both call sites through one nam
 `pairKey` function; `f7720d1` then replaced the delimiter approach entirely with
 `JSON.stringify`, so there is no separator character left to get wrong. Prettier, ESLint, and
 TypeScript all passed with the NUL present, so **no existing gate would have
-caught it** — worth noting for the reviewer. A scan of every TASK-016-owned file
-now reports zero NUL bytes, and `domain.ts` reports as UTF-8 text.
+caught it** — worth noting for the reviewer.
+
+**That claim was wrong, and Round 5 fixes it.** Round 3 wrote "a scan of every
+TASK-016-owned file now reports zero NUL bytes". That was true when it was run,
+but Round 4 then appended a delimiter list to `domain.test.ts` containing a
+**second** literal `0x00`, and the stale sentence was carried forward unchecked
+into the Round 4 handoff. The claim was therefore false at the moment it was last
+published.
+
+Both NULs came from **one root cause**, not two independent slips: the tooling
+path used to write those files collapsed a doubled backslash, turning an escape
+sequence into the character it denotes. In `domain.ts` an intended space became
+`0x00`; in `domain.test.ts` an intended non-breaking space did.
+
+The consequence is tooling-level rather than behavioural. `file(1)` reported the
+source as `data`, and **ripgrep classified it as binary and suppressed line
+content** — which silently degrades every grep-based review and search over the
+file, including the kind a reviewer would run to audit this task.
+
+`434d39b` replaces the byte with the source escape sequence, so the runtime value
+is unchanged — a one-character string whose code point is zero, verified with
+`node -e` — and the NUL delimiter case still runs. Test counts are identical
+before and after (163 focused, 748 workspace).
+
+**A fresh byte-level scan was run for this handoff**, not carried over:
+
+| Probe | Result |
+| --- | --- |
+| `tr -dc '\000' < FILE \| wc -c` over all **22** owned files | **0** literal NUL bytes, total across every file |
+| `file(1)` on `domain.ts` and `domain.test.ts` | `JavaScript source, Unicode text, UTF-8 text` |
+| `rg -n "CANDIDATE_DELIMITERS" domain.test.ts` | prints **3 matches with line numbers and content** — text, not a binary-suppression notice |
+| `node -e` on the escape | length `1`, char code `0` — the NUL case is preserved |
+
+No lint, format, type, or test gate detects a stray control byte in source. If that
+matters beyond this task, a repository-level check would need adding — deliberately
+**not** done here, since this task owns no tooling configuration.
+
+**The root cause recurred a third time while this very section was being written**,
+and is reported rather than quietly repaired. Writing the scan command into the
+table above put the text for a NUL escape through the same shell path, which
+collapsed it and wrote a real `0x00` into this handoff. It was caught by the
+verification step immediately after, repaired, and the file now scans clean — but
+it is the clearest possible evidence that the mechanism is the tool path and not
+carelessness about any one character. Every subsequent edit avoided backslash
+sequences in that path entirely, constructing the byte numerically instead.
+
+For the reviewer: the practical mitigation is a byte-level scan **after** writing,
+never trusting the write. That is what the table above records, and it is the only
+reason two of the three instances were caught at all.
 
 One void run is disclosed for honesty: the first M4a attempt used a pattern that
 did not match (the file has CRLF endings), so nothing was mutated and the suite
