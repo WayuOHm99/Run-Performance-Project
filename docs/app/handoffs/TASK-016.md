@@ -1,8 +1,14 @@
 # TASK-016 handoff — Coach Daily Check-in Review (Mobile)
 
-Status: **Implementation complete, verification complete except the local
-database suite, which was blocked by the environment.** Stopped for GPT/Codex
-read-only review. Not merged. Worktree not removed.
+Status: **Implementation complete. All verification complete, including the local
+database authorization suite.** Stopped for GPT/Codex read-only review. Not
+merged. Worktree not removed.
+
+Round 1 recorded the database suite as **blocked** — the Docker daemon was
+unreachable in that session. **Round 2 was verification and documentation only:**
+the suite has now been run in full and passed, and the corrections below bring
+this document into line with the actual Git state and the actual implementation.
+No implementation code, test, or migration was changed in Round 2.
 
 Writer: **Claude Code** (sole writer)
 Reviewer: **GPT/Codex** (read-only)
@@ -39,13 +45,21 @@ was not deleted. No history was rewritten to achieve this.
 
 ## Commits
 
-| SHA | Subject |
-| --- | --- |
-| `a6229ff` | `docs(task-016): add the coach daily check-in review packet` |
-| `c31dbdb` | `feat(coach): show the latest check-in shared with a coached team` |
+| # | SHA | Round | Subject |
+| --- | --- | --- | --- |
+| 1 | `a6229ff` | 1 | `docs(task-016): add the coach daily check-in review packet` |
+| 2 | `c31dbdb` | 1 | `feat(coach): show the latest check-in shared with a coached team` |
+| 3 | `fadf512` | 1 | `docs(task-016): record the implementation handoff` |
+| 4 | *this commit* | 2 | `docs(task-016): close out verification and correct the handoff` |
 
-Both are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
-`4ac2bfe`. **No existing commit was amended or rewritten.**
+All four are on `feat/TASK-016-coach-daily-check-in-review-mobile`, cut from
+`4ac2bfe`. **No existing commit was amended or rewritten.** Commit 4 is the only
+Round 2 change and touches this file alone; its SHA cannot be printed inside
+itself, so it is identified by position here and resolvable with
+`git log --oneline 4ac2bfe..HEAD`.
+
+Exactly **one** commit (`c31dbdb`) contains implementation. The other three are
+documentation.
 
 One correction to disclose: the packet commit was first created with a shell
 here-string that the Bash tool mangled into the literal subject `@`. It was
@@ -56,7 +70,44 @@ altered. `a6229ff` is the corrected commit.
 
 ## Changed files
 
-21 files, +5079 / −6 against the approved base.
+**22 files changed, 5378 insertions(+), 6 deletions(−)** against the approved
+base `4ac2bfe` (`git diff --shortstat 4ac2bfe..HEAD`).
+
+Round 1 stated 21 files and +5079/−6. That was measured *before* the handoff was
+committed, so it omitted `docs/app/handoffs/TASK-016.md` itself. The figures
+above are the actual ones and include this document.
+
+Line counts per file, from `git diff --numstat 4ac2bfe..HEAD`:
+
+| File | + | − |
+| --- | --- | --- |
+| `docs/app/tasks/TASK-016-coach-daily-check-in-review-mobile.md` | 454 | 0 |
+| `docs/app/handoffs/TASK-016.md` | 299 | 0 |
+| `platform/apps/mobile/src/app/coach/index.tsx` | 10 | 6 |
+| `.../coach-check-in/domain.ts` | 501 | 0 |
+| `.../coach-check-in/coach-review-repository.ts` | 270 | 0 |
+| `.../coach-check-in/coach-check-in-section.tsx` | 207 | 0 |
+| `.../coach-check-in/view-state.ts` | 184 | 0 |
+| `.../coach-check-in/failure-probe.ts` | 133 | 0 |
+| `.../coach-check-in/athlete-check-in-card.tsx` | 122 | 0 |
+| `.../coach-check-in/copy.ts` | 114 | 0 |
+| `.../coach-check-in/query-options.ts` | 98 | 0 |
+| `.../coach-check-in/errors.ts` | 94 | 0 |
+| `.../coach-check-in/use-coach-check-in-review.ts` | 36 | 0 |
+| `.../coach-check-in/test-fixtures.ts` | 297 | 0 |
+| `.../coach-check-in/source-safety.test.ts` | 742 | 0 |
+| `.../coach-check-in/coach-review-repository.test.ts` | 451 | 0 |
+| `.../coach-check-in/domain.test.ts` | 448 | 0 |
+| `.../coach-check-in/query-options.test.ts` | 358 | 0 |
+| `.../coach-check-in/logging.test.ts` | 233 | 0 |
+| `.../coach-check-in/view-state.test.ts` | 215 | 0 |
+| `platform/apps/mobile/src/lib/query/keys.test.ts` | 94 | 0 |
+| `platform/apps/mobile/src/lib/query/keys.ts` | 18 | 0 |
+
+The `docs/app/handoffs/TASK-016.md` row is Round 1's 299 lines; Round 2 edits
+this file further, so its final size is larger. `coach/index.tsx` is the **only**
+pre-existing file with deletions, and its 6 removed lines are exactly the Team
+placeholder `InfoCard`.
 
 **Route wiring (owned):**
 
@@ -102,14 +153,14 @@ navigation file; no protected legacy path.
 | 3 | Only the six approved fields selected and displayed | **met** — select lists pinned exactly in the scan |
 | 4 | No `select("*")` | **met** — exact and fragment scan, incl. `(*)` |
 | 5 | Stage c skipped with no active grants | **met** — asserted on the recorded table list |
-| 6 | Overflow above 100 fails, never truncates | **met** — distinct `capacity` failure |
+| 6 | Overflow above 100 fails, never truncates | **met** — `capacity` failure with its own escalation wording; retry control still offered per the packet |
 | 7 | Every fail-closed condition rejects the whole load | **met** |
 | 8 | Key auth-scoped and health-free | **met** |
 | 9 | Eight cache overrides hold against real `QueryClient`/`QueryObserver` | **met** — verified against deliberately hostile defaults |
 | 10 | Health hidden during refresh and after a failed refresh | **met** |
 | 11 | No logging, persistence, or write | **met** — AST + runtime |
 | 12 | Every failure message from a fixed sanitized set | **met** |
-| 13 | All verification commands pass | **met except the local database suite** — see below |
+| 13 | All verification commands pass | **met** — including the local database suite, run in Round 2 |
 | 14 | Mutation evidence recorded | **met** — 7 mutations, all detected, all reverted |
 
 ## Safe verification counts
@@ -134,41 +185,48 @@ Baseline before this task was 596 workspace tests (TASK-014) and 720 now,
 including TASK-015's additions; this task contributes the 135 focused tests
 above minus the pre-existing `src/lib/query` ones.
 
-### Local database authorization suite — **BLOCKED, not run**
+### Local database authorization suite — **RUN AND PASSED** (Round 2)
 
-This step could **not** be executed and is **not** reported as passing.
+Run from `platform/` against the **local** stack only.
 
 | Step | Result |
 | --- | --- |
-| `corepack pnpm db:start` (all streams suppressed) | **exit 1** |
-| `docker info` | exit 1 — **daemon not reachable** |
-| `which docker` | exit 0 — binary present, daemon not running |
-| `db reset --no-seed` | **not run** (no stack) |
-| full local pgTAP suite | **not run** |
-| `db lint` public + private, warnings failing | **not run** |
-| `db:stop` | **not run** (nothing started) |
-| Supabase containers remaining | **0** |
+| `docker info` | exit 0 — daemon reachable (it was not in Round 1) |
+| `corepack pnpm db:start`, stdout and stderr both redirected to `/dev/null` | **exit 0** |
+| `corepack pnpm exec supabase db reset --local --no-seed` | **exit 0** — 4 migrations applied, no seed |
+| `corepack pnpm exec supabase test db --local` | **exit 0** — **5 files, 583 assertions, `Result: PASS`, 0 failures** |
+| `corepack pnpm exec supabase db lint --local --schema public,private --level warning --fail-on warning` | **exit 0** — **0 findings** in `public` and `private` |
+| `corepack pnpm db:stop`, both streams suppressed | **exit 0** |
+| Supabase containers running afterwards | **0** |
+| Supabase containers including stopped | **0** |
 
-The suppressed `db:start` output was classified without being printed: it
-mentions Docker twice and contains **zero** credential tokens (`anon key`,
-`service_role`, `jwt`, `password`, `postgresql://`). No raw stream was displayed.
+Counts match the TASK-014 baseline exactly — 5 files, 583 assertions, 0 lint
+findings — which is the expected outcome, because this task changed no
+`platform/supabase/` file. Round 1 cited that baseline; it is now
+**independently re-verified** rather than cited.
+
+Migrations applied by the reset, in order: `20260727120000_identity_teams_membership_rls`,
+`20260727130000_profile_display_name_self_update`,
+`20260728120000_consent_sharing_grants_rls`, `20260728140000_daily_check_ins_rls`.
+All four are pre-existing and unmodified.
+
+**Credential discipline.** `db:start` and `db:stop` had every stream redirected
+to `/dev/null`; no output from either was displayed, stored, or classified.
 `supabase status` and `db:status` were **never** run. `--linked` and a remote
-database URL were **never** used.
+database URL were **never** used. The reset, test, and lint outputs shown above
+carry no credential material — the CLI prints only migration names, TAP results,
+and a JSON lint envelope.
 
-**This is an environment blocker, not a code finding.** This task changed no
-`platform/supabase/` file, so the suite's expected result is unchanged from
-TASK-014's recorded evidence (5 pgTAP files, 583 assertions, `Result: PASS`, 0
-failures, 0 lint warnings). That prior evidence is **cited, not re-verified**.
+Two benign notices appeared in the pgTAP output and are pre-existing, unrelated
+to this task, and not failures: `extension "pgtap" already exists, skipping`, and
+one `WARNING: no privileges were granted for "pg_temp_17"` from
+`005_daily_check_ins_rls_test.sql`. The suite still reported `Result: PASS` with
+0 failures, and `db lint` — the check where warnings are configured to fail the
+run — returned 0 findings.
 
-**Action for Wayu:** start Docker Desktop and re-run, from `platform/`:
-
-```text
-corepack pnpm db:start >/dev/null 2>&1
-corepack pnpm exec supabase db reset --local --no-seed
-corepack pnpm exec supabase test db --local
-corepack pnpm exec supabase db lint --local --schema public,private --level warning --fail-on warning
-corepack pnpm db:stop >/dev/null 2>&1
-```
+The CLI also advised that Supabase CLI `v2.110.0` is available (installed
+`v2.109.1`). **No upgrade was performed**: the CLI version is pinned in
+`platform/package.json`, which this task may not modify.
 
 ## Mutation evidence
 
@@ -255,16 +313,40 @@ booleans, counts, fixed rule/case names, and identifier *labels* before `expect`
    because a raw UUID must never be shown as a person's name. If real accounts can
    have blank display names, this will surface as a retryable error for the whole
    team list — worth a product decision before rollout.
-3. **Capacity is capped at 100 active pairs**; beyond that the screen fails closed
-   with distinct wording rather than paginating.
-4. **A grant activated between stage a and stage b produces one retryable error.**
-   Failing closed is the deliberate direction.
+3. **Capacity is capped at 100 active pairs.** Beyond that the screen fails
+   closed rather than paginating or truncating. The **wording** differs from a
+   generic failure — the title is `ข้อมูลเกินขนาดที่รองรับ` and the message asks
+   the coach to contact the administrator, instead of the generic "please try
+   again" — but the **deliberate retry control is still offered**, exactly as the
+   task packet's UI-states table specifies ("sanitized capacity notice + retry,
+   no partial list"). Pressing it will fail identically until the underlying
+   number of active pairs drops, which is why the message points at escalation
+   rather than at retrying. *(Round 1 described this as "non-retryable wording",
+   which overstated it: only the message differs, not the availability of the
+   control.)*
+4. **A revoked grant racing the health-bearing read is shown as "not checked in
+   yet".** If consent is revoked between stage b and stage c, stage b has already
+   returned the pair, while `daily_check_ins_select_shared_for_coach` now refuses
+   the embedded row, so the athlete renders as `ยังไม่ได้เช็กอิน` until the next
+   successful load rather than disappearing. No health value is disclosed — the
+   database refuses it — but for one load the state is misleading in the *safe*
+   direction. A membership revocation in the same window instead makes an expected
+   profile invisible, which fails the whole load as one retryable error.
+
+   *(Round 1 claimed "a grant activated between stage a and stage b produces one
+   retryable error." That was wrong and is corrected here. Stage b is filtered
+   with `.in("team_id", <stage-a team ids>)` and re-validated against the same
+   set, so a grant for an uncoached team is never returned in the first place, and
+   a grant appearing for an already-coached team is simply included. That window
+   produces no error at all. The genuine races are the two described above, both
+   of which sit between stage b and stage c.)*
 5. **Known pre-existing Expo patch drift persists** and is **out of scope**:
    `expo` found `56.0.17` vs expected `~56.0.18`, `expo-router` found `56.2.16` vs
    expected `~56.2.17`. **No dependency was changed.** 20/21 Expo Doctor checks
    pass.
-6. **The local database authorization suite did not run** — Docker daemon
-   unreachable. See the blocked section above.
+6. **Supabase CLI `v2.110.0` is available; `v2.109.1` is pinned and installed.**
+   Not upgraded — the pin lives in `platform/package.json`, which this task may
+   not modify.
 
 ## Rollback
 
@@ -293,7 +375,13 @@ Suggested focus, highest value first:
    referenced-table `order`/`limit` pair.
 4. Whether limitation 2 (blank display name fails the load) is the right product
    call.
-5. Whether the 100-pair cap and its non-retryable wording are right.
+5. Whether the 100-pair cap is right, and whether offering the retry control on a
+   capacity failure — which the packet specifies and the UI does — is the
+   behaviour you want, given that retrying cannot succeed until the number of
+   active pairs drops.
+6. Limitation 4: a grant revoked between stage b and stage c renders as
+   "ยังไม่ได้เช็กอิน" for one load. No data is disclosed, but the wording is
+   briefly misleading.
 
 **Not done, deliberately:** no merge, push, deploy, publish, hosted-Supabase
 link, remote migration, branch deletion, or worktree removal.
