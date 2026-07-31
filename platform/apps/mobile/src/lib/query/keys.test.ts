@@ -16,6 +16,7 @@ describe("authScopedKeys", () => {
     expect(authScopedKeys.user(USER_A)).toContain(USER_A);
     expect(authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE)).toContain(USER_A);
     expect(authScopedKeys.checkInSharing(USER_A)).toContain(USER_A);
+    expect(authScopedKeys.coachCheckInReview(USER_A)).toContain(USER_A);
   });
 
   it("produces different keys for different users", () => {
@@ -46,9 +47,102 @@ describe("authScopedKeys", () => {
       authScopedKeys.account(USER_A),
       authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE),
       authScopedKeys.checkInSharing(USER_A),
+      authScopedKeys.coachCheckInReview(USER_A),
     ]) {
       expect(isAuthScopedKey(key)).toBe(true);
     }
+  });
+});
+
+/**
+ * The coach-review key.
+ *
+ * This is the only key in the application whose cached value carries protected
+ * health data belonging to **someone other than the caller**, so its assertions are
+ * the strictest here. Every one is reduced to a fixed literal, an owner *label*, a
+ * count, or a boolean, so a failure prints `auth-scoped|owner-a|coach-check-in-review|3`
+ * and never an identifier.
+ */
+describe("authScopedKeys.coachCheckInReview", () => {
+  const OWNER_LABELS = new Map<unknown, string>([
+    [USER_A, "owner-a"],
+    [USER_B, "owner-b"],
+  ]);
+
+  const describeKey = (key: readonly unknown[]): string =>
+    `${String(key[0])}|${OWNER_LABELS.get(key[1]) ?? "unknown"}|${String(
+      key[2],
+    )}|${String(key.length)}`;
+
+  it("carries the coach's user id and the resource, and nothing else", () => {
+    expect(describeKey(authScopedKeys.coachCheckInReview(USER_A))).toBe(
+      "auth-scoped|owner-a|coach-check-in-review|3",
+    );
+  });
+
+  it("holds no health value, no team id, and no athlete id", () => {
+    // One entry covers the whole review, so neither a team nor an athlete belongs
+    // in the key. Pinning it to three strings is what keeps that true.
+    const key = authScopedKeys.coachCheckInReview(USER_A);
+
+    expect(key.length).toBe(3);
+    expect(key.every((part) => typeof part === "string")).toBe(true);
+
+    const serialized = JSON.stringify(key);
+    const leaks = [
+      "rpe",
+      "pain",
+      "feeling",
+      "date",
+      "team",
+      "athlete",
+      "grant",
+    ].filter((fragment) => serialized.includes(fragment));
+
+    // Fragment names only.
+    expect(leaks).toEqual([]);
+  });
+
+  it("names the coach, so one coach cannot read another's entry", () => {
+    expect(describeKey(authScopedKeys.coachCheckInReview(USER_A))).not.toBe(
+      describeKey(authScopedKeys.coachCheckInReview(USER_B)),
+    );
+    expect(
+      authScopedUserId(authScopedKeys.coachCheckInReview(USER_A)) === USER_A,
+    ).toBe(true);
+  });
+
+  it("is removable by the auth-scope predicate", () => {
+    // Sign-out and account switch both drop this entry through
+    // `clearAuthScopedQueries`, which matches on the shared prefix alone.
+    expect(isAuthScopedKey(authScopedKeys.coachCheckInReview(USER_A))).toBe(
+      true,
+    );
+  });
+
+  it("does not collide with the athlete-side keys of the same user", () => {
+    // A dual-role user holds both. They must never be the same entry: one is the
+    // user's own check-in, the other is other people's.
+    const distinct = new Set(
+      [
+        authScopedKeys.profile(USER_A),
+        authScopedKeys.memberships(USER_A),
+        authScopedKeys.account(USER_A),
+        authScopedKeys.dailyCheckIn(USER_A, LOCAL_DATE),
+        authScopedKeys.checkInSharing(USER_A),
+        authScopedKeys.coachCheckInReview(USER_A),
+      ].map((key) => JSON.stringify(key)),
+    );
+
+    // A count only.
+    expect(distinct.size).toBe(6);
+  });
+
+  it("is stable across calls", () => {
+    expect(
+      JSON.stringify(authScopedKeys.coachCheckInReview(USER_A)) ===
+        JSON.stringify(authScopedKeys.coachCheckInReview(USER_A)),
+    ).toBe(true);
   });
 });
 

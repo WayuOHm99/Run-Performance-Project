@@ -45,6 +45,24 @@ export const authScopedKeys = {
    */
   checkInSharing: (userId: string) =>
     [AUTH_SCOPE, userId, "check-in-sharing"] as const,
+  /**
+   * One coach's review of the latest check-ins shared with the teams they
+   * actively coach.
+   *
+   * The id in this key is the **coach's**, not any athlete's, because the key
+   * names whose *view* this is. There is deliberately **no team id and no athlete
+   * id**: the whole review is one cache entry, so a revoked grant cannot leave a
+   * per-athlete entry behind that a later render still reads. Per-athlete keys
+   * would also put the identity of a consenting athlete into the cache key itself,
+   * where `clearAuthScopedQueries` removes it but nothing else would.
+   *
+   * The cached value carries protected health data — this is the only key that
+   * does so for someone other than the caller. It is memory-only, dropped outright
+   * by `clearAuthScopedQueries`, and its query sets `gcTime: 0`, so the entry is
+   * collectible the moment the screen is left. No health value appears in the key.
+   */
+  coachCheckInReview: (userId: string) =>
+    [AUTH_SCOPE, userId, "coach-check-in-review"] as const,
 } as const;
 
 /** True for any key produced by `authScopedKeys`. */

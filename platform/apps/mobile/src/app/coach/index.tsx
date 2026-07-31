@@ -6,6 +6,7 @@ import { InfoCard } from "@/components/info-card";
 import { PrimaryButton } from "@/components/primary-button";
 import { ScreenHeading } from "@/components/screen-heading";
 import { ROUTES } from "@/features/auth/gate";
+import { CoachCheckInReviewSection } from "@/features/coach-check-in/coach-check-in-section";
 import { useAccountQuery } from "@/features/profile/use-account";
 import { spacing } from "@/theme/tokens";
 
@@ -15,6 +16,13 @@ import { spacing } from "@/theme/tokens";
  * Reachable only while `canEnterRoleArea(gate, "coach")` holds. An
  * athlete-only user has no route here at all, and would in any case see nothing
  * through RLS.
+ *
+ * TASK-016 replaced the Team placeholder with the read-only daily check-in
+ * review. The monitoring-flags and training-plan placeholders are deliberately
+ * unchanged: neither has a data contract yet, and inventing one here would put
+ * an interpretation of health data on screen that no decision has approved.
+ * No route, detail screen, or tab was added — this screen is still the only
+ * coach surface.
  */
 export default function CoachTeamScreen() {
   const account = useAccountQuery();
@@ -33,12 +41,8 @@ export default function CoachTeamScreen() {
         }
       />
 
-      <InfoCard
-        label="ทีม"
-        title="ยังไม่มีข้อมูลนักกีฬาในขั้นนี้"
-        description="เมื่อระบบสมาชิกพร้อม คุณจะเห็นเฉพาะนักกีฬาที่อยู่ในทีมและยินยอมแชร์ข้อมูล"
-        accent="primary"
-      />
+      <CoachCheckInReviewSection />
+
       <InfoCard
         label="ธงเฝ้าระวัง"
         title="ไม่มีข้อมูลให้ประเมิน"
