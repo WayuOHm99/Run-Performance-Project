@@ -116,6 +116,32 @@ fixture is synthetic, transaction-scoped, and rolled back, so no seed file or
 persistent test data is needed. These commands are local-only; never add
 `--linked` or a remote database URL.
 
+### Local app demo
+
+`docs/app/LOCAL-DEMO.md` is the full guide. In short, from `platform/`:
+
+```powershell
+corepack pnpm demo:reset     # rebuild the synthetic baseline (destructive, local only)
+corepack pnpm demo:web       # launch Web         (resets nothing)
+corepack pnpm demo:android   # launch Android Emulator (resets nothing)
+corepack pnpm demo:stop      # stop this project only
+```
+
+The baseline is two `example.test` accounts, one team, one active athlete
+membership, one active coach membership, and — deliberately — **zero sharing
+grants and zero check-ins**. Consent is never seeded; the whole point of the demo
+is to grant and revoke it yourself through the real UI.
+
+`demo:reset` is the only destructive command, and it is destructive only to the
+local Supabase project. Launching the app never resets or reseeds. None of these
+commands read or modify `apps/mobile/.env.local`.
+
+The demo tooling lives in `tooling/local-demo/` and has its own unit tests:
+
+```powershell
+corepack pnpm test:tooling
+```
+
 ### Credential hygiene
 
 `supabase start` and `supabase status` print development-only API keys and a

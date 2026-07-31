@@ -104,12 +104,35 @@ checks for an error before it checks the membership count.
 
 ## Supabase environment
 
-For local work, copy `.env.example` to `.env.local` and enter only the current
+For hosted work, copy `.env.example` to `.env.local` and enter only the current
 publishable key.
 
 Never put a secret or legacy service-role key in this mobile project. Every
 `EXPO_PUBLIC_` value is bundled into the application and is readable by end
 users. See `docs/app/SUPABASE-ENVIRONMENT.md` for the complete boundary.
+
+The app accepts exactly one of two endpoints, chosen by
+`EXPO_PUBLIC_SUPABASE_ENVIRONMENT`:
+
+- absent, empty, or `hosted` — the configured hosted project;
+- `local` — `http://127.0.0.1:54321`, or `http://10.0.2.2:54321` **on Android
+  only**, which is the emulator's alias for the host loopback.
+
+Any other mode value is rejected rather than defaulted to hosted, and both URL
+sets are matched by exact equality, so userinfo, a path, a query, a fragment, a
+trailing slash, or a different port never resolves. Validation runs before
+`createClient`, so a rejected endpoint means no client exists at all.
+
+To run the app against a local stack with synthetic accounts, use the demo
+commands rather than editing any env file — see `docs/app/LOCAL-DEMO.md`:
+
+```powershell
+corepack pnpm demo:reset
+corepack pnpm demo:web
+```
+
+Those commands set process-scoped variables and `EXPO_NO_DOTENV=1`. **They never
+read, modify, or delete `.env.local`.**
 
 ## Session storage
 
