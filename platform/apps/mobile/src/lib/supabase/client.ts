@@ -70,7 +70,14 @@ function startNativeAuthLifecycle(client: AppSupabaseClient): void {
 
 export function getSupabaseClient(): AppSupabaseClient {
   if (!supabaseClient) {
-    const environment = readPublicSupabaseEnvironment();
+    // The endpoint is validated before `createClient` is ever called, so a
+    // rejected URL means no client exists rather than a client pointed
+    // somewhere it should not be. `isAndroid` is passed because the emulator's
+    // host-loopback alias is accepted on Android and nowhere else; see
+    // `environment.ts`.
+    const environment = readPublicSupabaseEnvironment({
+      isAndroid: Platform.OS === "android",
+    });
     supabaseClient = createConfiguredClient(environment);
     startNativeAuthLifecycle(supabaseClient);
   }
