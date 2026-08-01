@@ -139,11 +139,10 @@ describe("parseBaselineRow", () => {
     );
   });
 
-  // Round 6, finding 2. The two failures below used to be one, and the
-  // classification is now exactly as narrow as the explanation for it.
+  // Round 8. Both structural shapes are retryable — the Product Owner hit the
+  // no-row-set one three times running and it cleared on its own — but they
+  // keep distinct messages so an exhaustion still says which occurred.
   describe("classification of a wrong row set", () => {
-    // Retryable: the row set exists, so the CLI honoured its result contract
-    // and only the cardinality is wrong.
     for (const [label, rows] of [
       ["empty", []],
       ["two rows", [EXPECTED_BASELINE, EXPECTED_BASELINE]],
@@ -162,9 +161,6 @@ describe("parseBaselineRow", () => {
       });
     }
 
-    // Not retryable: round 6 measured what an unready local database produces —
-    // a non-zero exit — so a document with no row set is a contract violation,
-    // not a database still coming up.
     for (const [label, document] of [
       ["empty object", {}],
       ["null rows", { rows: null }],
@@ -175,7 +171,7 @@ describe("parseBaselineRow", () => {
       ["document that is not an object", 5],
       ["null document", null],
     ]) {
-      it(`fails a missing or non-array row set immediately (${label})`, () => {
+      it(`marks a missing or non-array row set retryable (${label})`, () => {
         try {
           parseBaselineRow(JSON.stringify(document));
           assert.fail("expected a rejection");
@@ -185,10 +181,36 @@ describe("parseBaselineRow", () => {
             error.message,
             "The baseline query returned no row set.",
           );
-          assert.equal(error.retryable, false);
+          assert.equal(error.retryable, true);
         }
       });
     }
+
+    // The two retryable shapes must stay distinguishable. If these ever
+    // collapse into one message, an exhaustion stops saying which branch fired.
+    it("keeps the two structural messages distinct", () => {
+      const noRowSet = (() => {
+        try {
+          parseBaselineRow(JSON.stringify({}));
+        } catch (error) {
+          return error.message;
+        }
+      })();
+      const wrongLength = (() => {
+        try {
+          parseBaselineRow(JSON.stringify({ rows: [] }));
+        } catch (error) {
+          return error.message;
+        }
+      })();
+
+      assert.notEqual(noRowSet, wrongLength);
+      assert.equal(noRowSet, "The baseline query returned no row set.");
+      assert.equal(
+        wrongLength,
+        "The baseline query did not return exactly one row.",
+      );
+    });
   });
 
   it("rejects a non-integer count", () => {
@@ -302,66 +324,120 @@ describe("readBaseline", () => {
     assert.deepEqual(calls, [BASELINE_SQL, BASELINE_SQL]);
   });
 
-  // Round 6, finding 1. The budget is a decision backed by measurement, so it
-  // is pinned here rather than left as whatever the constants happen to say.
-  // Changing either number should require changing this test and re-reading the
-  // evidence in the handoff.
-  it("holds the bound round 6 chose from measurement", () => {
-    assert.equal(BASELINE_ATTEMPTS, 4);
-    assert.equal(BASELINE_RETRY_DELAY_MS, 500);
+  // Round 8's production bound, pinned so it cannot drift silently.
+  it("holds the round 8 production bound", () => {
+    assert.equal(BASELINE_ATTEMPTS, 10);
+    assert.equal(BASELINE_RETRY_DELAY_MS, 1000);
 
-    // Three waits, not four: no wait follows the final attempt.
-    const worstCaseMs = (BASELINE_ATTEMPTS - 1) * BASELINE_RETRY_DELAY_MS;
+    // Nine waits, not ten: no wait follows the final attempt.
+    const maxWaitBudgetMs = (BASELINE_ATTEMPTS - 1) * BASELINE_RETRY_DELAY_MS;
 
-    assert.equal(worstCaseMs, 1500);
-
-    // The measured readiness gap at the point `readBaseline` runs was 0ms in 4
-    // of 4 cold cycles, and the database was already ready ~11.8s before
-    // `db reset` even returned. A budget in the tens of seconds would be
-    // sizing for a window this code cannot be in.
-    assert.ok(
-      worstCaseMs <= 5000,
-      "the retry must stay a short readiness allowance, not a timeout",
-    );
+    assert.equal(maxWaitBudgetMs, 9000);
   });
 
-  it("exhausts a bounded budget and then fails closed", async () => {
-    const { calls, query } = scriptedQuery(
-      Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
-    );
-    const { waits, wait } = recordingWait();
+  // Both structural shapes recover, and both are driven all the way to the
+  // last attempt so the full budget is exercised rather than assumed.
+  for (const [label, transient] of [
+    ["missing rows", JSON.stringify({ boundary: SENTINEL, warning: SENTINEL })],
+    ["non-array rows", JSON.stringify({ rows: null, warning: SENTINEL })],
+    ["object rows", JSON.stringify({ rows: { leaked: SENTINEL } })],
+    ["wrong cardinality", notReady],
+  ]) {
+    it(`recovers when ${label} repeats and is then followed by one valid row`, async () => {
+      const { calls, query } = scriptedQuery([
+        transient,
+        transient,
+        transient,
+        statusRow(),
+      ]);
+      const { waits, wait } = recordingWait();
 
-    await assert.rejects(
-      () => readBaseline({ query, wait }),
-      (error) => {
-        assert.ok(error instanceof DemoBaselineError);
-        // The same fixed sanitized message a single attempt produces.
-        assert.equal(
-          error.message,
-          "The baseline query did not return exactly one row.",
-        );
+      const counts = await readBaseline({ query, wait });
 
-        return true;
-      },
-    );
+      assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
+      assert.equal(calls.length, 4);
+      assert.deepEqual(waits, [
+        BASELINE_RETRY_DELAY_MS,
+        BASELINE_RETRY_DELAY_MS,
+        BASELINE_RETRY_DELAY_MS,
+      ]);
+    });
 
-    // Bounded in both dimensions: a fixed number of attempts, and one bounded
-    // wait between each pair of them — never one after the last.
-    assert.equal(calls.length, BASELINE_ATTEMPTS);
-    assert.equal(waits.length, BASELINE_ATTEMPTS - 1);
-    assert.ok(BASELINE_ATTEMPTS >= 2 && BASELINE_ATTEMPTS <= 6);
-    assert.ok(BASELINE_RETRY_DELAY_MS > 0 && BASELINE_RETRY_DELAY_MS <= 2000);
+    it(`recovers on the very last attempt when ${label} persists`, async () => {
+      const { calls, query } = scriptedQuery([
+        ...Array.from({ length: BASELINE_ATTEMPTS - 1 }, () => transient),
+        statusRow(),
+      ]);
+      const { waits, wait } = recordingWait();
 
-    for (const ms of waits) {
-      assert.equal(ms, BASELINE_RETRY_DELAY_MS);
-    }
-  });
+      const counts = await readBaseline({ query, wait });
 
-  // The seams exist for these tests; they must not be a way to remove the bound
-  // being tested. A zero or NaN budget would otherwise skip the loop and leave
-  // no error to throw at all.
-  it("falls back to the default budget when a seam is out of bounds", async () => {
-    for (const attempts of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
+      assert.equal(calls.length, 10);
+      assert.equal(waits.length, 9);
+    });
+  }
+
+  // Exhaustion, per structural shape, with the message that identifies it.
+  for (const [label, response, message] of [
+    [
+      "missing rows",
+      JSON.stringify({ boundary: SENTINEL }),
+      "The baseline query returned no row set.",
+    ],
+    [
+      "non-array rows",
+      JSON.stringify({ rows: SENTINEL }),
+      "The baseline query returned no row set.",
+    ],
+    [
+      "wrong cardinality",
+      notReady,
+      "The baseline query did not return exactly one row.",
+    ],
+  ]) {
+    it(`exhausts exactly 10 attempts on persistent ${label}, then fails closed`, async () => {
+      const { calls, query } = scriptedQuery(
+        Array.from({ length: BASELINE_ATTEMPTS }, () => response),
+      );
+      const { waits, wait } = recordingWait();
+
+      await assert.rejects(
+        () => readBaseline({ query, wait }),
+        (error) => {
+          assert.ok(error instanceof DemoBaselineError);
+          // The distinct fixed sanitized message for this branch.
+          assert.equal(error.message, message);
+
+          return true;
+        },
+      );
+
+      // Exact counts, and exactly one bounded wait between each pair of
+      // attempts — never one after the last.
+      assert.equal(calls.length, 10);
+      assert.equal(waits.length, 9);
+      assert.deepEqual(
+        waits,
+        Array.from({ length: 9 }, () => 1000),
+      );
+    });
+  }
+
+  // The seams exist for these tests; they must not be a way to exceed or remove
+  // the production bound. A zero or NaN budget would otherwise skip the loop and
+  // leave no error to throw at all.
+  it("falls back to the production budget when the attempts seam is out of bounds", async () => {
+    for (const attempts of [
+      0,
+      -1,
+      2.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      // Above the production bound: must not be honoured.
+      11,
+      1000,
+    ]) {
       const { calls, query } = scriptedQuery(
         Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
       );
@@ -370,17 +446,22 @@ describe("readBaseline", () => {
         () => readBaseline({ query, wait: async () => {}, attempts }),
         DemoBaselineError,
       );
-      assert.equal(calls.length, BASELINE_ATTEMPTS);
+      assert.equal(
+        calls.length,
+        BASELINE_ATTEMPTS,
+        `attempts=${attempts} escaped the bound`,
+      );
     }
   });
 
-  it("never waits longer than the bounded delay", async () => {
+  it("never waits longer than the production delay", async () => {
     for (const delayMs of [
       Number.NaN,
       Number.POSITIVE_INFINITY,
       -1,
       60_000,
-      "500",
+      1001,
+      "1000",
     ]) {
       const { query } = scriptedQuery(
         Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
@@ -392,10 +473,26 @@ describe("readBaseline", () => {
         DemoBaselineError,
       );
 
+      assert.equal(waits.length, 9);
+
       for (const ms of waits) {
-        assert.equal(ms, BASELINE_RETRY_DELAY_MS);
+        assert.equal(ms, BASELINE_RETRY_DELAY_MS, `delayMs=${delayMs} escaped`);
       }
     }
+  });
+
+  // A seam may still make a test fast by asking for less.
+  it("honours a smaller budget from the seams", async () => {
+    const { calls, query } = scriptedQuery([notReady, notReady]);
+    const { waits, wait } = recordingWait();
+
+    await assert.rejects(
+      () => readBaseline({ query, wait, attempts: 2, delayMs: 7 }),
+      DemoBaselineError,
+    );
+
+    assert.equal(calls.length, 2);
+    assert.deepEqual(waits, [7]);
   });
 
   // A real read of a wrong database. Retrying it would turn a visible, correct
@@ -422,44 +519,16 @@ describe("readBaseline", () => {
     );
   });
 
-  // Round 6, finding 2: these shapes were retried four times by round 5 on no
-  // evidence. They now cost exactly one attempt and no wait.
-  it("does not retry a missing or non-array row set", async () => {
-    for (const document of [
-      {},
-      { rows: null },
-      { rows: {} },
-      { rows: "1" },
-      { boundary: "b", warning: "w" },
-      5,
-    ]) {
-      const { calls, query } = scriptedQuery([JSON.stringify(document)]);
-      const { waits, wait } = recordingWait();
-
-      await assert.rejects(
-        () => readBaseline({ query, wait }),
-        (error) => {
-          assert.ok(error instanceof DemoBaselineError);
-          assert.equal(
-            error.message,
-            "The baseline query returned no row set.",
-          );
-
-          return true;
-        },
-      );
-
-      assert.equal(calls.length, 1, `${JSON.stringify(document)} was retried`);
-      assert.deepEqual(waits, []);
-    }
-  });
-
-  // Decision 4 of this round: unprovable transience is not retried.
-  it("does not retry malformed output or a non-integer count", async () => {
-    for (const response of [
-      `not json at all ${SENTINEL}`,
+  // Still not retried: neither has ever been observed clearing on its own, and
+  // retrying a broken contract only delays a failure that should be immediate.
+  for (const [label, response] of [
+    ["malformed JSON", `not json at all ${SENTINEL}`],
+    [
+      "a non-integer count",
       JSON.stringify({ rows: [{ ...EXPECTED_BASELINE, profiles: SENTINEL }] }),
-    ]) {
+    ],
+  ]) {
+    it(`queries exactly once for ${label}`, async () => {
       const { calls, query } = scriptedQuery([response]);
       const { waits, wait } = recordingWait();
 
@@ -469,32 +538,39 @@ describe("readBaseline", () => {
       );
       assert.equal(calls.length, 1);
       assert.deepEqual(waits, []);
-    }
-  });
+    });
+  }
 
   // A transport failure is not this function's condition either.
-  it("does not retry a query that throws", async () => {
+  it("queries exactly once for a subprocess failure", async () => {
     let calls = 0;
+    const { waits, wait } = recordingWait();
     const query = async () => {
       calls += 1;
-      throw new Error("local scalar query failed");
+      throw new Error(`local scalar query failed ${SENTINEL}`);
     };
 
-    await assert.rejects(() => readBaseline({ query, wait: async () => {} }));
+    await assert.rejects(() => readBaseline({ query, wait }));
     assert.equal(calls, 1);
+    assert.deepEqual(waits, []);
   });
 
   it("leaks no response content into the error it throws", async () => {
+    const exhaust = (response) =>
+      Array.from({ length: BASELINE_ATTEMPTS }, () => response);
+
     const responses = [
-      Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
+      // Both retryable branches, driven to exhaustion so the error that
+      // escapes is the one a real failure would produce.
+      exhaust(notReady),
+      exhaust(JSON.stringify({ boundary: SENTINEL, rows: SENTINEL })),
+      exhaust(JSON.stringify({ warning: SENTINEL })),
+      exhaust(JSON.stringify({ rows: { leaked: SENTINEL } })),
+      exhaust(JSON.stringify({ rows: [] })),
+      // The non-retryable branches, which fail on the first attempt.
       [`not json at all ${SENTINEL}`],
       [JSON.stringify({ rows: [{ profiles: SENTINEL }] })],
       [JSON.stringify({ boundary: SENTINEL, rows: [{ leak: SENTINEL }] })],
-      // Round 6's new fail-fast branch, including the case where the
-      // offending `rows` value is itself the thing that must not escape.
-      [JSON.stringify({ boundary: SENTINEL, rows: SENTINEL })],
-      [JSON.stringify({ warning: SENTINEL })],
-      [JSON.stringify({ rows: { leaked: SENTINEL } })],
     ];
 
     for (const scripted of responses) {
@@ -510,6 +586,10 @@ describe("readBaseline", () => {
           error.message,
           String(error),
           error.stack ?? "",
+          // `cause` is never set by this module, but an edit that started
+          // chaining the underlying failure would carry the response with it.
+          String(error.cause ?? ""),
+          JSON.stringify(error.cause ?? null),
           // Own properties, enumerable or not, including anything a future
           // edit attaches for debugging.
           JSON.stringify(
@@ -543,6 +623,9 @@ describe("readBaseline", () => {
         // `retryable` is a boolean decided at the throw site, never a value
         // copied out of the response.
         assert.equal(typeof error.retryable, "boolean");
+
+        // Nothing is chained, so nothing can be carried along by a chain.
+        assert.equal(error.cause, undefined);
       }
     }
   });
