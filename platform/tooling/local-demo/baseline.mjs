@@ -9,12 +9,29 @@
 // `parseBaselineRow` and `compareBaseline` are pure so the leak-shape can be
 // tested without a database.
 
+import { setTimeout as delay } from "node:timers/promises";
+
 import { EXPECTED_BASELINE } from "./accounts.mjs";
 import { queryLocalScalars } from "./supabase-cli.mjs";
 
+// `retryable` is a fixed boolean set at the throw site from the shape of the
+// failure, never from anything the CLI returned. Nothing derived from the
+// response is attached to the error, here or anywhere below.
 export class DemoBaselineError extends Error {
   name = "DemoBaselineError";
+  retryable;
+
+  constructor(message, { retryable = false } = {}) {
+    super(message);
+    this.retryable = retryable;
+  }
 }
+
+// A bounded, deterministic retry budget for exactly one condition: a
+// well-formed baseline document whose `rows` is not exactly one row. Four
+// attempts, three waits, so the worst case adds 1.5s and then fails.
+export const BASELINE_ATTEMPTS = 4;
+export const BASELINE_RETRY_DELAY_MS = 500;
 
 // One row, all integers. `named_profiles` counts profiles that carry a usable
 // display name, because a null one would make the coach surface fail closed and
@@ -50,6 +67,7 @@ export function parseBaselineRow(stdout) {
   if (!Array.isArray(rows) || rows.length !== 1) {
     throw new DemoBaselineError(
       "The baseline query did not return exactly one row.",
+      { retryable: true },
     );
   }
 
@@ -94,6 +112,62 @@ export function formatBaseline(counts) {
     .join("\n");
 }
 
-export async function readBaseline() {
-  return parseBaselineRow(await queryLocalScalars(BASELINE_SQL));
+// Bounded retry, one condition only.
+//
+// On a cold stack the first baseline read has been observed to come back as a
+// well-formed envelope — `boundary`, `warning`, `rows` — whose `rows` is not the
+// single row the query can only ever produce. The SQL is ten scalar subqueries
+// with no `from` and no predicate on the outer select, so exactly one row is the
+// only result the database can return; anything else means the read did not
+// reach a ready database, not that the demo is in a different state. That is the
+// one condition retried here.
+//
+// Why retrying it is safe: the query is a read-only aggregate with no side
+// effect, so re-running it changes nothing; and a retry can only ever end in one
+// of the same three outcomes as the first attempt. It cannot mask a wrong
+// baseline, because a wrong baseline parses fine — `compareBaseline` is a
+// separate step that this function never reaches into and never re-runs.
+//
+// Why the other two failures are *not* retried:
+//
+//   - A **count mismatch** is not a failure of this function at all. It is a
+//     real, correct read of a database that is in the wrong state, and the
+//     caller must see it on the first attempt.
+//   - **Malformed JSON** and a **non-integer count** are not retried, because I
+//     cannot prove they are transient. Malformed output means the CLI wrote
+//     something other than a result document, and a non-integer count means a
+//     `count(*)::int` came back as something that is not an integer; both are
+//     consistent with a broken invocation or a changed contract, and retrying a
+//     broken contract only delays a failure that should be immediate. Requiring
+//     proof rather than plausibility is deliberate: an unprovable retry is how a
+//     permanent fault gets reported as a slow one.
+//
+// When the budget is exhausted the last error is rethrown unchanged, so a
+// persistent structural failure fails closed with the same fixed sanitized
+// message a single attempt would have produced.
+export async function readBaseline({
+  query = queryLocalScalars,
+  attempts = BASELINE_ATTEMPTS,
+  delayMs = BASELINE_RETRY_DELAY_MS,
+  wait = delay,
+} = {}) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return parseBaselineRow(await query(BASELINE_SQL));
+    } catch (error) {
+      if (!(error instanceof DemoBaselineError) || error.retryable !== true) {
+        throw error;
+      }
+
+      lastError = error;
+
+      if (attempt < attempts) {
+        await wait(delayMs);
+      }
+    }
+  }
+
+  throw lastError;
 }
