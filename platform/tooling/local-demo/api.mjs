@@ -75,7 +75,7 @@ async function parseJsonBody(response, what) {
     return JSON.parse(text);
   } catch {
     throw new DemoApiError(
-      `${what} returned a malformed response body. The body was discarded unread on purpose; re-run the request yourself against the local stack if you need to see it.`,
+      `${what} returned a malformed response body. The body was discarded unread on purpose, because it can carry a session, an email, or a database error. See docs/app/LOCAL-DEMO.md for recovery steps.`,
       response.status,
     );
   }

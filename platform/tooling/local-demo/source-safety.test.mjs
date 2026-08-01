@@ -294,6 +294,31 @@ describe("the destructive commands hold the interprocess lock", () => {
     const paths = sourceFiles.find((file) => file.name === "paths.mjs");
 
     assert.ok(paths.code.includes('LOCAL_DEMO_DIR, "demo.lock"'));
+    assert.ok(paths.code.includes('LOCAL_DEMO_DIR, "demo.lock.break"'));
+  });
+
+  // Age is not evidence of death. A lock broken on a timer is a lock taken away
+  // from a slow but perfectly healthy `supabase start`.
+  it("the lock never expires a holder on age", () => {
+    const lock = sourceFiles.find((file) => file.name === "lock.mjs");
+
+    for (const pattern of [/STALE_LOCK_MS/, /Date\.parse/, /\bnow\b\s*-/]) {
+      assert.ok(
+        !pattern.test(lock.code),
+        `lock.mjs must not decide staleness from a timestamp (${pattern})`,
+      );
+    }
+  });
+
+  // The lock file is ordinary writable state on disk, so everything read back
+  // out of it is untrusted.
+  it("the lock echoes only an allowlisted label", () => {
+    const lock = sourceFiles.find((file) => file.name === "lock.mjs");
+
+    assert.ok(lock.code.includes("DESTRUCTIVE_LOCK_LABELS.includes"));
+    assert.ok(!/\$\{\s*record\.label\s*\}/.test(lock.code));
+    assert.ok(!/\$\{\s*record\.host\s*\}/.test(lock.code));
+    assert.ok(!/\$\{\s*rawLabel\s*\}/.test(lock.code));
   });
 });
 
@@ -310,12 +335,41 @@ describe("the restart path never prints a credential block", () => {
     assert.ok(!start.code.includes("runInheritedStdio"));
   });
 
-  it("no module tells the Product Owner to run db:start", () => {
+  it("no module tells the Product Owner to run db:start or db:status", () => {
     for (const { name, code } of sourceFiles) {
-      assert.ok(
-        !code.includes("db:start"),
-        `${name} must point at demo:start, whose output is suppressed`,
-      );
+      for (const script of ["db:start", "db:status"]) {
+        assert.ok(
+          !code.includes(script),
+          `${name} must point at demo:start, whose output is suppressed`,
+        );
+      }
+    }
+  });
+
+  // A failure is the moment someone is most likely to paste a terminal into a
+  // chat, and the raw CLI output at that moment is the most credential-bearing
+  // thing on their screen. No message may send them there.
+  it("no message tells anyone to re-run the underlying CLI", () => {
+    const invitations = [
+      /re-?run the (underlying|request|command)/i,
+      /run the (supabase )?cli/i,
+      /yourself if you need/i,
+      /supabase (start|status) (yourself|by hand)/i,
+    ];
+
+    for (const { name, code } of sourceFiles) {
+      for (const rawLine of code.split("\n")) {
+        if (!rawLine.includes("`") && !rawLine.includes('"')) {
+          continue;
+        }
+
+        for (const invitation of invitations) {
+          assert.ok(
+            !invitation.test(rawLine),
+            `${name} invites a raw CLI re-run: ${rawLine.trim().slice(0, 60)}`,
+          );
+        }
+      }
     }
   });
 });

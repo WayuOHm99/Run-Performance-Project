@@ -23,7 +23,8 @@
 //     `MoveFileEx` with replace-existing), so a reader sees either the whole
 //     previous file or the whole new one, never a half-written one.
 
-import { mkdir, open, rename, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { mkdir, open, readdir, rename, rm } from "node:fs/promises";
 
 import { LOCAL_SUPABASE_URL } from "./endpoint.mjs";
 import {
@@ -64,19 +65,69 @@ export function renderCredentialsFile({ accounts, password, generatedAt }) {
   return lines.join("\n");
 }
 
-// Removes the credential file, and any temporary file a previous crash left
-// behind, so nothing survives that could be mistaken for the current baseline.
-// Called before the destructive step of a reset, and safe to call when no file
-// exists.
-export async function discardCredentialsFile({ file = CREDENTIALS_FILE } = {}) {
-  await rm(file, { force: true });
-  await rm(temporaryPathFor(file), { force: true });
-}
+const TEMPORARY_SUFFIX = ".tmp";
 
 function temporaryPathFor(file) {
   // Pid-qualified, so two processes cannot write the same temporary file. The
   // lock already prevents that; this makes it true even without one.
-  return `${file}.${process.pid}.tmp`;
+  return `${file}.${process.pid}${TEMPORARY_SUFFIX}`;
+}
+
+function escapeForPattern(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Matches this tooling's own temporary files and nothing else: the exact
+// credential file name, a dot, a run of digits that was somebody's pid, and the
+// suffix. A file that does not match that shape is left alone, whatever it is.
+function temporaryFilePattern(file) {
+  return new RegExp(
+    `^${escapeForPattern(basename(file))}\\.\\d+${escapeForPattern(TEMPORARY_SUFFIX)}$`,
+  );
+}
+
+// Removes every temporary credential file in the ignored directory, **including
+// ones written by other processes**.
+//
+// Round 2 only cleaned this process's own pid-qualified file, which meant a run
+// killed part-way left a temporary file that nothing would ever remove: it is
+// not the credential file, so no reset replaced it, and it carried the password
+// that run had generated. Cleaning only the current pid made that permanent.
+//
+// Deleting another process's temporary file is safe here because writing one
+// happens only inside the destructive-workflow lock, so no other run can have
+// one in flight while this code runs. The scan is confined to the ignored
+// `.local-demo/` directory and to names matching the exact temporary-file shape;
+// `readdir` returns bare entry names, so nothing here can reach outside it. No
+// file is opened and no content is read, so nothing can be printed either.
+async function removeTemporaryFiles(directory, file) {
+  const pattern = temporaryFilePattern(file);
+
+  let entries;
+
+  try {
+    entries = await readdir(directory);
+  } catch {
+    // No directory yet: nothing to clean.
+    return;
+  }
+
+  for (const entry of entries) {
+    if (pattern.test(entry)) {
+      await rm(join(directory, entry), { force: true });
+    }
+  }
+}
+
+// Removes the credential file, and any temporary file any run left behind, so
+// nothing survives that could be mistaken for the current baseline. Called
+// before the destructive step of a reset, and safe to call when no file exists.
+export async function discardCredentialsFile({
+  directory = LOCAL_DEMO_DIR,
+  file = CREDENTIALS_FILE,
+} = {}) {
+  await rm(file, { force: true });
+  await removeTemporaryFiles(directory, file);
 }
 
 export async function writeCredentialsFile({
@@ -95,10 +146,11 @@ export async function writeCredentialsFile({
 
   const temporaryFile = temporaryPathFor(file);
 
-  // A leftover temporary file from a killed run would fail the exclusive create
-  // below, so it is cleared first. Nothing reads it; only this function ever
-  // writes it.
-  await rm(temporaryFile, { force: true });
+  // Leftover temporary files from killed runs are cleared first — this run's own
+  // pid-qualified name would otherwise fail the exclusive create below, and
+  // another run's would sit there forever holding a password nothing will ever
+  // use. Nothing reads them; only this function ever writes one.
+  await removeTemporaryFiles(directory, file);
 
   // Owner-only where the platform honours it. Windows ignores the mode, which is
   // why the directory is git-ignored rather than relying on file permissions.

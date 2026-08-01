@@ -223,6 +223,46 @@ describe("writeCredentialsFile", () => {
     assert.deepEqual(entries, ["credentials.txt"]);
   });
 
+  // Round 2 cleaned only this process's own pid-qualified file. A run killed
+  // part-way therefore left a temporary file that nothing would ever remove —
+  // not the credential file, so no reset replaced it, and carrying the password
+  // that run had generated.
+  it("removes a temporary file left by a different process", async () => {
+    const otherPid = process.pid + 1;
+
+    await writeFile(`${file}.${otherPid}.tmp`, "partial", "utf8");
+
+    await write(SYNTHETIC_PASSWORD);
+
+    assert.deepEqual(await readdir(directory), ["credentials.txt"]);
+  });
+
+  it("leaves files that are not this tooling's temporary files alone", async () => {
+    const bystanders = [
+      "demo.lock",
+      "credentials.txt.tmp",
+      "credentials.txt.notapid.tmp",
+      "credentials.txt.123.tmp.bak",
+      "other.txt.123.tmp",
+      "notes.md",
+    ];
+
+    for (const name of bystanders) {
+      await writeFile(join(directory, name), "synthetic", "utf8");
+    }
+
+    await write(SYNTHETIC_PASSWORD);
+
+    const remaining = await readdir(directory);
+
+    for (const name of bystanders) {
+      assert.ok(
+        remaining.includes(name),
+        `cleanup must not remove ${name}, which is not a temporary credential file`,
+      );
+    }
+  });
+
   // The important one. A truncated file is not merely useless: it is a password
   // that silently does not work, which reads as a broken demo rather than a
   // broken file.
@@ -260,14 +300,32 @@ describe("discardCredentialsFile", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("removes a stale credential file and any temporary file", async () => {
+  it("removes a stale credential file and every run's temporary file", async () => {
     await writeFile(file, "stale", "utf8");
     await writeFile(`${file}.${process.pid}.tmp`, "partial", "utf8");
+    await writeFile(`${file}.${process.pid + 1}.tmp`, "partial", "utf8");
+    await writeFile(`${file}.999999.tmp`, "partial", "utf8");
 
-    await discardCredentialsFile({ file });
+    await discardCredentialsFile({ directory, file });
 
     assert.equal(existsSync(file), false);
     assert.deepEqual(await readdir(directory), []);
+  });
+
+  it("stays inside the ignored directory", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "local-demo-outside-"));
+
+    try {
+      await writeFile(join(outside, "credentials.txt.123.tmp"), "x", "utf8");
+      await writeFile(file, "stale", "utf8");
+
+      await discardCredentialsFile({ directory, file });
+
+      // A file of exactly the temporary shape, one directory away, is untouched.
+      assert.deepEqual(await readdir(outside), ["credentials.txt.123.tmp"]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("is a no-op when nothing is there", async () => {

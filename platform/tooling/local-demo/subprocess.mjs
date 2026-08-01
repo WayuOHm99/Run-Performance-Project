@@ -62,12 +62,12 @@ export function describeSubprocessFailure(label, exitCode, signal = null) {
   const terminatingSignal = sanitizeSignal(signal);
 
   if (terminatingSignal) {
-    return `${label} was terminated by ${terminatingSignal} and did not complete. Output was suppressed on purpose; re-run the underlying command yourself if you need to diagnose it.`;
+    return `${label} was terminated by ${terminatingSignal} and did not complete. Output was suppressed on purpose, because it can carry a database URL, a JWT secret, and a service-role key. See docs/app/LOCAL-DEMO.md for recovery steps that do not print any of them.`;
   }
 
   const code = Number.isInteger(exitCode) ? exitCode : "unknown";
 
-  return `${label} failed (exit code ${code}). Output was suppressed on purpose; re-run the underlying command yourself if you need to diagnose it.`;
+  return `${label} failed (exit code ${code}). Output was suppressed on purpose, because it can carry a database URL, a JWT secret, and a service-role key. See docs/app/LOCAL-DEMO.md for recovery steps that do not print any of them.`;
 }
 
 export function subprocessFailure(label, exitCode, signal = null) {

@@ -26,6 +26,10 @@ export const CREDENTIALS_FILE = join(LOCAL_DEMO_DIR, "credentials.txt");
 // directory, so nothing about it is ever committed.
 export const LOCK_FILE = join(LOCAL_DEMO_DIR, "demo.lock");
 
+// Held only while an abandoned lock is being recovered, so that at most one
+// process can be doing that at any moment. See `lock.mjs`.
+export const BREAK_FILE = join(LOCAL_DEMO_DIR, "demo.lock.break");
+
 // Passed to the Supabase CLI as a path relative to `PLATFORM_DIR`, which is the
 // directory holding `supabase/config.toml`.
 export const FIXTURE_SQL_RELATIVE = "supabase/fixtures/local-demo.sql";
@@ -34,4 +38,8 @@ export const FIXTURE_SQL_RELATIVE = "supabase/fixtures/local-demo.sql";
 // one, so it is safe to show and safe to paste.
 export const CREDENTIALS_DISPLAY_PATH = "platform/.local-demo/credentials.txt";
 
-export const LOCK_DISPLAY_PATH = "platform/.local-demo/demo.lock";
+// The recovery claim is the only lock artefact a message ever names, because it
+// is the only one a person is ever asked to delete. The lock file itself is
+// recovered automatically and is deliberately not advertised as something to
+// remove by hand.
+export const BREAK_DISPLAY_PATH = "platform/.local-demo/demo.lock.break";
