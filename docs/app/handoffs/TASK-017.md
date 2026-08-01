@@ -1,17 +1,20 @@
 # TASK-017 handoff — Safe Local App Demo Environment and Synthetic Fixtures
 
-Status: **Round 9 complete.** Codex did not approve round 8: the Product Owner's
-`demo:verify` exhausted all ten of its retries against a healthy, unchanged
-database. Round 9 stops guessing at attempt counts. Termination is now driven by
-a canary probe run through the same CLI path, bounded by a 60s deadline and a
-30-attempt ceiling, and **a healthy baseline no longer needs a destructive
-`demo:reset` to be re-read**. The root cause remains unproven after ~179
-structural probes, and the mechanism is built to be correct without it. Full
-verification re-run, including the database authorization suite, an end-to-end
-consent verification, a stop → cold `demo:reset` cycle, and eight consecutive
-`demo:verify` runs. **The intermittent condition did not recur during my
-verification**, so nothing here claims to have watched a live recovery. Stopped
-for GPT/Codex read-only review. Not merged. Worktree not removed.
+Status: **Round 10 complete.** Codex raised three Medium findings against round
+9; the first invalidated its central mechanism. A healthy control query could end
+a retry early on an assumption round 9 itself had listed as unproven, so a
+baseline-specific transient could be declared permanent after three attempts.
+The control query is now a **label applied after the loop, never a gate**;
+termination is bounded by a 60s deadline and a 30-attempt ceiling and nothing
+else. The canary's own contract is now checked exactly, and every baseline and
+diagnostic CLI child now has a real timeout with safe termination — previously a
+stuck child could hang `demo:verify` forever. **A healthy baseline still never
+needs a destructive `demo:reset` to be re-read.** The root cause remains unproven
+after ~179 structural probes in round 9. Full verification re-run, including the
+database authorization suite, an end-to-end consent verification, a cold stack
+cycle, and **ten consecutive `demo:verify` runs**. **The intermittent condition
+did not recur**, so nothing here claims a live recovery was observed. Stopped for
+GPT/Codex read-only review. Not merged. Worktree not removed.
 
 **One acceptance criterion is deliberately still open — AC3.** See the acceptance
 table. It is not "met at the data layer" any more; it stays open until the
@@ -203,6 +206,139 @@ explained why no documentation commit appears in a rollback command.
 > section for what the table says now — two verified commands, and an explicit
 > statement that anything older is a manual rollback.
 
+## Round 10: the findings and what was done
+
+Three Medium findings from Codex's round 9 review. The first invalidates round
+9's central mechanism.
+
+### M1 — a healthy control query cannot prove a baseline-specific failure is permanent
+
+**Codex is right, and this is the important one.** Round 9 stopped retrying as
+soon as `select 1::int as ok` came back healthy, on the inference that a working
+CLI path proves a structurally broken `BASELINE_SQL` will not recover.
+
+That inference was never proven. Round 9's own handoff listed it as limitation
+22 and as reviewer item 1 — and then the code acted on it anyway. If the
+transient is specific to the baseline query rather than the transport, round 9
+would declare it permanent **after three attempts**, turning the exact failure
+this whole sequence exists to fix into a fast, confident, wrong answer. That is
+strictly worse than round 8, which at least kept trying.
+
+It is the round 6 mistake one level up: treating *"I have no evidence for X"* as
+*"I have evidence against X"*. Round 9 even named that pattern while committing
+it.
+
+**The correction.** The control query no longer touches control flow. It runs
+**once, after the loop has already given up**, and its only effect is which fixed
+sentence the error carries:
+
+| Diagnosis | Fixed sentence appended |
+| --- | --- |
+| `cli-query-path-healthy` | "A trivial control query answered normally, so the local CLI query path itself was working." |
+| `cli-query-path-unhealthy` | "A trivial control query also failed, so the local CLI query path itself was not working." |
+| `cli-query-path-unknown` | "The control query was not run." |
+
+The structural message is preserved verbatim on `error.structuralFailure`, and
+the enum on `error.diagnosis`. Both halves of the message are constants selected
+by a boolean; neither is derived from any response.
+
+Termination is now bounded by **the deadline and the attempt ceiling, and nothing
+else**. The "quick allowance" is gone entirely. A healthy baseline suffering the
+observed transient stays recoverable for the full minute whatever the control
+query says, and `demo:verify` stays read-only throughout. **A destructive
+`demo:reset` is still not the recovery path for a read-only transient.**
+
+### M2 — the canary accepted malformed singleton rows as healthy
+
+Also correct. `cliQueryPathLooksHealthy` accepted **any** non-null singleton row,
+so `{}` and `{ ok: "bad" }` both counted as a healthy CLI path. A control whose
+own result is not checked is not a control.
+
+`canaryResultIsHealthy` now requires exactly: one row, an `ok` field, an
+**integer**, equal to `1`. `row.ok === 1` rejects `true` and `"1"`;
+`Number.isInteger` rejects `1.5`. Nineteen explicit negative tests cover the
+shapes round 9 wrongly accepted (`{}`, `{ok:"bad"}`, `{ok:"1"}`, `{ok:true}`,
+`{ok:null}`, `{ok:0}`, `{ok:2}`, `{ok:1.5}`, object/array `ok`, null/array/scalar
+rows) and the ones it already rejected (missing row set, non-array row set, zero
+rows, two rows, malformed JSON, empty string, `null` document, transport
+failure).
+
+### M3 — the deadline did not bound in-flight subprocesses
+
+Correct, and it was a real hang risk: `runWith` had **no timeout at all**, and
+`readBaseline` only consulted its clock between awaits. A stuck
+`supabase db query` could hang `demo:verify` or `demo:reset` indefinitely — the
+60s deadline could not help, because it was never reached.
+
+**The correction**, in `subprocess.mjs`:
+
+- `options.timeoutMs` adds a real bound. On expiry the **exact spawned child** is
+  escalated `SIGTERM` → grace → `SIGKILL` → grace, **by its own handle**. Nothing
+  looks up a pid, scans a process list, or touches a container.
+- The promise settles **once**. A `settled` latch plus centralised timer clearing
+  means a late `close` or `error` after a timeout cannot settle it a second time,
+  and no timer outlives the call. Kill timers are `unref`'d so a pending one
+  cannot hold the event loop open.
+- A child that ignores `SIGKILL` still settles, so the caller can never be
+  stranded.
+- Timeouts reduce to a fixed sanitized error carrying only the caller's label and
+  the caller's timeout. No output, no SQL, no command line, no system error.
+- **Long-running commands stay unbounded on purpose.** `supabase start` and
+  `db reset` can legitimately take minutes, and killing one mid-migration is
+  worse than waiting.
+
+And in `readBaseline`, each attempt's timeout is **capped to the remaining
+deadline**, so an in-flight query cannot overrun the budget. That is what makes
+the deadline a real bound rather than a between-awaits check.
+
+**The honest worst case**, documented in the code and here:
+
+| Term | Value |
+| --- | --- |
+| `BASELINE_DEADLINE_MS` — retrying and waiting | 60s |
+| 2 × `SUBPROCESS_KILL_GRACE_MS` — terminating a stuck child | 4s |
+| `BASELINE_DIAGNOSIS_TIMEOUT_MS` — the one diagnostic query | 5s |
+| 2 × `SUBPROCESS_KILL_GRACE_MS` — terminating that child too | 4s |
+| **Total** | **≈ 73s** |
+
+The grace terms are only paid if a child actually hangs. A failure where every
+query answers promptly and the result is simply wrong costs about 65s.
+
+### Tests
+
+The tooling suite went from 367 to **398**. New coverage, by finding:
+
+- **M1** — a structural failure retried to recovery **while the control query is
+  healthy**, both mid-loop and on the very last attempt, asserting the canary was
+  called **zero** times during the loop; persistent failure exhausting the *full*
+  ceiling with a healthy canary, asserting exactly one canary call *after* the
+  end; the diagnosis enum and preserved `structuralFailure` on every exhaustion
+  path; `unknown` when no diagnostic is supplied.
+- **M2** — the nineteen negative shapes above plus three positive ones.
+- **M3** — normal completion inside the timeout; termination on timeout with the
+  signals asserted; `SIGTERM` → `SIGKILL` escalation; a child ignoring `SIGKILL`
+  still settling; **double-settlement rejected** by firing `close`, a second
+  `close`, and `error` after the timeout already rejected; a child closing just
+  before its deadline resolving normally; no kill when no timeout is configured;
+  and an active-handle check proving no timer leaks across calls.
+- Plus: each attempt's timeout asserted to shrink with the remaining deadline
+  (`[5000, 4000, 3000, 2000, 1000]`), never above it and never below 1.
+
+Unchanged and re-proven: count mismatches are queried **once** and returned
+unaltered, with zero canary calls, both on a healthy path and while the canary is
+broken; malformed JSON, non-integer counts, and subprocess failures stay
+non-retryable at one query each; and the sentinel-leak scan still finds nothing
+in `message`, `String(error)`, `stack`, `cause`, or any own property — now with
+the canary carrying the sentinel too.
+
+### Live verification
+
+A genuine **cold** stack cycle (zero containers beforehand) and **ten
+consecutive read-only `demo:verify` runs**, all passing. Full suite below.
+
+**The original intermittent condition did not recur**, so nothing here claims it
+was reproduced or that a live recovery was observed.
+
 ## Round 9: the finding and what was done
 
 Codex did not approve round 8. The Product Owner ran `demo:verify` against the
@@ -261,6 +397,15 @@ That negative result is not nothing — it rules out the readiness story round 6
 told, the zero-row story, and the environment story — but it is not a diagnosis.
 
 ### The new mechanism
+
+> **Superseded by round 10, findings M1 and M3.** Steps 1 and 2 below are gone.
+> Letting a healthy control query end the retry rested on an assumption this same
+> document listed as unproven two sections later, and acting on it meant a
+> baseline-specific transient could be declared permanent after three attempts.
+> The control query is now a label applied *after* the loop, never a gate. Step 3
+> survives and is now the whole termination rule. The "worst case is 60s plus one
+> in-flight query" claim below was also wrong in a second way: `runWith` had no
+> timeout at all, so an in-flight query was unbounded. See round 10.
 
 Because the cause is unknown, the mechanism reasons from **live evidence at
 failure time** instead of from a stored assumption about what the cause is.
@@ -972,7 +1117,9 @@ change this round.
 | 19 | `0748048034f3cdcc8a6a8221a8d563274ccc3ee6` | `fix(demo): retry both structural baseline conditions on a wider bound` |
 | 20 | `0186e969e9006ebe090a514268c9f446a2682670` | `docs(task-017): record the round 8 review response` |
 | 21 | `b2811e6378a50f78b8249d9df01209e1806962b9` | `fix(demo): end the baseline retry on evidence, not on a count` |
-| 22 | *this commit* | `docs(task-017): record the round 9 review response` |
+| 22 | `acedfbde56f0acf9557c2f79e5c33b6c957d0a6c` | `docs(task-017): record the round 9 review response` |
+| 23 | `631e58d16fc06c3db16d7f2e4fd0bc35f9d60061` | `fix(demo): correct the three Codex round 9 findings` |
+| 24 | *this commit* | `docs(task-017): record the round 10 review response` |
 
 All on `feat/TASK-017-safe-local-app-demo`, cut from `ccd7d44`. **No existing
 commit was amended, rebased, or rewritten in any round** — each round is additive
@@ -993,6 +1140,18 @@ Each round's closing documentation commit cannot print its own SHA inside itself
 all of them are resolvable with `git log --oneline ccd7d44..HEAD`.
 
 ## Changed files
+
+Round 10 alone — **five files** in one code commit, no new file, no command
+added or removed:
+
+> `platform/tooling/local-demo/baseline.mjs`, `baseline.test.mjs`,
+> `subprocess.mjs`, `subprocess.test.mjs`, `supabase-cli.mjs`, plus this handoff.
+
+`subprocess.mjs` and `supabase-cli.mjs` are new to this round's diff because M3
+is a subprocess-lifetime defect; both are TASK-017-owned. No command signature
+changed — `reset.mjs` and `demo-verify.mjs` still call `readBaseline()` with no
+arguments, and `queryLocalScalars(sql)` still works unchanged for any caller that
+does not pass a timeout.
 
 Round 9 alone — **two files** in one code commit, no new file, no command added
 or removed:
@@ -1113,7 +1272,9 @@ Run from `platform/` unless noted. **All green.**
 | `corepack pnpm format:check` | exit 0 — all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test:tooling` | exit 0 — **43 suites, 367 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312, round 4: 315, round 5: 324, round 6: 336, round 8: 348) |
+| `corepack pnpm test:tooling` | exit 0 — **45 suites, 398 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312, round 4: 315, round 5: 324, round 6: 336, round 8: 348, round 9: 367) |
+| **`corepack pnpm demo:verify` × 10 consecutive** | exit 0 every time — "Baseline verified." on all ten, read-only, database untouched |
+| Cold stack cycle (0 containers → `demo:start` → `demo:reset`) | exit 0, correct baseline, credentials written |
 | **`corepack pnpm demo:verify` × 8 consecutive** | exit 0 every time — "Baseline verified." on all eight, read-only, database untouched |
 | Round 9 structural probes (~179, outside the repo) | healthy envelope **byte-stable**; zero rows → `rows: []`; no result set → unparseable plain text; concurrency → exit 1 + empty stdout; environment-independent. **The failing shape was never reproduced** |
 | Readiness probe, measurement A (post-command), 2 cycles × 2 phases | `one-row` on attempt 1, **4 of 4**, no gap |
@@ -1568,7 +1729,14 @@ line in the test files resembles a real credential to a secret scanner.
     you what does. The mechanism is designed to be correct without that
     knowledge, which is a mitigation, not a diagnosis. **This is the most
     important open item on the branch.**
-22. **The canary could in principle disagree with the baseline read.** If a
+22. ~~**The canary could in principle disagree with the baseline read.**~~
+    **Closed by round 10, finding M1.** This limitation described a real defect
+    rather than an acceptable trade, and Codex was right to treat it as one: the
+    code was acting on an assumption this list called unproven. The control query
+    can no longer end a retry, so the disagreement no longer costs anything but a
+    less useful label. Kept below for the record.
+
+    If a
     failure mode existed that broke complex queries while leaving
     `select 1::int as ok` healthy, round 9 would stop early and fail closed
     rather than waiting it out. I judged failing closed with a clear message
@@ -1581,7 +1749,29 @@ line in the test files resembles a real credential to a secret scanner.
     a destructive reset.
 24. **Round 9 did not reproduce the condition either**, so no live recovery was
     observed. Every live command succeeded on its first read.
-25. **Docker Desktop was already running at the start of this round** (I started
+25. **A persistent structural failure now takes ~65s to report, and up to ~73s
+    if a child hangs.** That is the price of not guessing at a duration, it is
+    paid only on the failure path, and it is bounded — but `demo:verify` can now
+    sit for over a minute before saying anything. I did not add progress output
+    because every line printed near a failure is a line that might carry
+    something.
+26. **The 60s deadline is still a number**, even though it is no longer the
+    termination *rule*. If the transient outlasts a minute, `demo:verify` fails
+    closed again — but now it fails after genuinely waiting, having never
+    shortened itself on an unproven inference, and without ever recommending a
+    destructive reset.
+27. **The 20s per-query timeout is a judgement, not a measurement of a hang.** A
+    healthy query takes ~1.5–1.7s, so 20s is roughly twelve times the observed
+    cost. It is generous enough that a slow machine is not mistaken for a stuck
+    one, but nobody has observed an actually-stuck CLI child, so the bound is
+    sized against normal behaviour rather than against the fault it guards.
+28. **The timeout tests use a fake child process.** They prove the escalation,
+    single-settlement, and cleanup logic exactly; they do not prove that
+    `SIGTERM`/`SIGKILL` reach a real Supabase CLI child on Windows the way the
+    code assumes.
+29. **Round 10 did not reproduce the condition either**, and did not repeat round
+    9's ~179-probe investigation. The root cause remains unproven.
+30. **Docker Desktop was already running at the start of this round** (I started
     it in round 2 and left it running, as reported then). It is **still running**;
     quitting it is a machine-wide action I left to you. No Supabase container is
     running.
@@ -1637,25 +1827,31 @@ commits that are not implementation commits at all. Verified against
 | 6 | `939435e` | `59437f0` |
 | 7 | none | `dc21f48` |
 | 8 | `0748048` | `0186e96` |
-| 9 | `b2811e6` | this commit |
+| 9 | `b2811e6` | `acedfbd` |
+| 10 | `631e58d` | this commit |
 
-**The four commands below are the only partial reverts I am willing to state.**
-All are code-only in the strict sense — every commit named touches nothing but
-`platform/tooling/local-demo/baseline.mjs` and its test, confirmed with
-`git show --name-only` — and all leave **every** documentation commit, including
-this file, on the branch.
+**The five commands below are the only partial reverts I am willing to state.**
+All are code-only in the strict sense, confirmed with `git show --name-only`:
+rounds 5–9's commits touch nothing but
+`platform/tooling/local-demo/baseline.mjs` and its test, and round 10's touches
+those two plus `subprocess.mjs`, `subprocess.test.mjs`, and `supabase-cli.mjs` —
+all code. All leave **every** documentation commit, including this file, on the
+branch.
 
 | To undo | Command | State afterwards |
 | --- | --- | --- |
-| Round 9's code, keeping rounds 1–8 | `git revert b2811e6` | `readBaseline` returns to round 8's fixed 10 × 1000ms count — **the behaviour the Product Owner's `demo:verify` exhausted.** Strongly not recommended; it reintroduces "run `demo:reset` to recover from a bad read". Every handoff round remains and round 9's account is now stale |
-| Rounds 8–9 code, keeping rounds 1–7 | `git revert b2811e6 0748048` | `readBaseline` returns to round 6's behaviour: a missing row set fails immediately. **Not recommended** — that is the behaviour round 8's evidence disproved |
-| Rounds 6–9 code, keeping rounds 1–5 | `git revert b2811e6 0748048 939435e` | `readBaseline` returns to the round 5 retry: both shapes retryable, 4 × 500ms. Closer to correct than either row above |
-| Rounds 5–9 code — the whole retry, keeping rounds 1–4 | `git revert b2811e6 0748048 939435e 6fef4cb 26d78dd` | `readBaseline` returns to a single attempt. It still fails closed with the same fixed sanitized messages; it just fails sooner, and the Product Owner's intermittent failure becomes a failed read every time it occurs |
+| Round 10's code, keeping rounds 1–9 | `git revert 631e58d` | Restores round 9: a healthy control query can end a retry after three attempts, the canary accepts malformed singleton rows, and CLI children have **no timeout**, so a stuck child can hang `demo:verify` forever. **Strongly not recommended** — all three are the defects Codex found |
+| Rounds 9–10 code, keeping rounds 1–8 | `git revert 631e58d b2811e6` | `readBaseline` returns to round 8's fixed 10 × 1000ms count — **the behaviour the Product Owner's `demo:verify` exhausted.** Strongly not recommended; it reintroduces "run `demo:reset` to recover from a bad read" |
+| Rounds 8–10 code, keeping rounds 1–7 | `git revert 631e58d b2811e6 0748048` | `readBaseline` returns to round 6's behaviour: a missing row set fails immediately. **Not recommended** — that is the behaviour round 8's evidence disproved |
+| Rounds 6–10 code, keeping rounds 1–5 | `git revert 631e58d b2811e6 0748048 939435e` | `readBaseline` returns to the round 5 retry: both shapes retryable, 4 × 500ms. Closer to correct than either row above |
+| Rounds 5–10 code — the whole retry, keeping rounds 1–4 | `git revert 631e58d b2811e6 0748048 939435e 6fef4cb 26d78dd` | `readBaseline` returns to a single attempt, and the subprocess timeout goes with it. It still fails closed with the same fixed sanitized messages; it just fails sooner, and the Product Owner's intermittent failure becomes a failed read every time it occurs |
 
 Run them newest-first exactly as written. The basis for calling these clean is
 checkable rather than asserted: `git log 26d78dd^..HEAD -- baseline.mjs
-baseline.test.mjs` lists exactly those five commits and nothing else, so
-reverting all five restores both files bit-for-bit to their `26d78dd^` content.
+baseline.test.mjs` lists exactly those six commits and nothing else, and
+`git log 631e58d^..HEAD -- subprocess.mjs supabase-cli.mjs` lists only
+`631e58d`. So reverting the full chain restores every file bit-for-bit to its
+`26d78dd^` content.
 Each command is a prefix of the next, so any partial chain also applies cleanly —
 but only newest-first. Reverting an older one while a newer one is still applied
 will conflict, because each edits the loop its predecessor introduced.
@@ -1702,9 +1898,44 @@ file in the revert commit** to say so.
 
 ## For the reviewer (GPT/Codex, read-only)
 
-The earlier focus lists still stand. What is new in round 9, highest value first:
+The earlier focus lists still stand. What is new in round 10, highest value
+first:
 
-1. **The canary's core assumption.** Everything rests on this: that the transient
+1. **Whether removing the early stop was the right correction.** The cost is
+   real: a genuinely permanent structural failure now takes ~65s to report
+   instead of ~5s. I judged that far better than the alternative, which was
+   declaring a possibly-recoverable transient permanent after three attempts on
+   an inference nobody has proven. But it is a trade, and it is the trade this
+   round turns on.
+2. **The subprocess timeout's escalation and settlement logic.** Read
+   `runWith` for: a path where a timer is neither cleared nor unref'd; a way for
+   `settle` to be bypassed; a child handle that could be killed after the promise
+   settled; and whether the final force-settle can leave a real child alive. The
+   tests use a fake `ChildProcess`, so real-Windows signal delivery is **not**
+   covered.
+3. **Whether 20s is the right per-query timeout.** It is ~12× the measured
+   healthy cost, but it is sized against normal behaviour, not against an
+   observed hang — nobody has seen a stuck CLI child.
+4. **The deadline arithmetic.** Each attempt's timeout is capped to the remaining
+   budget, and the loop stops when the remainder cannot fit a wait plus an
+   attempt. Check that the ~73s worst case is actually the worst case, and that
+   nothing can produce a zero or negative timeout.
+5. **The canary contract.** `Number.isInteger(row.ok) && row.ok === 1`. Confirm
+   there is no value that slips through — and that widening the *baseline*
+   parser to accept a bare array (round 9) did not accidentally widen the canary
+   in a way that matters.
+6. **That `supabase start` and `db reset` are still deliberately unbounded.** I
+   think killing a migration mid-flight is worse than waiting; you may think an
+   unbounded `db reset` is its own hang risk.
+7. **The diagnosis strings.** Fixed sentences chosen by a boolean, appended to a
+   fixed structural message. Confirm the combined message is still a closed set
+   and that `structuralFailure`/`diagnosis` cannot carry response content.
+
+What was new in round 9, and still worth your attention:
+
+1. **The canary's core assumption.** ~~Everything rests on this~~ — **round 10
+   removed the dependency**; the assumption now affects only the label. The
+   underlying question is still open and still interesting: that the transient
    breaks the CLI *query path* rather than the baseline query specifically. If a
    failure mode can break `BASELINE_SQL` while leaving `select 1::int as ok`
    healthy, round 9 fails closed early instead of waiting it out — the opposite of
