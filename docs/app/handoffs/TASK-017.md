@@ -1,14 +1,14 @@
 # TASK-017 handoff — Safe Local App Demo Environment and Synthetic Fixtures
 
-Status: **Round 2 complete.** Every Codex round 1 finding is fixed, with a test
-for each. All verification re-run, including the local database authorization
-suite, a real end-to-end consent verification, and a live two-process test of the
-new lock. Stopped for GPT/Codex read-only review. Not merged. Worktree not
-removed.
+Status: **Round 3 complete.** Every Codex finding from rounds 1 and 2 is fixed,
+with a test for each. All verification re-run, including the local database
+authorization suite, a real end-to-end consent verification, and live
+multi-process tests of the redesigned lock. Stopped for GPT/Codex read-only
+review. Not merged. Worktree not removed.
 
 **One acceptance criterion is deliberately still open — AC3.** See the acceptance
-table. It is not "met at the data layer" any more; it is open until someone
-observes the routing in a real Web or Android run.
+table. It is not "met at the data layer" any more; it stays open until the
+Product Owner observes the routing in a real Web or Android walkthrough.
 
 Writer: **Claude Code** (sole writer)
 Reviewer: **GPT/Codex** (read-only)
@@ -19,19 +19,150 @@ Task: `docs/app/tasks/TASK-017-safe-local-app-demo-environment.md`
 Branch/worktree: `feat/TASK-017-safe-local-app-demo` in
 `.claude/worktrees/task-017-safe-local-app-demo`
 
-**No acceptance criterion was reworded, narrowed, or removed in this round.** The
+**No acceptance criterion was reworded, narrowed, or removed in any round.** The
 packet is byte-identical to the approved version; the only thing that changed
 about AC3 is that this report stopped claiming it.
 
-## Checkpoint, re-verified at the start of this round
+## Approved scope deviation: `demo:start` is a fifth demo command
+
+The packet's in-scope list names **four** commands — `demo:reset`, `demo:web`,
+`demo:android`, `demo:stop`. Round 2 added a fifth, `demo:start`, to close a
+finding: every restart route the tooling offered went through `db:start`, which
+ends by printing the local database URL, the JWT secret, the secret key, the
+service-role key, and S3 credentials into terminal scrollback. Decision 5 forbids
+printing that output, and the tooling was satisfying the letter of the rule by
+handing the job to the person running it.
+
+**The Product Owner has approved this deviation.** `demo:start` stays, on the
+stated grounds that it safely replaces credential-printing `db:start`. It is the
+only addition to the command surface, it is non-destructive — no reset, no
+fixture, no user, no write — and AC12 is unaffected: starting a stopped stack is
+not reseeding it. The packet's in-scope list is left as approved rather than
+edited to match; this section is the record.
+
+## Round 3: the findings and what was done
+
+Four findings, all from the round 2 lock and the guidance around it. Round 2
+fixed a real concurrency hole and introduced a smaller one of its own; this round
+closes it properly.
+
+### 1. The lock did not actually provide mutual exclusion
+
+Two defects in one mechanism, and the second is the serious one.
+
+**Age was treated as proof.** Any lock older than thirty minutes was broken even
+when its owner was demonstrably running. A cold `supabase start` followed by a
+reset on a slow machine can pass that mark, and the reward for being slow was
+having the lock taken away mid-migration. Age is now not consulted at all, and a
+scan asserts `lock.mjs` contains no timestamp arithmetic. Being slow is not
+evidence of being dead.
+
+**Read-then-delete was a race that could delete a *live* lock.** Between reading
+a lock, deciding it was stale, and unlinking it, another process could break the
+same stale lock and acquire a live one — which this process then removed. Both
+then ran, and the holder never found out. That is worse than having no lock: the
+holder keeps working believing it is protected.
+
+The redesign:
+
+- Mutual exclusion comes from exactly one thing, `open(lockFile, "wx")`, which the
+  OS resolves atomically.
+- A lock is breakable **only** when its owning process is gone — proven by
+  `kill(pid, 0)` — and only for a lock this host wrote. A lock from another host
+  is never assumed dead. An unusable record is breakable because it names no
+  owner at all.
+- Breaking is serialized by its own exclusively created claim file,
+  `demo.lock.break`. The claim holder re-reads the lock and requires the
+  **identical nonce** it proved abandoned before unlinking anything.
+- That is sound rather than merely careful: the owner is already proven dead, a
+  dead process cannot release its own lock, and only the single claim holder may
+  unlink — so nothing can change the lock file inside that window.
+- The claim file is **never broken automatically**. It is held for milliseconds
+  and removed in a `finally`, so a survivor means a hard kill inside that window;
+  every command then refuses and names the one file to delete. Refusing is
+  recoverable in one command, and automatic claim recovery would reintroduce the
+  race the claim exists to remove.
+
+Tests drive the concurrent paths through injected `isAlive` and an `onBreakWindow`
+seam rather than by starting processes and hoping the timing lands, so each
+interleaving is exactly the one the test asks for:
+
+- a lock re-taken inside the recovery window survives, with its own nonce intact;
+- a second recovery refuses while another holds the claim, touching neither the
+  claim nor the lock;
+- an owner that looks dead and then alive during recovery causes a refusal;
+- **a live lock four times older than thirty minutes is honoured**, and is still
+  byte-identical afterwards.
+
+Two further tests use a **real child process**, because an in-process second
+caller would take the reentrant path and prove nothing: a separate process is
+refused while this one holds the lock, and a separate process does recover a lock
+whose owner is genuinely gone.
+
+### 2. An untrusted label from the lock file reached an error message
+
+The lock file is ordinary writable state on disk, so everything read back out of
+it is untrusted input — and `record.label` was interpolated into the conflict
+message verbatim. Anything a file could contain, a message could print.
+
+The label now reaches a message only by matching one of the four labels this
+tooling itself writes; anything else becomes a fixed fallback. The hostname is
+never echoed, and the pid only after validating it is a positive integer. A test
+writes a credential-shaped sentinel as the label and asserts it appears in no
+message, stack, cause, or serialized property — and a live run against a lock
+carrying that sentinel printed `(a demo command, pid 19128)` with **zero**
+occurrences of the sentinel.
+
+### 3. Credential temporary files outlived the process that wrote them
+
+Round 2 cleaned only the current process's own pid-qualified temporary file. A
+run killed between the write and the rename therefore left a file that nothing
+would ever remove: it is not the credential file, so no reset replaced it, and it
+carried the password that run had generated. Cleaning only the current pid made
+that permanent.
+
+Cleanup now removes every file matching the exact
+`credentials.txt.<digits>.tmp` shape in the ignored `.local-demo/` directory,
+whatever process wrote it. The scan is confined to that directory — `readdir`
+returns bare entry names, so nothing can reach outside it — no file is opened, no
+content is read, and nothing is printed. Tests cover a different simulated pid, a
+directory of bystander files that must survive, and a same-shaped file one
+directory away that must not be touched.
+
+Deleting another run's temporary file is safe because writing one happens only
+inside the destructive-workflow lock, so no other run can have one in flight.
+
+### 4. Guidance still pointed at raw, credential-printing CLI commands
+
+`describeSubprocessFailure`, the malformed-body message, and the demo guide's
+troubleshooting all ended with some form of "re-run the underlying command
+yourself". That is the tooling routing around its own rule: a failure is exactly
+when someone pastes a terminal into a chat or a screenshot, and the suppressed
+output at that moment is the most credential-bearing thing on their screen.
+
+Every such invitation is gone. Failures now say what was suppressed and why, and
+point at `docs/app/LOCAL-DEMO.md`, whose troubleshooting gives an ordered recovery
+route made only of demo commands and Docker state queries — and says plainly that
+going looking for the suppressed output is the one thing the design exists to
+prevent. `db:start` and `db:status` no longer appear in any demo-facing section;
+they survive in the platform README's general database section, labelled with what
+they print and pointed away from demo work. A scan asserts no module names either
+script or invites a re-run.
+
+## Round 2: the findings and what was done
+
+## Checkpoint, re-verified each round
 
 Permission settings are read at launch, and a previous session cannot vouch for a
-later one, so the safety checks were re-run rather than carried forward.
+later one, so the safety checks were re-run rather than carried forward — at the
+start of round 2, and again at the start of round 3. The canary read was refused
+both times with no file content, and the main checkout's changed files were listed
+by name only and are unchanged.
 
 | Check | Result |
 | --- | --- |
 | Approved base SHA | **pass** — branch still cut from `ccd7d4440b69be390fd6ed35a417006bd66c70ff` |
-| Worktree canary denied **before any content** | **pass** — re-run this session; `Read` of `docs/app/permission-canary/WORKTREE-CANARY.md` by exact path returned "File is in a directory that is denied by your permission settings" with no file content |
+| Worktree canary denied **before any content** | **pass** — re-run in both rounds; `Read` of `docs/app/permission-canary/WORKTREE-CANARY.md` by exact path returned "File is in a directory that is denied by your permission settings" with no file content |
 | App deny rules active | **pass** — the canary denial is itself the proof the settings file is loaded and that the worktree wildcard resolves on this machine |
 | Root coaching `CLAUDE.md` not loaded | **pass** — no `CLAUDE.md` content entered context |
 | `.claude/rules/app-engineering.md` loaded | **pass** |
@@ -55,7 +186,7 @@ yourself in a fresh session; I am not claiming to have run them.
 
 ### Main checkout intentional changes
 
-Confirmed present and **untouched** throughout this round:
+Confirmed present and **untouched** throughout both rounds:
 
 ```text
  M CLAUDE.md
@@ -139,6 +270,12 @@ host is dead, treats an unreadable lock file as abandoned, and is **reentrant
 within one process** so `demo:verify:consent` can hold it across the resets it
 calls, including its failure-path restore.
 
+> **Superseded by round 3, findings 1 and 2.** The 30-minute age bound and the
+> read-then-delete recovery described here were themselves wrong: the first broke
+> live locks, the second could delete one. The reentrancy, the fail-fast choice,
+> the host rule, and the set of commands that take the lock are unchanged. See
+> round 3 above for what the mechanism is now.
+
 Taken by `demo:reset`, `demo:stop`, `demo:start`, and `demo:verify:consent`.
 `demo:verify` is read-only and takes nothing.
 
@@ -215,6 +352,12 @@ renamed over the target — atomic on POSIX and on Windows, where libuv uses
 crash is cleared rather than trusted, and a failed rename removes it instead of
 leaving it to be found later.
 
+> **Partly superseded by round 3, finding 3.** "A leftover temporary file is
+> cleared" was true only of *this process's* leftover. Another run's survived
+> forever, carrying the password that run had generated. Cleanup is now
+> pid-independent. The discard-before-wipe rule and the atomic rename are
+> unchanged.
+
 ### 8. Credential-related test failures could leak
 
 `credentials.test.mjs` rendered a **real generated password** into a file and then
@@ -249,24 +392,34 @@ change this round.
 | 5 | `5267856` | `docs(task-017): record the implementation handoff` |
 | 6 | `2a7b2d5` | `fix(demo): close the Codex round 1 findings in the demo tooling` |
 | 7 | `b2547ec` | `docs(task-017): document demo:start, the lock, and the stale-file rule` |
-| 8 | *this commit* | `docs(task-017): record the round 2 review response` |
+| 8 | `ef4a9c5` | `docs(task-017): record the round 2 review response` |
+| 9 | `ed199e3` | `fix(demo): make the lock race-safe and stop echoing untrusted input` |
+| 10 | `772353e` | `docs(task-017): route every recovery path through the demo commands` |
+| 11 | *this commit* | `docs(task-017): record the round 3 review response` |
 
 All on `feat/TASK-017-safe-local-app-demo`, cut from `ccd7d44`. **No existing
-commit was amended, rebased, or rewritten in this round** — round 2 is additive on
-top of round 1, so the review history stays legible. Commit 8 touches only
+commit was amended, rebased, or rewritten in any round** — each round is additive
+on top of the last, so the review history stays legible. Commit 11 touches only
 `docs/`; its SHA cannot be printed inside itself, and is resolvable with
 `git log --oneline ccd7d44..HEAD`.
 
 ## Changed files
 
-Round 2 alone:
+Round 3 alone:
 
-> **20 files changed, 1639 insertions(+), 85 deletions(-)**
-> (`git diff --shortstat 5267856..HEAD`, before this handoff commit)
+> **10 files changed, 917 insertions(+), 218 deletions(-)**
+> (`git diff --shortstat ef4a9c5..HEAD`, before this handoff commit)
+
+Round 3 touched: `lock.mjs` and `lock.test.mjs` (rewritten),
+`credentials-file.mjs`, `credentials.test.mjs`, `source-safety.test.mjs`,
+`paths.mjs`, `subprocess.mjs`, `api.mjs` (one message each),
+`docs/app/LOCAL-DEMO.md`, and `platform/README.md`. **No new file was added and
+no command was added or removed** — the five-command surface approved above is
+unchanged.
 
 Whole branch against the approved base:
 
-> **41 files changed, 5551 insertions(+), 22 deletions(-)**
+> **41 files changed, 6454 insertions(+), 25 deletions(-)**
 > (`git diff --shortstat ccd7d44..HEAD`)
 
 New in round 2: `tooling/local-demo/lock.mjs`, `lock.test.mjs`, `api.test.mjs`,
@@ -276,11 +429,11 @@ New in round 2: `tooling/local-demo/lock.mjs`, `lock.test.mjs`, `api.test.mjs`,
 `demo-verify-consent.mjs`, `supabase-cli.mjs`, `source-safety.test.mjs`,
 `package.json` (one script line), `docs/app/LOCAL-DEMO.md`, `platform/README.md`.
 
-**Nothing else changed, in either round.** No migration, policy, grant, function,
+**Nothing else changed, in any round.** No migration, policy, grant, function,
 view, or pgTAP file; no `config.toml`; no `database.types.ts`; no
 `pnpm-lock.yaml`, `pnpm-workspace.yaml`, dependency, or Expo version; no existing
 auth, athlete check-in, sharing, profile, coach, component, theme, or navigation
-file; no protected legacy path; **no `.env.local`**. The round 2 work is confined
+file; no protected legacy path; **no `.env.local`**. Rounds 2 and 3 are confined
 to `platform/tooling/local-demo/`, one `package.json` script, and two documents.
 
 ## Acceptance status
@@ -294,10 +447,10 @@ to `platform/tooling/local-demo/`, one `package.json` script, and two documents.
 | 5 | Coach sees the check-in after an explicit grant | **met** — asserted, count 1 |
 | 6 | Coach loses access after revoke; athlete keeps self-access | **met** — asserted, 0 and 1 respectively, on the very next query with no re-authentication |
 | 7 | No hosted endpoint contacted | **met** — every CLI call carries `--local`; a source scan asserts no `--linked`, `--db-url`, `supabase.co`, `db push`, `db pull`, `link`, or `login` appears anywhere in the tooling |
-| 8 | No raw credential, password, token, user id, health value, Auth response, database error, or credential-bearing CLI output in logs, tests, terminal, or artifacts | **met, and materially stronger than in round 1** — findings 1, 5, 6, and 8 were all violations of this criterion and are all closed. See the privacy section |
+| 8 | No raw credential, password, token, user id, health value, Auth response, database error, or credential-bearing CLI output in logs, tests, terminal, or artifacts | **met, and materially stronger each round** — round 2 findings 1, 5, 6, 8 and round 3 findings 2, 3, 4 were all violations of this criterion and are all closed. See the privacy section |
 | 9 | Existing cross-team and other-athlete authorization tests remain authoritative | **met** — unchanged; pgTAP re-run at the exact 5 files / 583 assertions baseline |
-| 10 | No automatic consent, no seeded health data | **met** — the fixture inserts neither and deletes from both tables; asserted by a scan of the SQL. The lock now also protects the zero-consent baseline against a concurrent reset landing mid-verification |
-| 11 | No new dependency, migration, RLS policy, or client provisioning capability | **met** — frozen lockfile unchanged; the lock and the atomic file replacement use Node built-ins only |
+| 10 | No automatic consent, no seeded health data | **met** — the fixture inserts neither and deletes from both tables; asserted by a scan of the SQL. The lock protects the zero-consent baseline against a concurrent reset landing mid-verification, and round 3 makes that protection actually hold under a stale lock |
+| 11 | No new dependency, migration, RLS policy, or client provisioning capability | **met** — frozen lockfile unchanged; the lock and the atomic file replacement use Node built-ins only. `demo:start` is a new *command*, approved above, not a new capability: it starts a stack and writes nothing |
 | 12 | Launching never resets or reseeds implicitly | **met** — `demo:web`/`demo:android` still refuse to start a stopped stack rather than bringing it up, and run no reset, fixture, or user creation. `demo:start` starts the stack and nothing else: no reset, no fixture, no user, no write |
 
 ## Verification results
@@ -310,13 +463,16 @@ Run from `platform/` unless noted. **All green.**
 | `corepack pnpm format:check` | exit 0 — all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test:tooling` | exit 0 — **38 suites, 293 tests, 0 failures** (round 1: 210) |
+| `corepack pnpm test:tooling` | exit 0 — **40 suites, 312 tests, 0 failures** (round 1: 210, round 2: 293) |
 | `corepack pnpm test` | exit 0 — **40 test files, 790 tests, 0 failures**, unchanged |
 | `corepack pnpm demo:reset` | exit 0 — identical baseline every time |
 | `corepack pnpm demo:verify` | exit 0 — baseline verified |
 | `corepack pnpm demo:verify:consent` | exit 0 — **9/9 checks passed** |
 | Two concurrent `demo:reset` processes | **second refused, exit 1**, first completed correctly |
-| `corepack pnpm demo:stop` → cold `corepack pnpm demo:start` | exit 0 — **0** credential-shaped fragments in the output; demo data intact afterwards |
+| Lock naming a **dead** pid, then `demo:reset` | recovered automatically, exit 0; `.local-demo/` left holding only `credentials.txt` |
+| Lock naming a **live** pid with a credential-shaped label, then `demo:reset` | refused, exit 1, message read `(a demo command, pid 19128)` — **0** occurrences of the sentinel |
+| Orphan `credentials.txt.999999.tmp`, then `demo:reset` | removed; only `credentials.txt` remained |
+| `corepack pnpm demo:start` (warm and cold) | exit 0 — **0** credential-shaped fragments in the output; demo data intact afterwards |
 | `supabase db reset --local --no-seed` | exit 0 — 4 migrations, no seed |
 | `supabase test db --local` | exit 0 — **5 files, 583 assertions, `Result: PASS`** |
 | `supabase db lint --local --schema public,private --level warning --fail-on warning` | exit 0 — **0 findings** |
@@ -328,14 +484,15 @@ Run from `platform/` unless noted. **All green.**
 | Supabase containers after `demo:stop`, running / including stopped | **0 / 0** |
 | Final worktree status | **clean** |
 
-The tooling suite grew from 210 to 293 tests: 17 in the new `api.test.mjs`, 21 in
-the new `lock.test.mjs`, and the rest in the credential-file, subprocess, and
-source-safety suites. **No existing test was deleted**; several were rewritten to
-stop leaking on failure or to reflect the new result shape, and each such rewrite
-is described under the finding that caused it.
+The tooling suite grew from 210 to 293 to **312** tests. Round 3 rewrote
+`lock.test.mjs` around the new mechanism — the concurrency tests it replaces
+described a design that no longer exists — and added the untrusted-label sentinel
+tests, the cross-pid temporary-file tests, and three new source scans. **No test
+was deleted to make a failure go away**; every rewrite is described under the
+finding that caused it, and the two commands' behavioural tests are unchanged.
 
 pgTAP counts match the TASK-014/016 baseline exactly — 5 files, 583 assertions, 0
-lint findings — which is the expected outcome, because neither round changed a
+lint findings — which is the expected outcome, because no round changed a
 `platform/supabase/migrations/` or `tests/` file.
 
 The same two benign pre-existing notices appeared in the pgTAP output:
@@ -351,8 +508,9 @@ dependency is out of scope even though this task owns that file's scripts.
 
 `demo:verify:consent` is a **destructive** verification that brackets itself with
 a full reset at both ends, so it always leaves the decision-9 baseline behind —
-including on failure, via a best-effort restore. In round 2 the whole workflow,
-including that restore, holds the destructive-workflow lock.
+including on failure, via a best-effort restore. Since round 2 the whole workflow,
+including that restore, holds the destructive-workflow lock — and since round 3
+that lock cannot be taken from it by another process, however long the run takes.
 
 ```text
 pass  athlete authenticates through real local Auth        expected true, got true
@@ -438,9 +596,13 @@ was rewritten to assert single-statement atomicity instead.
 Worth noting for the reviewer: **the output suppression worked exactly as designed
 there, and it cost a diagnosis step.** The failure printed only
 `local fixture application failed (exit code 1)`, and the real cause was recovered
-by re-running the underlying CLI command by hand, which is precisely the workflow
-the error message and `LOCAL-DEMO.md` prescribe. That is the intended trade, but
-it is a real ergonomic cost and you should decide whether you accept it.
+by running the underlying CLI command by hand. At the time that was what the error
+message and `LOCAL-DEMO.md` prescribed; **round 3 removed that advice**, because
+telling the person at the keyboard to go and fetch the suppressed output is the
+tooling routing around its own rule. The ergonomic cost is real and now falls
+where it belongs: on whoever maintains the tooling, working from an exit code and
+a command name, rather than on the Product Owner being sent to a credential-
+printing command.
 
 **Round 1, defect 2 — my own source scan caught a genuine duplication.**
 `credentials-file.mjs` restated the local endpoint as a literal instead of
@@ -455,21 +617,39 @@ literals while *keeping* `${…}` interpolations, which are the real risk); and 
 fake child process that emitted `close` before its stream drained, modelling a
 race that does not exist on a real `ChildProcess`.
 
-**Round 2 introduced no defect that needed a second fix.** Every change landed
-against a test written for it, and the full suite was re-run after each. What
-round 2 *did* establish is that five of the nine findings — 1, 5, 6, 8, and the
-credential-file half of 7 — were violations of acceptance criterion 8 that my own
-round 1 report claimed as met. The scans I wrote did not catch them because they
-scan for *forbidden identifiers in source*, and every one of these leaks was a
-value arriving at run time through a standard-library error message. That is the
-gap a reviewer found and a scan could not.
+**Round 2 introduced two defects of its own, both found in round 3 and both in the
+lock I had just written.** They are the honest headline of this round, so they are
+stated plainly rather than folded into the findings above:
+
+- the lock broke any holder older than thirty minutes, so the fix for concurrency
+  could itself steal a lock from a healthy, slow run;
+- its stale-lock recovery read the file and then unlinked it, which can delete a
+  lock another process legitimately acquired in between — the one failure mode
+  that is *worse* than having no lock, because the victim never finds out.
+
+Round 2's unit tests passed against both, because they tested the behaviour I had
+designed rather than the property I needed: exclusion under concurrency. Round 3's
+tests assert the property, and two of them use a real second process.
+
+Round 2 also echoed an untrusted label from that file into an error message, which
+is the same class of mistake as round 1's `response.json()` leak — a value from
+outside reaching a message — committed while fixing round 1's version of it.
+
+**Round 3 introduced no defect that needed a second fix.** Every change landed
+against a test written for it, and the full suite was re-run after each.
+
+Taken together across three rounds: eight of the seventeen findings were
+violations of acceptance criterion 8 that my own reports had claimed as met. The
+scans I wrote did not catch them because they scan for *forbidden identifiers in
+source*, and every one of these leaks was a value arriving at run time — through a
+standard-library error message, or out of a file on disk. That is the gap a
+reviewer found and a scan could not.
 
 ## Privacy and security impact
 
-**Net exposure change: small, and smaller after round 2 than before it.** This
-task adds no new data path, no new query, and no new capability to the product. It
-adds a way to run the existing product locally, plus one new secret-adjacent
-artifact.
+**Net exposure change: small, and smaller after each round.** This task adds no
+new data path, no new query, and no new capability to the product. It adds a way
+to run the existing product locally, plus one new secret-adjacent artifact.
 
 - **Authorization is untouched.** No migration, policy, grant, or helper changed.
   `private.can_current_user_read_shared_data` remains the sole gate, and the
@@ -490,11 +670,20 @@ artifact.
 - **The credential file cannot be stale or partial** (round 2). Discarded before
   the destructive step, written atomically by rename only after the baseline
   verifies. It either describes the accounts that exist or does not exist.
+- **No temporary credential file outlives the run that wrote it** (round 3).
+  Cleanup is pid-independent and confined to the ignored directory by an exact
+  name pattern, so a killed run cannot leave its generated password sitting in a
+  file nothing would ever replace.
 - **The credential file holds no key, token, or session** — asserted by test
   against `sb_publishable_`, `sb_secret_`, `eyJ`, `postgres://`, `access_token`,
   and `service_role`.
-- **The lock file holds no secret either** — pid, hostname, command label, and a
-  timestamp, asserted by test, in the same git-ignored directory.
+- **The lock file holds no secret either** — pid, hostname, command label,
+  timestamp, and a random nonce, asserted by test, in the same git-ignored
+  directory.
+- **Nothing read back out of the lock file is echoed** (round 3). The label must
+  match one of four allowlisted values or it becomes a fixed fallback; the
+  hostname is never printed and the pid only as a validated integer. Proven with a
+  credential-shaped sentinel, in the tests and against the real command.
 - **No health value is written down anywhere** (round 2). None is seeded; the only
   ones that ever exist are generated at run time inside the consent verification,
   live for a few seconds, belong to an account that cannot receive email, are
@@ -514,10 +703,14 @@ artifact.
 - **Test failures cannot leak** (round 2). No assertion that prints its input is
   applied to a rendered credential file, and the rendering tests use a fixed
   synthetic stand-in rather than a generated password.
+- **No message sends anyone to a credential-printing command** (round 3). Every
+  recovery route in the tooling and in `LOCAL-DEMO.md` is a demo command or a
+  Docker state query; a scan asserts no module invites a raw CLI re-run or names
+  `db:start` or `db:status`.
 - **`.env.local` is never touched.** No dotenv path appears anywhere in the
   tooling (asserted), and `EXPO_NO_DOTENV=1` means Expo reads none during a demo.
 - **No real data.** No `athletes/`, `team_data/`, `garmin/`, environment file,
-  dump, or credential was read at any point, in either round.
+  dump, or credential was read at any point, in any round.
 
 **Test-output safety:** the tooling tests assert on booleans, counts, key names,
 and fixed strings. Where a test must prove a value did *not* leak, it uses
@@ -541,10 +734,14 @@ line in the test files resembles a real credential to a secret scanner.
 3. **The Android emulator path is untested against a real emulator.** The
    `10.0.2.2` mapping is standard and the app-side platform gate is unit-tested,
    but no emulator was started.
-4. **Output suppression costs diagnosis.** A failing command reports only a label,
-   an exit code, and possibly a signal, by design; recovering the cause means
-   re-running the underlying CLI by hand. Documented in `LOCAL-DEMO.md`, but you
-   should confirm you accept the trade.
+4. **Output suppression costs diagnosis, and round 3 made that cost sharper on
+   purpose.** A failing command reports a label, an exit code, and possibly a
+   signal — and no longer tells anyone to go and re-run the raw CLI, because that
+   advice is a credential-exposure route dressed as helpfulness. The documented
+   recovery is `demo:reset`, then Docker state, then handing the exit code and
+   command name to whoever maintains the tooling. If a failure ever needs the raw
+   output, that is a deliberate, informed act by a maintainer, not a step in a
+   troubleshooting list. You should confirm you accept that trade.
 5. **`demo:verify:consent` is still destructive, and a hard kill still leaves
    rows.** The lock closes the concurrency hole — no other demo command can now
    interleave with it — but if the process itself is killed between the grant and
@@ -561,21 +758,35 @@ line in the test files resembles a real credential to a secret scanner.
 8. **The lock is only honoured by this tooling.** Running `supabase db reset` or
    `supabase stop` directly bypasses it entirely, and so does the pgTAP suite —
    which is exactly what desynchronizes the credential file from the database (see
-   limitation 10). A cooperative lock cannot bind a command that never asks for it.
-9. **Known pre-existing Expo patch drift persists** and is out of scope: `expo`
-   `56.0.17` vs expected `~56.0.18`, `expo-router` `56.2.16` vs `~56.2.17`. No
-   dependency was changed. 20/21 checks pass.
-10. **Supabase CLI `v2.111.0` is available; `v2.109.1` is pinned.** Not upgraded.
-11. **`demo:stop` preserves the local volume**, so a later `demo:start` restores
+   limitation 11). A cooperative lock cannot bind a command that never asks for it.
+9. **A hard kill during lock recovery needs one manual step.** The recovery claim
+   file is deliberately never broken automatically, because automatic recovery of
+   the recovery lock would reintroduce the race it exists to remove. The window is
+   milliseconds and the claim is removed in a `finally`, so this should never be
+   seen; if it is, every command refuses and names
+   `platform/.local-demo/demo.lock.break` to delete. That is a considered trade —
+   fail closed, recover in one step — and not an oversight.
+10. **Pid liveness can be fooled by pid reuse.** If the operating system has reused
+    a dead holder's pid, the lock is judged live and the command refuses. That is
+    the safe direction — a spurious refusal, never a spurious break — but it means
+    a lock can occasionally need waiting out. The opposite error, judging a live
+    process dead, is not reachable through `kill(pid, 0)` except on a permission
+    error, which is mapped to alive.
+11. **Known pre-existing Expo patch drift persists** and is out of scope: `expo`
+    `56.0.17` vs expected `~56.0.18`, `expo-router` `56.2.16` vs `~56.2.17`. No
+    dependency was changed. 20/21 checks pass.
+12. **Supabase CLI `v2.111.0` is available; `v2.109.1` is pinned.** Not upgraded.
+13. **`demo:stop` preserves the local volume**, so a later `demo:start` restores
     whatever state the last reset left. If the pgTAP suite was the last thing to
     touch the database, the demo accounts will be gone and the credential file
     will be stale in a way the tooling cannot detect, because the wipe did not go
     through it. I ran a final `demo:reset` before stopping, so the environment you
     inherit is a valid baseline — but the commands can desynchronize, and the fix
     is always `demo:reset`.
-12. **Docker Desktop was not running when this session began, and I started it**
-    to run the local suites. It is **still running**; quitting it is a machine-wide
-    action I left to you. No Supabase container is running.
+14. **Docker Desktop was already running at the start of this round** (I started
+    it in round 2 and left it running, as reported then). It is **still running**;
+    quitting it is a machine-wide action I left to you. No Supabase container is
+    running.
 
 ## Rollback
 
@@ -590,44 +801,59 @@ git branch -D feat/TASK-017-safe-local-app-demo
 remote state changed, no dependency moved, and no Supabase container remains.
 
 Local artifacts outside Git, if you want them gone: `platform/.local-demo/` (the
-credential file and the lock) and the local Docker volume, removable with
+credential file, and the lock and recovery-claim files when a command is running)
+and the local Docker volume, removable with
 `corepack pnpm exec supabase stop --no-backup` — **note that this discards the
 local database**, which is exactly why `demo:stop` never passes that flag.
 
-To revert only round 2 and keep round 1: `git revert b2547ec 2a7b2d5`. To revert
-the implementation and keep the documentation: `git revert 60d0118 6df9417`.
+Partial reverts, newest first:
+
+| To undo | Command |
+| --- | --- |
+| Round 3 only, keeping rounds 1–2 | `git revert 772353e ed199e3` |
+| Rounds 2 and 3, keeping round 1 | `git revert 772353e ed199e3 b2547ec 2a7b2d5` |
+| The implementation, keeping the documentation | `git revert 60d0118 6df9417` |
+
+**Reverting round 3 alone is not recommended.** It would restore a lock that
+breaks live holders on a timer and can delete another process's lock, which is
+worse than the round 1 state of having no lock at all: with no lock, nothing
+pretends to be protected. If round 3 has to go, take round 2 with it.
 
 ## For the reviewer (GPT/Codex, read-only)
 
-Round 1's focus list still stands. What is new and worth your attention first:
+The earlier focus lists still stand. What is new in round 3, highest value first:
 
-1. **`lock.mjs`.** Fail-fast versus queueing is a genuine product call, and I chose
-   refusal. Also check the staleness rule: a lock is taken over only when its
-   record is unusable, or its owner is not running *and* it was written by this
-   host, or it is older than 30 minutes. Is 30 minutes right for a cold
-   `supabase start` on a slow machine? Too short and a live reset gets its lock
-   stolen; too long and an abandoned lock blocks work.
-2. **The reentrancy counter.** It is process-local module state. Confirm there is
-   no path where `depth` can be left above zero after a throw, which would leak the
-   lock file for the life of the process.
-3. **`parseJsonBody` in `api.mjs`.** The claim is that neither the body nor any
-   substring reaches a caller. Look for a path where the text could still be
-   referenced — a cause chain, a rethrow, a future `error.detail`.
-4. **The signal rule.** `succeeded()` is now the only definition of success.
-   Confirm every call site uses it, and judge whether `launch.mjs` treating
-   `SIGINT`/`SIGTERM`/`SIGHUP` as a clean stop is the right exception or a hole.
-5. **Whether `demo:start` is the right answer to finding 6**, or whether
-   `demo:web`/`demo:android` should simply start a stopped stack themselves. I kept
-   fail-fast so launching can never become a hidden rebuild, and added an explicit
-   safe command instead — but auto-starting would be friendlier and would still
-   reset nothing.
-6. **Whether generating health values at run time is the right reading of AC8**,
-   or whether a fixed synthetic constant was always acceptable and this is
-   over-correction. I lean toward generation: it makes the property structural
-   rather than a matter of which constant someone picked.
+1. **The claim-file argument in `lock.mjs`.** The correctness claim is a chain,
+   and it is only as strong as its weakest link: the lock's owner is proven dead;
+   a dead process cannot release its own lock; only the single claim holder may
+   unlink; therefore nothing can change the lock file between the nonce check and
+   the unlink. Attack that chain. The place I would look first is whether "proven
+   dead" can go stale — the pid check happens before the claim is taken, and the
+   nonce re-check after, which is why both exist.
+2. **The claim file is never broken automatically.** That is deliberate, and it
+   trades a vanishingly rare manual step for the removal of a whole class of race.
+   Judge whether that is the right call, or whether a bounded automatic recovery
+   would be acceptable given the window is milliseconds.
+3. **Whether refusing is right when recovery is contended.** A second process
+   arriving during a recovery refuses rather than waiting for the claim to clear.
+   Retrying would be friendlier; refusing is one fewer state to reason about.
+4. **The temporary-file pattern in `credentials-file.mjs`.** It deletes files
+   another process wrote, which is only safe because writing one happens under the
+   lock. Check that the name pattern cannot match anything but this tooling's own
+   temporary files, and that the scan cannot reach outside `.local-demo/`.
+5. **Whether removing the raw-CLI advice went too far.** A maintainer debugging a
+   fixture failure now has an exit code and a command name, and has to decide for
+   themselves to run the CLI. I think the exposure trade is right; you may think
+   the tooling should offer a maintainer-only escape hatch instead.
+6. **The `isAlive` and `onBreakWindow` seams.** They exist for the tests. Confirm
+   they cannot be reached from a command, and that no production path passes
+   anything but the defaults.
 7. **`source-safety.test.mjs`.** Still only as good as its comment- and
-   string-stripping, and round 2 added more scans that depend on it. Look for a way
-   to write a forbidden call that the stripper hides.
+   string-stripping, and each round adds scans that depend on it. Look for a way
+   to write a forbidden call, or a raw-CLI invitation, that the stripper hides.
+8. **Still open from round 2:** whether `demo:web`/`demo:android` should start a
+   stopped stack themselves rather than refusing; and whether generating health
+   values at run time is the right reading of AC8 or an over-correction.
 
 **Not done, deliberately:** no merge, push, deploy, publish, hosted-Supabase link,
 remote migration, `db push`, branch deletion, worktree removal, or `.env.local`
