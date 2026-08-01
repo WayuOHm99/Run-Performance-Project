@@ -99,6 +99,13 @@ The stack is entirely local. It never links, logs in to, or migrates the hosted
 Supabase project. `supabase login`, `supabase link`, `supabase db push`, and any
 other remote command are out of bounds for local development work.
 
+`db:start` and `db:status` pass the CLI's output straight through, and that
+output contains the stack's credential block — see **Credential hygiene** below.
+They exist for database work where you want to see it. **For demo work, use
+`demo:start`**, which is the same non-destructive start with the output discarded
+at the OS level; nothing in the demo tooling or `docs/app/LOCAL-DEMO.md` asks you
+to run a raw CLI command.
+
 ### Database authorization tests
 
 Row Level Security and grant behaviour are covered by pgTAP tests in
@@ -137,11 +144,12 @@ is to grant and revoke it yourself through the real UI.
 local Supabase project. Launching the app never resets or reseeds. None of these
 commands read or modify `apps/mobile/.env.local`.
 
-Prefer `demo:start` over `db:start` when a demo stack needs bringing back: both
-run the same non-destructive `supabase start`, but `demo:start` discards the
-credential block described under **Credential hygiene** below instead of printing
-it. The destructive demo commands also take an exclusive lock in
-`platform/.local-demo/`, so two of them can never interleave on the same stack.
+`demo:start` brings a stopped demo stack back with the credential block described
+under **Credential hygiene** below discarded rather than printed, so demo work
+never needs a raw CLI command. The destructive demo commands also take an
+exclusive lock in `platform/.local-demo/`, so two of them can never interleave on
+the same stack — and a running command's lock is never taken away from it,
+however long it has been running.
 
 The demo tooling lives in `tooling/local-demo/` and has its own unit tests:
 
@@ -156,20 +164,21 @@ database URL to the terminal. Those values are generated locally and are not
 hosted-project secrets, but they must not be pasted into an AI chat, a task
 packet, a review artifact, a screenshot, or a committed log.
 
-When a command's output could be captured, suppress it and check the exit code
-and container health instead:
+When a command's output could be captured, do not print it at all. Start the
+stack through the demo command, which suppresses the output at the OS level, and
+check the exit code and container health instead:
 
 ```powershell
-corepack pnpm db:start *> $null
+corepack pnpm demo:start
 $LASTEXITCODE
 docker ps
 ```
 
-For demo work, `corepack pnpm demo:start` does this for you: it runs the same
-`supabase start` with all three streams discarded at the OS level, then confirms
-the stack is up by reading only the local API URL and publishable key back
-through the credential filter. Nothing else from `supabase status` is ever held
-by that process.
+`demo:start` runs the same non-destructive `supabase start` with all three
+streams discarded, then confirms the stack is up by reading only the local API
+URL and publishable key back through the credential filter. Nothing else from
+`supabase status` is ever held by that process, and no failure message it can
+produce will send you to a raw CLI command to diagnose it.
 
 Generated local runtime state is ignored through `platform/supabase/.gitignore`
 and `platform/.prettierignore`; Docker volumes live outside the repository.

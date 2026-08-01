@@ -46,14 +46,14 @@ Two helpers exist for verification:
 fixture, and create no user. Rebuilding the data is always an explicit
 `demo:reset`.
 
-**Use `demo:start`, not `db:start`, to bring the stack back.** They run the same
-non-destructive `supabase start`, but `db:start` prints the stack's credential
-block — a local database URL, a JWT secret, and a service-role key — into your
-terminal scrollback, and `demo:start` discards that output at the OS level.
+**`demo:start` is the supported way to bring a stopped stack back.** The five
+commands above are the whole interface: everything the demo needs is one of them,
+and none of them prints the stack's credential block. You never need to run the
+Supabase CLI by hand for a demo, and this guide never asks you to.
 
 ### Only one destructive command at a time
 
-`demo:reset`, `demo:stop`, `demo:verify:consent`, and `demo:start` take an
+`demo:reset`, `demo:start`, `demo:stop`, and `demo:verify:consent` take an
 exclusive lock file, `platform/.local-demo/demo.lock`, before they touch the
 stack. A second one **refuses to run** rather than queueing:
 
@@ -67,9 +67,16 @@ longer opens the accounts that exist. A reset landing in the middle of
 `demo:verify:consent` leaves a sharing grant behind, which is exactly the
 zero-consent baseline the demo promises.
 
-If a command was killed hard and the lock survived it, the next run detects the
-dead owner and takes over by itself. If it somehow does not, delete
-`platform/.local-demo/demo.lock` and try again.
+**A running command's lock is never taken away from it**, however long it has
+been running. A cold start on a slow machine can take many minutes, and being
+slow is not evidence of being dead. A lock is recovered only when the process
+that wrote it is genuinely gone, which the next run detects and handles by
+itself — you do not need to delete anything.
+
+Very rarely you may see *"Another process is recovering an abandoned local demo
+lock"*. That means a run was killed during the fraction of a second it spends
+recovering. Try again; if it never clears, delete
+`platform/.local-demo/demo.lock.break` and try again.
 
 ## First run
 
@@ -182,10 +189,14 @@ hold.
 
 Every command that could print that block — `demo:start`, `demo:reset`,
 `demo:stop`, and the stack start inside them — runs it with all three streams
-discarded at the OS level. None of them tells you to run `db:start` instead.
+discarded at the OS level.
 
-If you ever need the raw values, run the Supabase CLI yourself, deliberately. Do
-not paste the output anywhere.
+**No message in this tooling will ever tell you to run the underlying Supabase
+CLI to work out what went wrong.** That was true of an earlier version of this
+guide and it was a mistake: a failure is the moment you are most likely to paste
+a terminal into a chat or a screenshot, and the raw output at that moment is the
+most credential-bearing thing on your screen. Every recovery route below is a
+demo command whose output is safe.
 
 ## Stopping
 
@@ -212,8 +223,18 @@ rebuild. Run `corepack pnpm demo:start` to bring it back with your data, or
 `corepack pnpm demo:reset` to rebuild the baseline.
 
 **A command failed and printed only an exit code.** That is intentional: the
-underlying output can carry credentials, so it is discarded rather than shown.
-Re-run the underlying Supabase CLI command yourself to diagnose it.
+underlying output can carry a database URL, a JWT secret, and a service-role key,
+so it is discarded at the OS level rather than shown. Recover, in this order:
+
+1. `corepack pnpm demo:reset` — rebuilds the baseline from scratch and is the
+   right answer to almost every failure here;
+2. if that fails too, confirm Docker is up and healthy with
+   `docker version --format '{{.Server.Os}}'` and
+   `docker ps -a --filter name=supabase --format "{{.Names}}"`, which print
+   container state and no Supabase credential;
+3. if it still fails, hand the **exit code and the command name** to whoever
+   maintains the tooling. Do not go looking for the suppressed output to paste —
+   that is the one thing this design exists to keep off your screen.
 
 **"… was terminated by SIGTERM and did not complete."** Something killed the
 Supabase CLI part-way — a Ctrl-C, a Docker restart, an out-of-memory kill. The
