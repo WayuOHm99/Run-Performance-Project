@@ -1,10 +1,10 @@
 # TASK-017 handoff — Safe Local App Demo Environment and Synthetic Fixtures
 
-Status: **Round 4 complete.** Every Codex finding from rounds 1, 2, and 3 is
+Status: **Round 5 complete.** Every Codex finding from rounds 1 through 4 is
 fixed, with a test for each. All verification re-run, including the local
-database authorization suite, a real end-to-end consent verification, and live
-multi-process tests of the lock. Stopped for GPT/Codex read-only review. Not
-merged. Worktree not removed.
+database authorization suite, a real end-to-end consent verification, and three
+full stop → cold `demo:reset` → `demo:verify` cycles. Stopped for GPT/Codex
+read-only review. Not merged. Worktree not removed.
 
 **One acceptance criterion is deliberately still open — AC3.** See the acceptance
 table. It is not "met at the data layer" any more; it stays open until the
@@ -39,6 +39,91 @@ credential-printing `db:start`. It is the only addition to the command surface, 
 is non-destructive — no reset, no fixture, no user, no write — and AC12 is
 unaffected: starting a stopped stack is not reseeding it. The packet's in-scope
 list is left as approved rather than edited to match; this section is the record.
+
+## Round 5: the finding and what was done
+
+One Medium reliability finding, reproduced and diagnosed by Codex from the
+Product Owner's own run. Nothing else was touched.
+
+### 1. Medium — a cold `demo:reset` intermittently failed a correct baseline
+
+**What happened.** The Product Owner's first cold `demo:reset` started the stack,
+reset the database, created both accounts through real Auth, and applied the
+fixture — and then failed with *"The baseline query did not return exactly one
+row."* An immediate `demo:verify` failed the same way. Later structural
+inspection of the same query returned the expected envelope — top-level
+`boundary`, `rows`, `warning`, with `rows.length` of 1 — and a warm reset, then a
+later stop → cold reset → `demo:verify`, all passed. It is intermittent, not a
+schema or fixture defect.
+
+**Why that condition is transient and not a state report.** `BASELINE_SQL` is a
+single outer `select` of ten scalar subqueries. It has no `from` clause and no
+predicate on the outer select, so the database has no way to answer it with
+anything but exactly one row — not zero, not two, whatever the demo's actual
+state is. A result that is not one row therefore says the read did not reach a
+ready database; it says nothing about how many profiles or grants exist.
+
+**The fix.** `readBaseline` now retries **that one condition** and nothing else:
+four attempts, a bounded 500ms wait between them, so the worst case adds 1.5
+seconds and then fails. The retryable/non-retryable decision is a fixed boolean
+set at the throw site in `parseBaselineRow`, never derived from the response.
+
+**What is deliberately not retried**, because the requirement was to retry only
+what can be shown safe:
+
+- **A count mismatch is not retried and not hidden.** It is not a failure of the
+  read at all — it is a correct read of a database in the wrong state, and it
+  must surface on the first attempt. Structurally it cannot be swallowed either:
+  a mismatching baseline parses successfully, so `readBaseline` returns it and
+  the caller's separate `compareBaseline` step sees the real numbers. The retry
+  loop never reaches into that comparison and never re-runs it. There is a test
+  asserting the query is issued exactly once for a baseline carrying a seeded
+  grant and four seeded check-ins, and that both counts come back unaltered.
+- **Malformed JSON and a non-integer count are not retried.** I cannot prove
+  these are transient. Malformed output means the CLI wrote something that is not
+  a result document; a non-integer count means a `count(*)::int` came back as
+  something that is not an integer. Both are equally consistent with a broken
+  invocation or a changed CLI contract, and retrying a broken contract only
+  reports a permanent fault as a slow one. Requiring proof rather than
+  plausibility is the point: an unprovable retry is exactly how a hard failure
+  becomes a hidden one.
+- **A subprocess failure is not retried.** A non-zero exit or a signal from the
+  CLI is a different condition with its own sanitized error, and it leaves the
+  loop immediately.
+
+**Failing closed is unchanged.** When the budget is exhausted the last error is
+rethrown **unchanged** — same fixed sanitized message, same type — so a
+persistent structural failure looks exactly like a single-attempt failure and
+still stops the run. Because the throw propagates out of `resetUnderLock` before
+`writeCredentialsFile`, **credentials still stay unwritten until the baseline
+verifies**, and the discard that precedes the database reset means a failed run
+leaves no credential file at all.
+
+**Nothing from the response reaches the error.** No stdout, no row, no envelope
+field, no attempt-specific detail. The only property added is `retryable`, a
+boolean decided from the failure's shape. A test drives four different responses
+carrying a sentinel string through the loop and asserts the sentinel appears in
+none of `error.message`, `String(error)`, `error.stack`, or any own property
+name/value — including properties a future edit might attach — and that the
+message is one of the three fixed sanitized strings.
+
+**Honest limit on the fix.** In the Product Owner's report the condition
+outlived an immediate `demo:verify`, which a 1.5-second budget would not have
+absorbed. This makes a short readiness window recoverable; it does not claim to
+cover every window, and it deliberately does not grow the budget until evidence
+says a longer one is both necessary and safe. A longer wait would trade a
+still-failing run for a slower still-failing run. The recovery when the retry is
+not enough is unchanged and unchanged in cost: run `demo:reset` again.
+
+### Round 5 verification of the fix itself
+
+The retry path is covered by deterministic unit tests only — both the query and
+the wait are injected, so nothing sleeps and nothing depends on a real clock,
+CLI, or database. That is intentional: the live failure is intermittent, so a
+live run can confirm the pipeline still works but can never confirm the retry
+fired. **All three live cold cycles this round passed on their first read**, so
+the retry was not exercised in production; the evidence that it behaves correctly
+is the unit suite.
 
 ## Round 4: the findings and what was done
 
@@ -481,16 +566,34 @@ change this round.
 | 9 | `ed199e3` | `fix(demo): make the lock race-safe and stop echoing untrusted input` |
 | 10 | `772353e` | `docs(task-017): route every recovery path through the demo commands` |
 | 11 | `ef2f9ef` | `docs(task-017): record the round 3 review response` |
-| 12 | *this commit* | `fix(demo): fail closed on a lock record that is not readable yet` |
+| 12 | `89fb9c6` | `fix(demo): fail closed on a lock record that is not readable yet` |
+| 13 | `26d78dd6d13a7b22a846971e75086fbe558d1992` | `fix(demo): retry only the transient baseline row-count condition` |
+| 14 | `6fef4cb4fcdb612e32abb9630c80fecb081f0017` | `fix(demo): clamp the baseline retry's test seams to the bound` |
+| 15 | *this commit* | `docs(task-017): record the round 5 review response` |
 
 All on `feat/TASK-017-safe-local-app-demo`, cut from `ccd7d44`. **No existing
 commit was amended, rebased, or rewritten in any round** — each round is additive
 on top of the last, so the review history stays legible. Round 4 is a **single
-commit** covering both its code and its documentation, as asked; its SHA cannot be
-printed inside itself, and is resolvable with
+commit** covering both its code and its documentation; round 5 is **three** — the
+retry, the seam clamp I found while writing the reviewer notes, then this record.
+Keeping the clamp as its own commit rather than amending `26d78dd` is deliberate:
+the defect it fixes is disclosed below, and hiding it inside the first commit
+would have made the disclosure unverifiable. This documentation commit's own SHA
+cannot be printed inside itself, and is resolvable with
 `git log --oneline ccd7d44..HEAD`.
 
 ## Changed files
+
+Round 5 alone — **two files** across its two code commits, no new file, no
+command added or removed:
+
+> `platform/tooling/local-demo/baseline.mjs`,
+> `platform/tooling/local-demo/baseline.test.mjs`, plus this handoff.
+
+No other module was touched. `reset.mjs` and `demo-verify.mjs` call
+`readBaseline()` with no arguments exactly as before; the retry lives entirely
+behind that call, and its seams (`query`, `attempts`, `delayMs`, `wait`) are
+defaulted parameters that no command passes.
 
 Round 4 alone — four files, no new file, no command added or removed:
 
@@ -555,8 +658,9 @@ Run from `platform/` unless noted. **All green.**
 | `corepack pnpm format:check` | exit 0 — all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test:tooling` | exit 0 — **40 suites, 315 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312) |
+| `corepack pnpm test:tooling` | exit 0 — **41 suites, 324 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312, round 4: 315) |
 | `corepack pnpm test` | exit 0 — **40 test files, 790 tests, 0 failures**, unchanged |
+| **stop → cold `demo:reset` → `demo:verify`**, run three times | exit 0 each time — **0** Supabase containers before each cold start; identical baseline every time; the `demo:verify` immediately after each cold reset passed. The third cycle ran against the final round 5 code |
 | `corepack pnpm demo:reset` | exit 0 — identical baseline every time |
 | `corepack pnpm demo:verify` | exit 0 — baseline verified |
 | `corepack pnpm demo:verify:consent` | exit 0 — **9/9 checks passed** |
@@ -577,7 +681,15 @@ Run from `platform/` unless noted. **All green.**
 | Supabase containers after `demo:stop`, running / including stopped | **0 / 0** |
 | Final worktree status | **clean** |
 
-The tooling suite grew from 210 to 293 to 312 to **315** tests. Round 4 added four
+The tooling suite grew from 210 to 293 to 312 to 315 to **324** tests. Round 5
+added nine, all in a new `readBaseline` suite: recovery after one structural
+failure, the SQL sent unchanged on every attempt, budget exhaustion failing
+closed with bounded attempts and bounded waits, an out-of-bounds `attempts` seam
+falling back to the default budget, an out-of-bounds `delayMs` seam falling back
+to the default wait, a count mismatch neither retried nor altered, malformed JSON
+and a non-integer count not retried, a throwing query not retried, and the
+sentinel-leak scan across message, `String(error)`, stack, and every own
+property. Round 4 added four
 lock tests and inverted one — the round 3 test asserting that an unusable lock
 record is *recovered* asserted the defect, so it now asserts the refusal. Round 3
 rewrote
@@ -747,6 +859,17 @@ rather than for what was intended.
 **Round 4 introduced no defect that needed a second fix.** Every change landed
 against a test written for it, and the full suite was re-run after each.
 
+**Round 5 introduced one, and I caught it while writing the reviewer list rather
+than while writing the code.** The retry's test seams were plain defaulted
+parameters, so `attempts: 0` — or `NaN`, or a negative number — would have
+skipped the loop body entirely, left `lastError` undefined, and thrown
+`undefined`: no message, no type, no fail-closed guarantee. No command can reach
+it, because no command passes the seam, but a mechanism whose whole purpose is a
+bound should not have a way to be handed no bound at all. Both numeric seams are
+now clamped to a ceiling and fall back to the default when out of range, with a
+test for each. The pattern is the same one round 3 and round 4 found in the lock:
+**a test seam is part of the mechanism, not outside it.**
+
 Taken together across four rounds: eight of the twenty findings were violations of
 acceptance criterion 8 that my own reports had claimed as met, and three were
 concurrency defects in the lock built to fix the first one. The scans I wrote did
@@ -903,7 +1026,20 @@ line in the test files resembles a real credential to a secret scanner.
     through it. I ran a final `demo:reset` before stopping, so the environment you
     inherit is a valid baseline — but the commands can desynchronize, and the fix
     is always `demo:reset`.
-14. **Docker Desktop was already running at the start of this round** (I started
+14. **The baseline readiness retry is bounded, and the bound may be too small
+    for the window the Product Owner actually hit.** Four attempts and 1.5
+    seconds total. In the reported incident the condition survived an immediate
+    `demo:verify`, so this fix would have shortened that failure at best, not
+    prevented it. It is deliberately not larger: a longer wait buys a slower
+    failure, not a different one, and the budget should grow only on evidence
+    about how long the window really is. The recovery is unchanged — run
+    `demo:reset` again.
+15. **The retry was not observed firing against the real stack.** All three live
+    cold cycles this round passed on the first read, which is what "intermittent"
+    means. The loop's behaviour is established by deterministic unit tests with
+    the query and the wait injected; nobody has watched it recover a real cold
+    start.
+16. **Docker Desktop was already running at the start of this round** (I started
     it in round 2 and left it running, as reported then). It is **still running**;
     quitting it is a machine-wide action I left to you. No Supabase container is
     running.
@@ -930,10 +1066,19 @@ Partial reverts, newest first:
 
 | To undo | Command |
 | --- | --- |
-| Round 4 only, keeping rounds 1–3 | `git revert <round 4 SHA>` |
-| Rounds 3–4, keeping rounds 1–2 | `git revert <round 4 SHA> 772353e ed199e3` |
-| Rounds 2–4, keeping round 1 | `git revert <round 4 SHA> 772353e ed199e3 b2547ec 2a7b2d5` |
+| Round 5 only, keeping rounds 1–4 | `git revert 6fef4cb 26d78dd` |
+| Rounds 4–5, keeping rounds 1–3 | `git revert 6fef4cb 26d78dd 89fb9c6` |
+| Rounds 3–5, keeping rounds 1–2 | `git revert 6fef4cb 26d78dd 89fb9c6 772353e ed199e3` |
+| Rounds 2–5, keeping round 1 | `git revert 6fef4cb 26d78dd 89fb9c6 772353e ed199e3 b2547ec 2a7b2d5` |
 | The implementation, keeping the documentation | `git revert 60d0118 6df9417` |
+
+**Round 5 is the one round that reverts cleanly on its own**, provided both of
+its commits go together and newest first. They touch only `baseline.mjs` and its
+test, nothing else imports the seams they add, and reverting them returns
+`readBaseline` to a single attempt — which fails closed with the same message,
+just sooner. It is independent of every lock round in both directions. Reverting
+`26d78dd` **without** `6fef4cb` will conflict, since the clamp edits the loop the
+first commit introduced.
 
 **Reverting any lock round on its own is not recommended**, and the reason is the
 same each time: a partly reverted lock is worse than no lock. Round 3 without
@@ -945,7 +1090,42 @@ rounds 2, 3, and 4 together.
 
 ## For the reviewer (GPT/Codex, read-only)
 
-The earlier focus lists still stand. What is new in round 4, highest value first:
+The earlier focus lists still stand. What is new in round 5, highest value first:
+
+1. **The claim that "not exactly one row" cannot be a state report.** The whole
+   fix rests on it: `BASELINE_SQL` has no outer `from` and no outer predicate, so
+   one row is the only cardinality the database can produce, and any other
+   cardinality is about readiness rather than about the demo's contents. If there
+   is a way for that query — or for the CLI's envelope around it — to legitimately
+   carry zero or two rows for a reason that reflects real state, then this retry
+   masks it and the finding is worse than the bug.
+2. **Whether the non-retry list is drawn in the right place.** Malformed JSON and
+   a non-integer count are the two I refused to retry for lack of proof. If you
+   believe one of them is provably transient on a cold stack, that proof is worth
+   more than my caution — but it has to be a proof, not a plausible story.
+3. **That a count mismatch cannot be reached by the retry loop.** My argument is
+   structural: a mismatching baseline *parses*, so it returns normally and never
+   enters the catch. Check that there is no response shape that both fails
+   `parseBaselineRow` on row count and would have been a genuine mismatch.
+4. **The `retryable` flag as a channel.** It is a boolean set at two literal
+   throw sites and read in one place. Confirm it cannot be influenced by response
+   content, and that no third code path can set it.
+5. **The four injected seams** (`query`, `attempts`, `delayMs`, `wait`).
+   Defaulted parameters, used only by the tests. Writing this list is what made
+   me notice that `attempts: 0` or `NaN` would have skipped the loop entirely and
+   thrown `undefined`, so both numeric seams are now clamped to a ceiling and fall
+   back to the default when out of bounds, with a test for each. Confirm no
+   command passes anything, and that the clamps have no gap.
+6. **Whether 4 attempts × 500ms is the right budget** given the incident it is
+   answering, where the condition outlived an immediate `demo:verify`. I argue a
+   larger budget buys a slower failure rather than a better one, and that the
+   number should move on measurement. You may read the evidence differently.
+7. **The leak test's own coverage.** It scans `message`, `String(error)`,
+   `stack`, and every own property name and value for a sentinel. If there is a
+   surface it misses — a getter, a cause chain, something a formatter would
+   print — that is where the next leak lives.
+
+What was new in round 4, and still worth your attention:
 
 1. **Every state the lock file can be in, enumerated.** Three rounds of defects
    here have all been the same shape: a state that exists for milliseconds and was
