@@ -1,10 +1,10 @@
 # TASK-017 handoff — Safe Local App Demo Environment and Synthetic Fixtures
 
-Status: **Round 3 complete.** Every Codex finding from rounds 1 and 2 is fixed,
-with a test for each. All verification re-run, including the local database
-authorization suite, a real end-to-end consent verification, and live
-multi-process tests of the redesigned lock. Stopped for GPT/Codex read-only
-review. Not merged. Worktree not removed.
+Status: **Round 4 complete.** Every Codex finding from rounds 1, 2, and 3 is
+fixed, with a test for each. All verification re-run, including the local
+database authorization suite, a real end-to-end consent verification, and live
+multi-process tests of the lock. Stopped for GPT/Codex read-only review. Not
+merged. Worktree not removed.
 
 **One acceptance criterion is deliberately still open — AC3.** See the acceptance
 table. It is not "met at the data layer" any more; it stays open until the
@@ -33,12 +33,95 @@ service-role key, and S3 credentials into terminal scrollback. Decision 5 forbid
 printing that output, and the tooling was satisfying the letter of the rule by
 handing the job to the person running it.
 
-**The Product Owner has approved this deviation.** `demo:start` stays, on the
-stated grounds that it safely replaces credential-printing `db:start`. It is the
-only addition to the command surface, it is non-destructive — no reset, no
-fixture, no user, no write — and AC12 is unaffected: starting a stopped stack is
-not reseeding it. The packet's in-scope list is left as approved rather than
-edited to match; this section is the record.
+**The Product Owner has approved this deviation**, in round 2 and again in round
+4. `demo:start` stays, on the stated grounds that it safely replaces
+credential-printing `db:start`. It is the only addition to the command surface, it
+is non-destructive — no reset, no fixture, no user, no write — and AC12 is
+unaffected: starting a stopped stack is not reseeding it. The packet's in-scope
+list is left as approved rather than edited to match; this section is the record.
+
+## Round 4: the findings and what was done
+
+Two Medium findings and one Low. The first is another defect in the lock, in the
+one place I had not looked: the moment it is created.
+
+### 1. Medium — the lock's own initialization was a race (fail-closed now)
+
+A lock is created with `open(lockFile, "wx")` and its record is written a moment
+later. **Every successful acquisition therefore passes through a state where the
+file exists and is empty.** Round 3 treated a file with no usable record as proof
+that no orderly holder existed and deleted it under the claim protocol — so a
+process arriving inside that window would delete a lock that had just been
+legitimately taken, and both would run.
+
+This is the same failure round 3 set out to eliminate, surviving in the one case
+round 3's reasoning did not cover. The reasoning was "it names no owner, so nobody
+holds it", and the flaw is that an empty lock file is not the appearance of an
+abandoned lock — it is the ordinary appearance of a lock **being taken right
+now**.
+
+The rule is now: **an unreadable, empty, or partially written lock record is never
+deleted automatically.** Automatic recovery is preserved for exactly one case, a
+**well-formed** record naming an owner **proven gone on this host**. Everything
+else refuses and names the file, which costs a manual delete in a case that should
+never occur and keeps the guarantee in the case that does.
+
+`isLockBreakable` now returns false for a null or non-object record rather than
+true, so the fail-closed property belongs to the function itself and not to its
+call sites. The nonce and claim protocol is unchanged and still race-safe; the
+re-read inside the claim now also refuses if the record has become unreadable.
+
+Four tests added, and the existing ones kept:
+
+- **the initialization window itself** — a lock is created with `open(…, "wx")`
+  and held open with nothing written, exactly as a mid-acquisition lock looks;
+  the workflow never runs, the lock survives, and no recovery claim is created;
+- **the same, from a genuinely separate process**, which refuses and leaves the
+  file present and still zero bytes;
+- an unreadable record is refused rather than deleted, even when the pid check
+  says its owner is dead;
+- the contents of an unreadable lock file are never echoed, proven with a
+  credential-shaped sentinel.
+
+Dead-owner recovery, live-old-lock preservation, the claim races, and the
+separate-process tests are all unchanged and still pass.
+
+**Verified live against the real command.** An empty `demo.lock` was placed in
+`platform/.local-demo/` and `demo:reset` was run:
+
+```text
+demo:reset failed — The local demo lock exists but does not yet hold a readable
+record. That is what a lock being taken right now looks like, so this command
+stopped rather than assume it was abandoned.
+```
+
+The lock file was still present afterwards, still **0 bytes**, with no recovery
+claim beside it. Before this round the same input deleted it and ran.
+
+### 2. Medium — raw CLI examples in the platform README
+
+`platform/README.md`'s "Safe local commands" section still opened with
+`db:start` and `db:status`, which pass the Supabase CLI's output straight through
+— the local database URL, the JWT secret, and the service-role key. Round 3
+labelled them instead of replacing them, which left the first commands a reader
+meets being the two that print credentials.
+
+The block is now `demo:start`, `demo:verify`, and `demo:stop`, with a sentence
+saying these are the supported way to run the local stack and that each suppresses
+the CLI's output at the OS level. The `db:*` scripts still exist in
+`package.json`; nothing in any document now points a reader at them.
+
+### 3. Low — "the only destructive command" was wrong
+
+`platform/README.md` said `demo:reset` is the only destructive command.
+`demo:verify:consent` is destructive too: it creates a synthetic check-in and a
+sharing grant, which is why it brackets itself with a full reset at both ends.
+
+The README now names both, explains that the consent verification restores the
+zero-consent baseline afterwards — including on failure, via a best-effort
+restore — and points out that `demo:verify` is the read-only one.
+`docs/app/LOCAL-DEMO.md` already marked it destructive and self-restoring in its
+command table and needed no change.
 
 ## Round 3: the findings and what was done
 
@@ -69,8 +152,10 @@ The redesign:
   OS resolves atomically.
 - A lock is breakable **only** when its owning process is gone — proven by
   `kill(pid, 0)` — and only for a lock this host wrote. A lock from another host
-  is never assumed dead. An unusable record is breakable because it names no
-  owner at all.
+  is never assumed dead. ~~An unusable record is breakable because it names no
+  owner at all.~~ **Superseded by round 4, finding 1: that last clause was itself
+  a race, because an empty file is what a lock being taken right now looks like.
+  An unusable record is now never broken.**
 - Breaking is serialized by its own exclusively created claim file,
   `demo.lock.break`. The claim holder re-reads the lock and requires the
   **identical nonce** it proved abandoned before unlinking anything.
@@ -395,20 +480,27 @@ change this round.
 | 8 | `ef4a9c5` | `docs(task-017): record the round 2 review response` |
 | 9 | `ed199e3` | `fix(demo): make the lock race-safe and stop echoing untrusted input` |
 | 10 | `772353e` | `docs(task-017): route every recovery path through the demo commands` |
-| 11 | *this commit* | `docs(task-017): record the round 3 review response` |
+| 11 | `ef2f9ef` | `docs(task-017): record the round 3 review response` |
+| 12 | *this commit* | `fix(demo): fail closed on a lock record that is not readable yet` |
 
 All on `feat/TASK-017-safe-local-app-demo`, cut from `ccd7d44`. **No existing
 commit was amended, rebased, or rewritten in any round** — each round is additive
-on top of the last, so the review history stays legible. Commit 11 touches only
-`docs/`; its SHA cannot be printed inside itself, and is resolvable with
+on top of the last, so the review history stays legible. Round 4 is a **single
+commit** covering both its code and its documentation, as asked; its SHA cannot be
+printed inside itself, and is resolvable with
 `git log --oneline ccd7d44..HEAD`.
 
 ## Changed files
 
-Round 3 alone:
+Round 4 alone — four files, no new file, no command added or removed:
+
+> `platform/tooling/local-demo/lock.mjs`, `lock.test.mjs`, `paths.mjs`,
+> `platform/README.md`, plus this handoff.
+
+Round 3:
 
 > **10 files changed, 917 insertions(+), 218 deletions(-)**
-> (`git diff --shortstat ef4a9c5..HEAD`, before this handoff commit)
+> (`git diff --shortstat ef4a9c5..ef2f9ef`)
 
 Round 3 touched: `lock.mjs` and `lock.test.mjs` (rewritten),
 `credentials-file.mjs`, `credentials.test.mjs`, `source-safety.test.mjs`,
@@ -463,12 +555,13 @@ Run from `platform/` unless noted. **All green.**
 | `corepack pnpm format:check` | exit 0 — all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test:tooling` | exit 0 — **40 suites, 312 tests, 0 failures** (round 1: 210, round 2: 293) |
+| `corepack pnpm test:tooling` | exit 0 — **40 suites, 315 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312) |
 | `corepack pnpm test` | exit 0 — **40 test files, 790 tests, 0 failures**, unchanged |
 | `corepack pnpm demo:reset` | exit 0 — identical baseline every time |
 | `corepack pnpm demo:verify` | exit 0 — baseline verified |
 | `corepack pnpm demo:verify:consent` | exit 0 — **9/9 checks passed** |
 | Two concurrent `demo:reset` processes | **second refused, exit 1**, first completed correctly |
+| **Empty** lock file (the initialization window), then `demo:reset` | **refused, exit 1**; lock still present and still **0 bytes**, no recovery claim created |
 | Lock naming a **dead** pid, then `demo:reset` | recovered automatically, exit 0; `.local-demo/` left holding only `credentials.txt` |
 | Lock naming a **live** pid with a credential-shaped label, then `demo:reset` | refused, exit 1, message read `(a demo command, pid 19128)` — **0** occurrences of the sentinel |
 | Orphan `credentials.txt.999999.tmp`, then `demo:reset` | removed; only `credentials.txt` remained |
@@ -484,7 +577,10 @@ Run from `platform/` unless noted. **All green.**
 | Supabase containers after `demo:stop`, running / including stopped | **0 / 0** |
 | Final worktree status | **clean** |
 
-The tooling suite grew from 210 to 293 to **312** tests. Round 3 rewrote
+The tooling suite grew from 210 to 293 to 312 to **315** tests. Round 4 added four
+lock tests and inverted one — the round 3 test asserting that an unusable lock
+record is *recovered* asserted the defect, so it now asserts the refusal. Round 3
+rewrote
 `lock.test.mjs` around the new mechanism — the concurrency tests it replaces
 described a design that no longer exists — and added the untrusted-label sentinel
 tests, the cross-pid temporary-file tests, and three new source scans. **No test
@@ -635,15 +731,31 @@ Round 2 also echoed an untrusted label from that file into an error message, whi
 is the same class of mistake as round 1's `response.json()` leak — a value from
 outside reaching a message — committed while fixing round 1's version of it.
 
-**Round 3 introduced no defect that needed a second fix.** Every change landed
+**Round 3 did not introduce a defect, but it did not finish removing round 2's.**
+Its rewrite carried one clause forward unexamined — that a lock file with no
+usable record names no owner and can be deleted — and that clause was the round 2
+race surviving in the one case the new reasoning did not cover. Round 4 closes it.
+
+The pattern is worth naming, because it is now three rounds long: **each time, the
+mechanism I wrote was correct for the states I had thought of, and wrong for a
+state that only exists for a few milliseconds.** A lock older than thirty minutes.
+A lock unlinked between the read and the create. A lock that exists but has not
+been written yet. Each was invisible to tests that asserted the design rather than
+the property, and each was found by a reviewer reading for what could happen
+rather than for what was intended.
+
+**Round 4 introduced no defect that needed a second fix.** Every change landed
 against a test written for it, and the full suite was re-run after each.
 
-Taken together across three rounds: eight of the seventeen findings were
-violations of acceptance criterion 8 that my own reports had claimed as met. The
-scans I wrote did not catch them because they scan for *forbidden identifiers in
-source*, and every one of these leaks was a value arriving at run time — through a
-standard-library error message, or out of a file on disk. That is the gap a
-reviewer found and a scan could not.
+Taken together across four rounds: eight of the twenty findings were violations of
+acceptance criterion 8 that my own reports had claimed as met, and three were
+concurrency defects in the lock built to fix the first one. The scans I wrote did
+not catch the leaks because they scan for *forbidden identifiers in source*, and
+every one of those was a value arriving at run time — through a standard-library
+error message, or out of a file on disk. The tests I wrote did not catch the races
+because they asserted the behaviour I had designed rather than the property I
+needed. That is the gap a reviewer found and neither a scan nor my own tests
+could.
 
 ## Privacy and security impact
 
@@ -759,13 +871,21 @@ line in the test files resembles a real credential to a secret scanner.
    `supabase stop` directly bypasses it entirely, and so does the pgTAP suite —
    which is exactly what desynchronizes the credential file from the database (see
    limitation 11). A cooperative lock cannot bind a command that never asks for it.
-9. **A hard kill during lock recovery needs one manual step.** The recovery claim
-   file is deliberately never broken automatically, because automatic recovery of
-   the recovery lock would reintroduce the race it exists to remove. The window is
-   milliseconds and the claim is removed in a `finally`, so this should never be
-   seen; if it is, every command refuses and names
-   `platform/.local-demo/demo.lock.break` to delete. That is a considered trade —
-   fail closed, recover in one step — and not an oversight.
+9. **Two rare states need one manual delete each, on purpose.** Neither is an
+   oversight; both are the fail-closed side of a trade.
+   - A hard kill *during lock recovery* can leave the recovery claim file behind.
+     It is deliberately never broken automatically, because automatic recovery of
+     the recovery lock would reintroduce the race it exists to remove. Commands
+     then refuse and name `platform/.local-demo/demo.lock.break`.
+   - A hard kill *during lock creation*, or a corrupted lock file, can leave a
+     lock whose record is empty or unreadable. Round 4 made that permanently
+     un-deletable by the tooling, because an empty lock file is exactly what a
+     lock being taken right now looks like, and guessing costs the whole
+     guarantee. Commands refuse and name `platform/.local-demo/demo.lock`.
+
+   Both windows are milliseconds wide and both files are removed in a `finally`,
+   so neither should ever be seen. If one is, the fix is deleting the named file —
+   and the message says which, without echoing what it contained.
 10. **Pid liveness can be fooled by pid reuse.** If the operating system has reused
     a dead holder's pid, the lock is judged live and the command refuses. That is
     the safe direction — a spurious refusal, never a spurious break — but it means
@@ -810,48 +930,64 @@ Partial reverts, newest first:
 
 | To undo | Command |
 | --- | --- |
-| Round 3 only, keeping rounds 1–2 | `git revert 772353e ed199e3` |
-| Rounds 2 and 3, keeping round 1 | `git revert 772353e ed199e3 b2547ec 2a7b2d5` |
+| Round 4 only, keeping rounds 1–3 | `git revert <round 4 SHA>` |
+| Rounds 3–4, keeping rounds 1–2 | `git revert <round 4 SHA> 772353e ed199e3` |
+| Rounds 2–4, keeping round 1 | `git revert <round 4 SHA> 772353e ed199e3 b2547ec 2a7b2d5` |
 | The implementation, keeping the documentation | `git revert 60d0118 6df9417` |
 
-**Reverting round 3 alone is not recommended.** It would restore a lock that
-breaks live holders on a timer and can delete another process's lock, which is
-worse than the round 1 state of having no lock at all: with no lock, nothing
-pretends to be protected. If round 3 has to go, take round 2 with it.
+**Reverting any lock round on its own is not recommended**, and the reason is the
+same each time: a partly reverted lock is worse than no lock. Round 3 without
+round 4 deletes a lock that is being created; round 2 without round 3 breaks live
+holders on a timer and can delete another process's lock. With no lock at all —
+the round 1 state — nothing pretends to be protected, and that is a more honest
+failure than a lock that silently lets two resets run. If the lock has to go, take
+rounds 2, 3, and 4 together.
 
 ## For the reviewer (GPT/Codex, read-only)
 
-The earlier focus lists still stand. What is new in round 3, highest value first:
+The earlier focus lists still stand. What is new in round 4, highest value first:
 
-1. **The claim-file argument in `lock.mjs`.** The correctness claim is a chain,
+1. **Every state the lock file can be in, enumerated.** Three rounds of defects
+   here have all been the same shape: a state that exists for milliseconds and was
+   not in my head when I wrote the rule. The states I now believe exist are
+   absent, empty, partially written, well-formed and live, well-formed and dead,
+   well-formed and foreign, and unreadable-garbage. The tooling deletes exactly
+   one of them automatically. **If there is an eighth state, that is where the
+   next defect is.** I would rather you find it than the Product Owner.
+2. **Whether refusing forever on an unreadable record is acceptable.** It cannot
+   be recovered without a human deleting the file. I argue that is right — an
+   empty lock file is indistinguishable from a lock being taken, so any automatic
+   rule here is a guess — but it does mean a corrupted lock file blocks all
+   destructive demo commands until someone acts.
+3. **The claim-file argument in `lock.mjs`.** The correctness claim is a chain,
    and it is only as strong as its weakest link: the lock's owner is proven dead;
    a dead process cannot release its own lock; only the single claim holder may
    unlink; therefore nothing can change the lock file between the nonce check and
    the unlink. Attack that chain. The place I would look first is whether "proven
    dead" can go stale — the pid check happens before the claim is taken, and the
    nonce re-check after, which is why both exist.
-2. **The claim file is never broken automatically.** That is deliberate, and it
+4. **The claim file is never broken automatically.** That is deliberate, and it
    trades a vanishingly rare manual step for the removal of a whole class of race.
    Judge whether that is the right call, or whether a bounded automatic recovery
    would be acceptable given the window is milliseconds.
-3. **Whether refusing is right when recovery is contended.** A second process
+5. **Whether refusing is right when recovery is contended.** A second process
    arriving during a recovery refuses rather than waiting for the claim to clear.
    Retrying would be friendlier; refusing is one fewer state to reason about.
-4. **The temporary-file pattern in `credentials-file.mjs`.** It deletes files
+6. **The temporary-file pattern in `credentials-file.mjs`.** It deletes files
    another process wrote, which is only safe because writing one happens under the
    lock. Check that the name pattern cannot match anything but this tooling's own
    temporary files, and that the scan cannot reach outside `.local-demo/`.
-5. **Whether removing the raw-CLI advice went too far.** A maintainer debugging a
+7. **Whether removing the raw-CLI advice went too far.** A maintainer debugging a
    fixture failure now has an exit code and a command name, and has to decide for
    themselves to run the CLI. I think the exposure trade is right; you may think
    the tooling should offer a maintainer-only escape hatch instead.
-6. **The `isAlive` and `onBreakWindow` seams.** They exist for the tests. Confirm
+8. **The `isAlive` and `onBreakWindow` seams.** They exist for the tests. Confirm
    they cannot be reached from a command, and that no production path passes
    anything but the defaults.
-7. **`source-safety.test.mjs`.** Still only as good as its comment- and
+9. **`source-safety.test.mjs`.** Still only as good as its comment- and
    string-stripping, and each round adds scans that depend on it. Look for a way
    to write a forbidden call, or a raw-CLI invitation, that the stripper hides.
-8. **Still open from round 2:** whether `demo:web`/`demo:android` should start a
+10. **Still open from round 2:** whether `demo:web`/`demo:android` should start a
    stopped stack themselves rather than refusing; and whether generating health
    values at run time is the right reading of AC8 or an over-correction.
 

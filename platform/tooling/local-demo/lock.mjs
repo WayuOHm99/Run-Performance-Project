@@ -31,6 +31,16 @@
 // is **gone**, proven by `kill(pid, 0)`, and only for a lock written by this
 // host.
 //
+// **Silence is never proof either.** An earlier version treated a lock file with
+// no usable record as evidence that nobody held it, and deleted it. But a lock is
+// created by `open(..., "wx")` and its record is written a moment later, so every
+// successful acquisition passes through exactly that state. Reading it in that
+// window and calling it abandoned deletes a lock that was just taken. Only a
+// **well-formed** record naming a **dead** owner is ever removed automatically;
+// an unreadable, empty, or half-written one makes every command refuse and name
+// the file, which costs a manual delete in a case that should never happen and
+// keeps the guarantee in the case that does.
+//
 // **Reading a lock and then deleting it is a race.** `if (stale) rm(lock)` looks
 // safe and is not: between the read and the unlink another process can break the
 // same stale lock and acquire a live one, which this process then deletes. Both
@@ -59,7 +69,12 @@ import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { mkdir, open, readFile, rm } from "node:fs/promises";
 
-import { BREAK_DISPLAY_PATH, BREAK_FILE, LOCK_FILE } from "./paths.mjs";
+import {
+  BREAK_DISPLAY_PATH,
+  BREAK_FILE,
+  LOCK_DISPLAY_PATH,
+  LOCK_FILE,
+} from "./paths.mjs";
 
 // The only labels this tooling ever writes. A label read back from the lock file
 // is untrusted input — the file is world-writable in practice — so it reaches a
@@ -121,14 +136,17 @@ export function parseLockRecord(text) {
   return record;
 }
 
-// The single definition of "may be broken".
+// The single definition of "may be broken", and it answers no on anything it is
+// not certain about.
 //
-// Age is deliberately absent. A lock is breakable only when this host wrote it
-// and the process that wrote it is gone, or when the file is not a usable record
-// at all — which is itself proof that no orderly holder exists.
+// Age is deliberately absent, and so is any notion that a missing or unusable
+// record means an unheld lock. Breakable requires a **well-formed** record, from
+// **this host**, whose owning process is **gone**. Callers reject a null record
+// before reaching here; this returns false for one anyway, so the fail-closed
+// property belongs to the function rather than to its call sites.
 export function isLockBreakable(record, { isAlive = isProcessAlive } = {}) {
-  if (record === null) {
-    return true;
+  if (record === null || typeof record !== "object") {
+    return false;
   }
 
   // A pid from another machine says nothing about a process here, so a foreign
@@ -153,6 +171,13 @@ export function describeLockConflict(record) {
     record !== null && Number.isInteger(record.pid) ? record.pid : "unknown";
 
   return `Another destructive demo command is already running (${label}, pid ${pid}). Only one may touch the local demo at a time. Wait for it to finish; if it is definitely gone, the next run will recover the lock by itself.`;
+}
+
+// Says what to do without saying what the file contained. The contents are not
+// echoed, quoted, or summarised — an unreadable lock file is exactly the kind of
+// thing that turns out to hold something unexpected.
+function describeUnreadableLock() {
+  return `The local demo lock exists but does not yet hold a readable record. That is what a lock being taken right now looks like, so this command stopped rather than assume it was abandoned. Try again in a moment; if no demo command is running and it never clears, delete ${LOCK_DISPLAY_PATH} and try again.`;
 }
 
 function describeBreakInProgress() {
@@ -250,19 +275,22 @@ async function breakAndAcquire(
     const current = await readLockState(lockFile);
 
     if (current.exists) {
-      // Anything other than the exact record proven abandoned means the world
-      // moved: a different holder, a re-acquired lock, a rewritten file. Refuse
-      // rather than unlink something that might be live.
-      //
-      // A file that still holds no usable record is the one exception, and it is
-      // not really one: it names no owner, and only this claim holder can have
-      // touched it, so it cannot have become live since.
+      // The unlink below happens only for a file that is still, right now,
+      // exactly the well-formed abandoned record this caller proved. Anything
+      // else means the world moved — a different holder, a re-acquired lock, a
+      // rewritten file, or a record that has become unreadable — and the answer
+      // to all of those is to refuse rather than unlink something that might be
+      // live.
       if (
-        current.record !== null &&
-        (current.record.nonce !== provenNonce ||
-          !isLockBreakable(current.record, { isAlive }))
+        current.record === null ||
+        current.record.nonce !== provenNonce ||
+        !isLockBreakable(current.record, { isAlive })
       ) {
-        throw new DemoLockError(describeLockConflict(current.record));
+        throw new DemoLockError(
+          current.record === null
+            ? describeUnreadableLock()
+            : describeLockConflict(current.record),
+        );
       }
 
       await rm(lockFile, { force: true });
@@ -298,13 +326,22 @@ async function acquire(label, lockFile, breakFile, options) {
 
   const record = await readLockRecord(lockFile);
 
+  // **A lock that says nothing usable is never deleted automatically.**
+  //
+  // The obvious reading — "it names no owner, so nobody holds it" — is wrong,
+  // and wrong in the direction that loses the guarantee. `open(..., "wx")`
+  // creates the file and the record is written a moment later, so *every*
+  // successful acquisition passes through a state where the file exists and is
+  // empty. A process that reads it in that window and concludes "no orderly
+  // holder" would delete a lock that was just legitimately taken, and both would
+  // run. The empty file is not evidence of abandonment; it is the ordinary
+  // appearance of a lock being taken right now.
+  //
+  // The same applies to a truncated or corrupted record: unreadable is not
+  // provably unowned. Refusing costs one manual delete in a case that should
+  // never occur; guessing costs the mutual exclusion this module exists for.
   if (record === null) {
-    // No usable record. There is no nonce to prove anything with, so the file
-    // itself is the proof that no orderly holder exists: break it under the
-    // claim, with a nonce that cannot match anything.
-    await breakAndAcquire(lockFile, breakFile, label, null, options);
-
-    return;
+    throw new DemoLockError(describeUnreadableLock());
   }
 
   if (!isLockBreakable(record, options)) {

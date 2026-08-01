@@ -38,8 +38,10 @@ export const FIXTURE_SQL_RELATIVE = "supabase/fixtures/local-demo.sql";
 // one, so it is safe to show and safe to paste.
 export const CREDENTIALS_DISPLAY_PATH = "platform/.local-demo/credentials.txt";
 
-// The recovery claim is the only lock artefact a message ever names, because it
-// is the only one a person is ever asked to delete. The lock file itself is
-// recovered automatically and is deliberately not advertised as something to
-// remove by hand.
+// Named in a message only in the two cases a person genuinely has to act on: a
+// lock whose record never became readable, and a recovery claim left behind by a
+// killed run. An abandoned lock with a well-formed record is recovered
+// automatically and is never advertised as something to delete by hand.
+export const LOCK_DISPLAY_PATH = "platform/.local-demo/demo.lock";
+
 export const BREAK_DISPLAY_PATH = "platform/.local-demo/demo.lock.break";

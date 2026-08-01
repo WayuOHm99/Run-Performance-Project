@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -29,7 +29,7 @@ import {
   parseLockRecord,
   withDemoLock,
 } from "./lock.mjs";
-import { BREAK_DISPLAY_PATH } from "./paths.mjs";
+import { BREAK_DISPLAY_PATH, LOCK_DISPLAY_PATH } from "./paths.mjs";
 
 const THIRTY_MINUTES_MS = 30 * 60 * 1000;
 
@@ -211,21 +211,112 @@ describe("withDemoLock", () => {
     assert.equal(existsSync(breakFile), false);
   });
 
-  it("recovers a lock file that holds no usable record", async () => {
+  // The initialization window. `open(..., "wx")` creates the file and the record
+  // is written a moment later, so an empty lock file is what a lock being taken
+  // *right now* looks like — not an abandoned one. An earlier version deleted it.
+  it("refuses a lock whose record has not been written yet, and leaves it alone", async () => {
+    // Exactly the state a mid-acquisition lock is in: created, still empty, and
+    // held open by its owner.
+    const holder = await open(lockFile, "wx", 0o600);
+
+    try {
+      let ran = false;
+
+      await assert.rejects(
+        withDemoLock(
+          "demo:reset",
+          async () => {
+            ran = true;
+          },
+          options({ isAlive: alive }),
+        ),
+        (error) => {
+          assert.ok(error instanceof DemoLockError);
+          assert.ok(error.message.includes(LOCK_DISPLAY_PATH));
+
+          return true;
+        },
+      );
+
+      // The three things that matter: the workflow never ran, the lock still
+      // exists, and no recovery was even attempted.
+      assert.equal(ran, false);
+      assert.equal(existsSync(lockFile), true);
+      assert.equal(existsSync(breakFile), false);
+      assert.equal(currentLockDepth(), 0);
+    } finally {
+      await holder.close();
+    }
+  });
+
+  // A separate process must reach the same conclusion, since that is the whole
+  // scenario: two processes, one of them mid-acquisition.
+  it("a separate process refuses an unwritten lock without deleting it", async () => {
+    const holder = await open(lockFile, "wx", 0o600);
+
+    try {
+      const result = await acquireInChildProcess();
+
+      assert.equal(result.acquired, false);
+      assert.equal(existsSync(lockFile), true);
+      assert.equal(existsSync(breakFile), false);
+
+      // And the file is still empty: nothing rewrote or truncated it.
+      assert.equal(await readFile(lockFile, "utf8"), "");
+    } finally {
+      await holder.close();
+    }
+  });
+
+  it("refuses a lock file that holds no usable record, rather than deleting it", async () => {
     await writeFile(lockFile, "{ not json", "utf8");
 
     let ran = false;
 
-    await withDemoLock(
-      "demo:reset",
-      async () => {
-        ran = true;
+    await assert.rejects(
+      withDemoLock(
+        "demo:reset",
+        async () => {
+          ran = true;
+        },
+        options({ isAlive: dead }),
+      ),
+      (error) => {
+        assert.ok(error instanceof DemoLockError);
+        // Unreadable is not provably unowned, whatever any pid check says.
+        assert.ok(error.message.includes(LOCK_DISPLAY_PATH));
+
+        return true;
       },
-      options({ isAlive: alive }),
     );
 
-    assert.equal(ran, true);
+    assert.equal(ran, false);
+    assert.equal(existsSync(lockFile), true);
     assert.equal(existsSync(breakFile), false);
+  });
+
+  // The contents of an unreadable lock file are never echoed: it is exactly the
+  // kind of thing that turns out to hold something unexpected.
+  it("does not echo an unreadable lock file's contents", async () => {
+    const sentinel = ["sb", "secret", "synthetic-garbage-in-a-lock"].join("_");
+
+    await writeFile(lockFile, `{ truncated ${sentinel}`, "utf8");
+
+    await assert.rejects(
+      withDemoLock("demo:reset", async () => {}, options({ isAlive: dead })),
+      (error) => {
+        const serialized = [
+          error?.message ?? "",
+          error?.stack ?? "",
+          JSON.stringify(error, Object.getOwnPropertyNames(error ?? {})),
+        ].join("\n");
+
+        assert.ok(!serialized.includes(sentinel));
+        assert.ok(!serialized.includes("truncated"));
+
+        return true;
+      },
+    );
   });
 
   it("never breaks a lock written by another host", async () => {
@@ -477,8 +568,11 @@ describe("isLockBreakable", () => {
     );
   });
 
-  it("treats an unusable record as breakable", () => {
-    assert.equal(isLockBreakable(null, { isAlive: alive }), true);
+  // Fail closed: no record means no proof, not permission.
+  it("refuses to call an unusable record breakable", () => {
+    for (const value of [null, undefined, "a string", 42]) {
+      assert.equal(isLockBreakable(value, { isAlive: dead }), false);
+    }
   });
 
   // Age is not an input. It cannot be, or a slow run loses its lock.

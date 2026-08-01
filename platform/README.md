@@ -90,21 +90,20 @@ The value must be `linux`.
 Run from `platform/`:
 
 ```powershell
-corepack pnpm db:start
-corepack pnpm db:status
-corepack pnpm db:stop
+corepack pnpm demo:start    # bring the local stack up
+corepack pnpm demo:verify   # read-only: check the baseline counts
+corepack pnpm demo:stop     # stop this project's containers, keeping data
 ```
+
+These are the supported way to run the local stack. Each one suppresses the
+Supabase CLI's own output at the OS level, so none of them prints the stack's
+credential block — a local database URL, a JWT secret, and a service-role key —
+into your terminal scrollback. See **Credential hygiene** below for why that
+matters even for locally generated values.
 
 The stack is entirely local. It never links, logs in to, or migrates the hosted
 Supabase project. `supabase login`, `supabase link`, `supabase db push`, and any
 other remote command are out of bounds for local development work.
-
-`db:start` and `db:status` pass the CLI's output straight through, and that
-output contains the stack's credential block — see **Credential hygiene** below.
-They exist for database work where you want to see it. **For demo work, use
-`demo:start`**, which is the same non-destructive start with the output discarded
-at the OS level; nothing in the demo tooling or `docs/app/LOCAL-DEMO.md` asks you
-to run a raw CLI command.
 
 ### Database authorization tests
 
@@ -140,9 +139,20 @@ membership, one active coach membership, and — deliberately — **zero sharing
 grants and zero check-ins**. Consent is never seeded; the whole point of the demo
 is to grant and revoke it yourself through the real UI.
 
-`demo:reset` is the only destructive command, and it is destructive only to the
-local Supabase project. Launching the app never resets or reseeds. None of these
-commands read or modify `apps/mobile/.env.local`.
+**Two commands are destructive**, and both are destructive only to the local
+Supabase project:
+
+- `demo:reset` rebuilds the baseline from scratch, which wipes the local database
+  first;
+- `demo:verify:consent` creates a synthetic check-in and a sharing grant to prove
+  the consent boundary end to end, so it **brackets itself with a full reset at
+  both ends** and leaves the zero-consent baseline behind — including when it
+  fails part-way, via a best-effort restore. It is not read-only, and it is not a
+  command to run against a demo you are part-way through.
+
+`demo:verify` is the read-only one: it re-reads the baseline counts and changes
+nothing. Launching the app never resets or reseeds. None of these commands read or
+modify `apps/mobile/.env.local`.
 
 `demo:start` brings a stopped demo stack back with the credential block described
 under **Credential hygiene** below discarded rather than printed, so demo work
