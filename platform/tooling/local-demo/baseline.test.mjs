@@ -282,6 +282,47 @@ describe("readBaseline", () => {
     }
   });
 
+  // The seams exist for these tests; they must not be a way to remove the bound
+  // being tested. A zero or NaN budget would otherwise skip the loop and leave
+  // no error to throw at all.
+  it("falls back to the default budget when a seam is out of bounds", async () => {
+    for (const attempts of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const { calls, query } = scriptedQuery(
+        Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
+      );
+
+      await assert.rejects(
+        () => readBaseline({ query, wait: async () => {}, attempts }),
+        DemoBaselineError,
+      );
+      assert.equal(calls.length, BASELINE_ATTEMPTS);
+    }
+  });
+
+  it("never waits longer than the bounded delay", async () => {
+    for (const delayMs of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      -1,
+      60_000,
+      "500",
+    ]) {
+      const { query } = scriptedQuery(
+        Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
+      );
+      const { waits, wait } = recordingWait();
+
+      await assert.rejects(
+        () => readBaseline({ query, wait, delayMs }),
+        DemoBaselineError,
+      );
+
+      for (const ms of waits) {
+        assert.equal(ms, BASELINE_RETRY_DELAY_MS);
+      }
+    }
+  });
+
   // A real read of a wrong database. Retrying it would turn a visible, correct
   // answer into three more of the same, and hiding it would defeat the whole
   // baseline guarantee.

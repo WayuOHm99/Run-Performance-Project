@@ -33,6 +33,27 @@ export class DemoBaselineError extends Error {
 export const BASELINE_ATTEMPTS = 4;
 export const BASELINE_RETRY_DELAY_MS = 500;
 
+// Ceilings, not settings. They exist so the injected seams below cannot widen
+// the budget past what "bounded" means here.
+const MAX_BASELINE_ATTEMPTS = 10;
+const MAX_BASELINE_RETRY_DELAY_MS = 2000;
+
+function boundedAttempts(attempts) {
+  return Number.isInteger(attempts) &&
+    attempts >= 1 &&
+    attempts <= MAX_BASELINE_ATTEMPTS
+    ? attempts
+    : BASELINE_ATTEMPTS;
+}
+
+function boundedDelay(delayMs) {
+  return Number.isFinite(delayMs) &&
+    delayMs >= 0 &&
+    delayMs <= MAX_BASELINE_RETRY_DELAY_MS
+    ? delayMs
+    : BASELINE_RETRY_DELAY_MS;
+}
+
 // One row, all integers. `named_profiles` counts profiles that carry a usable
 // display name, because a null one would make the coach surface fail closed and
 // the demo look broken for a reason that has nothing to do with consent.
@@ -151,9 +172,16 @@ export async function readBaseline({
   delayMs = BASELINE_RETRY_DELAY_MS,
   wait = delay,
 } = {}) {
+  // The seams exist for the tests, so they must not be able to remove the
+  // bound they are testing. Anything that is not a positive integer inside the
+  // ceiling — including `NaN`, `Infinity`, and 0, which would skip the loop
+  // entirely and leave nothing to throw — falls back to the default.
+  const budget = boundedAttempts(attempts);
+  const pause = boundedDelay(delayMs);
+
   let lastError;
 
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  for (let attempt = 1; attempt <= budget; attempt += 1) {
     try {
       return parseBaselineRow(await query(BASELINE_SQL));
     } catch (error) {
@@ -163,8 +191,8 @@ export async function readBaseline({
 
       lastError = error;
 
-      if (attempt < attempts) {
-        await wait(delayMs);
+      if (attempt < budget) {
+        await wait(pause);
       }
     }
   }
