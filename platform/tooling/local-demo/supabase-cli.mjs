@@ -91,13 +91,27 @@ export async function applyLocalSqlFile(relativePath) {
   );
 }
 
+// A scalar query answers in about 1.5–1.7s against a healthy local stack
+// (measured in rounds 6 and 9). This bound is generous by an order of magnitude
+// so a merely slow machine is never mistaken for a stuck one, while still
+// guaranteeing the call returns. Round 10 added it: before that a stuck CLI
+// child could hang `demo:verify` indefinitely.
+export const LOCAL_QUERY_TIMEOUT_MS = 20_000;
+
 // The only place a query result is read back. Callers must keep the SQL to
 // scalar aggregates; see `baseline.mjs`.
-export async function queryLocalScalars(sql) {
+//
+// `timeoutMs` lets `readBaseline` shrink the bound to whatever is left of its
+// own deadline, so an in-flight query cannot overrun the overall budget.
+export async function queryLocalScalars(sql, { timeoutMs } = {}) {
+  const bound = Number.isFinite(timeoutMs)
+    ? Math.max(1, Math.min(timeoutMs, LOCAL_QUERY_TIMEOUT_MS))
+    : LOCAL_QUERY_TIMEOUT_MS;
+
   const { exitCode, signal, stdout } = await runCapturedStdout(
     process.execPath,
     cliArgs(["db", "query", "--local", "-o", "json", sql]),
-    { ...baseOptions, label: "local scalar query" },
+    { ...baseOptions, label: "local scalar query", timeoutMs: bound },
   );
 
   if (!succeeded({ exitCode, signal })) {

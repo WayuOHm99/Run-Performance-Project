@@ -36,6 +36,17 @@ import { spawn } from "node:child_process";
 // "terminated by a signal" and is deliberately non-zero.
 export const SIGNAL_TERMINATION_EXIT_CODE = 128;
 
+// A child that exceeded its timeout. 124 is the conventional `timeout(1)` code
+// and is deliberately non-zero, so `succeeded()` rejects it like any other
+// failure even if a caller reads the code rather than catching.
+export const SUBPROCESS_TIMEOUT_EXIT_CODE = 124;
+
+// After the timeout fires the child gets `SIGTERM`, then this long to exit on
+// its own, then `SIGKILL`, then this long again before the promise settles
+// regardless. So a timed-out call costs at most `timeoutMs + 2 × grace`, and
+// that whole quantity is what callers must budget for — see `readBaseline`.
+export const SUBPROCESS_KILL_GRACE_MS = 2000;
+
 // Node's signal names are fixed identifiers, not child output, but they are
 // still passed through a shape check so nothing else can ever reach a message
 // through this parameter.
@@ -70,6 +81,26 @@ export function describeSubprocessFailure(label, exitCode, signal = null) {
   return `${label} failed (exit code ${code}). Output was suppressed on purpose, because it can carry a database URL, a JWT secret, and a service-role key. See docs/app/LOCAL-DEMO.md for recovery steps that do not print any of them.`;
 }
 
+// Built from the caller-supplied label and the caller-supplied timeout only.
+// No output, no SQL, no command line, no system error.
+export function describeSubprocessTimeout(label, timeoutMs) {
+  const ms = Number.isFinite(timeoutMs) ? Math.round(timeoutMs) : "unknown";
+
+  return `${label} did not finish within ${ms}ms and was terminated. Output was suppressed on purpose, because it can carry a database URL, a JWT secret, and a service-role key. See docs/app/LOCAL-DEMO.md for recovery steps that do not print any of them.`;
+}
+
+export function subprocessTimeout(label, timeoutMs) {
+  const error = new DemoSubprocessError(
+    describeSubprocessTimeout(label, timeoutMs),
+    SUBPROCESS_TIMEOUT_EXIT_CODE,
+    null,
+  );
+
+  error.timedOut = true;
+
+  return error;
+}
+
 export function subprocessFailure(label, exitCode, signal = null) {
   return new DemoSubprocessError(
     describeSubprocessFailure(label, exitCode, signal),
@@ -85,8 +116,25 @@ export function succeeded({ exitCode, signal }) {
   return exitCode === 0 && !signal;
 }
 
+// Round 10, finding M3: a CLI child had no timeout at all, so a stuck
+// `supabase db query` could hang `demo:verify` or `demo:reset` forever — and
+// `readBaseline`'s deadline could not help, because it is only consulted between
+// awaits.
+//
+// `options.timeoutMs` adds a real bound. When it elapses the child is escalated
+// SIGTERM → grace → SIGKILL → grace, and the promise settles **once**, with a
+// fixed sanitized timeout error. Every path clears every timer, and a `settled`
+// latch means a late `close` or `error` after a timeout cannot settle the
+// promise a second time.
+//
+// Omitting `timeoutMs` keeps the previous unbounded behaviour, which is what the
+// long-running commands (`supabase start`, `db reset`) still want: they can
+// legitimately take minutes, and killing one mid-migration is worse than waiting.
 function runWith(command, args, options, stdio) {
   const spawnFn = options.spawnFn ?? spawn;
+  const timeoutMs = options.timeoutMs;
+  const graceMs = options.killGraceMs ?? SUBPROCESS_KILL_GRACE_MS;
+  const bounded = Number.isFinite(timeoutMs) && timeoutMs > 0;
 
   return new Promise((resolve, reject) => {
     const child = spawnFn(command, args, {
@@ -97,6 +145,50 @@ function runWith(command, args, options, stdio) {
     });
 
     let stdout = "";
+    let settled = false;
+    let timedOut = false;
+    const timers = new Set();
+
+    function later(fn, ms) {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        fn();
+      }, ms);
+
+      // A pending kill timer must never hold the process open on its own.
+      timer.unref?.();
+      timers.add(timer);
+
+      return timer;
+    }
+
+    function clearTimers() {
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+
+      timers.clear();
+    }
+
+    function settle(settleFn, value) {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimers();
+      settleFn(value);
+    }
+
+    // Kills only this child, by its own handle. Nothing here looks up a pid,
+    // scans a process list, or touches a container.
+    function terminate(signal) {
+      try {
+        child.kill(signal);
+      } catch {
+        // The child is already gone; the `close` handler will settle.
+      }
+    }
 
     if (stdio[1] === "pipe" && child.stdout) {
       child.stdout.setEncoding("utf8");
@@ -109,7 +201,8 @@ function runWith(command, args, options, stdio) {
     // credential material. It is still reduced to a fixed sentence so callers
     // cannot come to depend on rendering a raw system error.
     child.on("error", () => {
-      reject(
+      settle(
+        reject,
         subprocessFailure(
           `${options.label ?? command} could not be started`,
           1,
@@ -121,15 +214,42 @@ function runWith(command, args, options, stdio) {
     // to a non-zero code here rather than at each call site, so no caller can
     // forget and read a kill as a success.
     child.on("close", (code, signal) => {
-      const terminatingSignal = sanitizeSignal(signal);
+      if (timedOut) {
+        // The child has now actually gone. Report the timeout, not the exit
+        // status of our own kill.
+        settle(reject, subprocessTimeout(options.label ?? command, timeoutMs));
 
-      resolve({
+        return;
+      }
+
+      settle(resolve, {
         exitCode:
           typeof code === "number" ? code : SIGNAL_TERMINATION_EXIT_CODE,
-        signal: terminatingSignal,
+        signal: sanitizeSignal(signal),
         stdout,
       });
     });
+
+    if (bounded) {
+      later(() => {
+        timedOut = true;
+        terminate("SIGTERM");
+
+        later(() => {
+          terminate("SIGKILL");
+
+          // Last resort: a child that ignores SIGKILL (or a platform that never
+          // delivers `close`) must not strand the caller. Settling here leaves
+          // no timer and no further work pending.
+          later(() => {
+            settle(
+              reject,
+              subprocessTimeout(options.label ?? command, timeoutMs),
+            );
+          }, graceMs);
+        }, graceMs);
+      }, timeoutMs);
+    }
   });
 }
 

@@ -33,25 +33,36 @@ export class DemoBaselineError extends Error {
 // A bigger number is the same mistake again, so the termination condition is no
 // longer a count.
 //
-//   * `BASELINE_QUICK_ATTEMPTS` — retried with no questions asked, to absorb a
-//     one-off blip cheaply.
-//   * After that, every further retry must be **justified** by the canary
-//     below: the tooling keeps waiting only while it can show the CLI's query
-//     path is itself unhealthy. See `readBaseline`.
-//   * `BASELINE_DEADLINE_MS` — the outer bound. Nothing waits past it.
+//   * `BASELINE_DEADLINE_MS` — the outer bound. Nothing retries past it.
 //   * `BASELINE_MAX_ATTEMPTS` — a second, independent ceiling, so a pathological
 //     zero-cost query cannot spin inside the deadline.
 //
-// **The deadline bounds waiting, not total duration.** Each attempt also spawns
-// a Supabase CLI process; round 6 and round 9 both measured a single baseline
-// query at roughly 1.5–1.7s against a healthy local stack. The deadline is
-// checked *between* attempts, so the real worst case is the deadline plus one
-// in-flight query, and the wall clock can exceed 60s slightly. No caller sets a
-// timeout against it.
-export const BASELINE_QUICK_ATTEMPTS = 3;
+// Round 10 removed the third mechanism, a "quick allowance" after which a
+// healthy control query could end the retry early. See finding M1 on
+// `readBaseline`: that let an unproven assumption declare a transient
+// permanent.
+//
+// ## The real bound, stated honestly
+//
+// Every attempt's CLI child now carries a timeout capped to whatever is left of
+// the deadline, so an in-flight query cannot overrun the budget. The worst case
+// a caller must allow for is:
+//
+//   BASELINE_DEADLINE_MS                 retrying and waiting        60s
+//   + 2 × SUBPROCESS_KILL_GRACE_MS       terminating a stuck child    4s
+//   + BASELINE_DIAGNOSIS_TIMEOUT_MS      the one diagnostic query     5s
+//   + 2 × SUBPROCESS_KILL_GRACE_MS       terminating that child too   4s
+//   ────────────────────────────────────────────────────────────────────
+//   ≈ 73s
+//
+// The grace terms are the SIGTERM → SIGKILL escalation in `subprocess.mjs`, and
+// they are only paid if a child actually hangs. A healthy failure — one where
+// every query answers promptly and the result is simply wrong — costs the
+// deadline plus one diagnostic query, so about 65s.
 export const BASELINE_MAX_ATTEMPTS = 30;
 export const BASELINE_RETRY_DELAY_MS = 1000;
 export const BASELINE_DEADLINE_MS = 60_000;
+export const BASELINE_DIAGNOSIS_TIMEOUT_MS = 5000;
 
 // The canary. Deliberately the most trivial statement that still exercises the
 // whole path this module depends on — the pinned CLI, `--local`, `-o json`, the
@@ -240,30 +251,36 @@ export function formatBaseline(counts) {
 //
 // ## The mechanism
 //
-// Termination is now driven by evidence, with two independent outer bounds:
+// ## Round 10, finding M1: the control query is a label, not a gate
 //
-//   1. **A short no-questions-asked allowance** (`BASELINE_QUICK_ATTEMPTS`)
-//      absorbs a one-off blip without paying for a diagnosis.
-//   2. **After that, every further retry has to be earned.** Before waiting
-//      again, the tooling runs `CANARY_SQL` through the *same* CLI path. The
-//      canary reads nothing from the database — it is `select 1::int as ok` —
-//      so it isolates the transport from the query.
+// Round 9 stopped retrying as soon as `select 1::int as ok` came back healthy,
+// reasoning that a working CLI path proves a structurally broken
+// `BASELINE_SQL` will not recover. **That inference was never proven**, and the
+// round 9 handoff said so in its own limitations. If the transient is specific
+// to the baseline query rather than to the transport, round 9 would declare it
+// permanent after three attempts — turning the exact failure this whole
+// sequence is about into a fast, confident, wrong answer.
 //
-//      - Canary comes back as a clean one-row result → **the CLI path is
-//        provably healthy**, so a structurally broken baseline read is not a
-//        transport blip and will not fix itself. Stop immediately and fail
-//        closed. Retrying here would only burn the deadline before reporting
-//        the same thing.
-//      - Canary is also broken, or fails → the path itself is unhealthy. That is
-//        positive evidence the condition is transient, so keep waiting.
+// This is the same error as round 6, one level up: treating "I have no evidence
+// for X" as "I have evidence against X". So the control query no longer touches
+// control flow. It runs **once, after the loop has already given up**, and its
+// only effect is which fixed sentence the error carries.
 //
-//   3. **`BASELINE_DEADLINE_MS`** ends it regardless, and
-//      **`BASELINE_MAX_ATTEMPTS`** bounds it a second way. Whichever binds
-//      first, the loop stops and rethrows the last structural error unchanged.
+// Termination is therefore driven by two bounds and nothing else:
 //
-// So a healthy baseline no longer needs a destructive reset to be re-read: the
-// tooling waits out a genuinely unhealthy transport for up to a minute, and
-// `demo:verify` stays read-only throughout.
+//   1. **`BASELINE_DEADLINE_MS`** — retrying stops when the remaining budget
+//      cannot fit another wait plus another attempt. Each attempt's CLI child
+//      also carries a timeout capped to the remaining budget, so an in-flight
+//      query cannot overrun it.
+//   2. **`BASELINE_MAX_ATTEMPTS`** — an independent ceiling.
+//
+// Whichever binds first, the loop stops and rethrows the last structural
+// failure, its message unchanged apart from the appended fixed diagnosis.
+//
+// A healthy baseline suffering the observed transient therefore stays
+// recoverable for the whole minute, whatever the control query says, and
+// `demo:verify` stays read-only throughout. **A destructive `demo:reset` is not
+// the recovery path for a read-only transient and is not recommended as one.**
 //
 // **What round 9 did not establish.** The root cause is still unproven. Round 9
 // ran 80+ structural probes against the pinned CLI and could not produce the
@@ -297,29 +314,72 @@ export function formatBaseline(counts) {
 // When the budget is exhausted the last error is rethrown unchanged, so a
 // persistent structural failure fails closed with the same fixed sanitized
 // message a single attempt would have produced.
+// Round 10, finding M2: the canary used to accept **any** non-null singleton
+// row, so `{}` or `{ ok: "bad" }` counted as a healthy CLI path. A control query
+// whose own contract is not checked is not a control.
+//
+// The contract is now exact: one row, an `ok` field, an **integer**, equal to
+// `1`. `row.ok === 1` rejects `true`, `"1"`, `1.0`-as-string, and every other
+// number; `Number.isInteger` rejects `1.5` and `NaN` reaching it by any other
+// route. Anything else — missing rows, a non-array row set, zero or two rows, a
+// non-object row, an array row, malformed JSON — is unhealthy.
+export function canaryResultIsHealthy(stdout) {
+  let document;
+
+  try {
+    document = JSON.parse(stdout);
+  } catch {
+    return false;
+  }
+
+  const rows = Array.isArray(document) ? document : document?.rows;
+
+  if (!Array.isArray(rows) || rows.length !== 1) {
+    return false;
+  }
+
+  const row = rows[0];
+
+  if (row === null || typeof row !== "object" || Array.isArray(row)) {
+    return false;
+  }
+
+  return Number.isInteger(row.ok) && row.ok === 1;
+}
+
 // Runs the canary through the same path as the baseline read and answers one
-// question: **is the CLI's query path returning well-formed single-row results
-// right now?**
+// question: **was the CLI's query path returning a well-formed result at the
+// moment the baseline read gave up?**
 //
 // It never throws — a broken canary is an answer, not an error — and it returns
 // nothing but a boolean. Neither the canary's output nor its failure is
-// inspected beyond its shape, so no content can travel from here to a caller.
-export async function cliQueryPathLooksHealthy(query) {
+// inspected beyond the contract above, so no content can travel from here to a
+// caller.
+//
+// **Round 10, finding M1: this is a diagnostic, not a control.** See
+// `readBaseline` for why its result can no longer end a retry.
+export async function cliQueryPathLooksHealthy(query, options = {}) {
   try {
-    const document = JSON.parse(await query(CANARY_SQL));
-    const rows = Array.isArray(document) ? document : document?.rows;
-
-    return Array.isArray(rows) && rows.length === 1 && rows[0] !== null;
+    return canaryResultIsHealthy(await query(CANARY_SQL, options));
   } catch {
     return false;
   }
 }
 
+// The three fixed sentences the diagnosis can add to an exhaustion message.
+// Each is a constant chosen by a boolean; none is derived from any response.
+export const BASELINE_DIAGNOSIS_SENTENCE = Object.freeze({
+  "cli-query-path-healthy":
+    "A trivial control query answered normally, so the local CLI query path itself was working.",
+  "cli-query-path-unhealthy":
+    "A trivial control query also failed, so the local CLI query path itself was not working.",
+  "cli-query-path-unknown": "The control query was not run.",
+});
+
 export async function readBaseline({
   query = queryLocalScalars,
   wait = delay,
   now = Date.now,
-  quickAttempts = BASELINE_QUICK_ATTEMPTS,
   maxAttempts = BASELINE_MAX_ATTEMPTS,
   delayMs = BASELINE_RETRY_DELAY_MS,
   deadlineMs = BASELINE_DEADLINE_MS,
@@ -335,10 +395,6 @@ export async function readBaseline({
     BASELINE_MAX_ATTEMPTS,
     BASELINE_MAX_ATTEMPTS,
   );
-  const quick = Math.min(
-    boundedInteger(quickAttempts, BASELINE_QUICK_ATTEMPTS, ceiling),
-    ceiling,
-  );
   const pause = boundedMs(
     delayMs,
     BASELINE_RETRY_DELAY_MS,
@@ -351,11 +407,18 @@ export async function readBaseline({
   );
 
   const startedAt = now();
+  const remaining = () => deadline - (now() - startedAt);
+
   let lastError;
 
   for (let attempt = 1; attempt <= ceiling; attempt += 1) {
     try {
-      return parseBaselineRow(await query(BASELINE_SQL));
+      // The per-attempt timeout is capped to whatever is left of the deadline,
+      // so an in-flight query cannot overrun the overall budget. This is what
+      // makes the deadline a real bound rather than a between-awaits check.
+      return parseBaselineRow(
+        await query(BASELINE_SQL, { timeoutMs: Math.max(1, remaining()) }),
+      );
     } catch (error) {
       if (!(error instanceof DemoBaselineError) || error.retryable !== true) {
         throw error;
@@ -363,22 +426,14 @@ export async function readBaseline({
 
       lastError = error;
 
-      // Ceiling one: attempts.
+      // Bound one: attempts.
       if (attempt >= ceiling) {
         break;
       }
 
-      // Ceiling two: wall clock. Checked between attempts, so the real worst
-      // case is this deadline plus one in-flight query.
-      if (now() - startedAt >= deadline) {
-        break;
-      }
-
-      // Past the blip allowance, waiting again has to be justified. A healthy
-      // canary proves the transport is fine, which means this structural
-      // failure will not clear on its own — so stop and report it now rather
-      // than spending the rest of the deadline to report the same thing.
-      if (attempt >= quick && (await isPathHealthy(query))) {
+      // Bound two: wall clock. There must be room for the wait *and* a further
+      // attempt, or there is no point starting one.
+      if (remaining() <= pause) {
         break;
       }
 
@@ -386,5 +441,42 @@ export async function readBaseline({
     }
   }
 
-  throw lastError;
+  throw await annotateWithDiagnosis(lastError, query, isPathHealthy);
+}
+
+// Runs the control query **once**, after the retry loop has already finished,
+// purely to label the failure. It cannot shorten, extend, or end a retry —
+// by the time it runs there is nothing left to end.
+//
+// This is round 10's correction of finding M1. Round 9 let a healthy control
+// query terminate the loop early, on the assumption that a working
+// `select 1::int as ok` proves a structurally broken `BASELINE_SQL` will not
+// recover. That assumption was never proven — the round 9 handoff admitted as
+// much — and acting on it meant a baseline-specific transient could be declared
+// permanent after three attempts. It now changes only the wording of the error.
+// It gets its own small budget rather than the deadline's leftovers, which are
+// normally zero by the time it runs — a diagnosis that never runs is useless.
+// That budget is part of the documented overall bound.
+async function annotateWithDiagnosis(error, query, isPathHealthy) {
+  let diagnosis = "cli-query-path-unknown";
+
+  if (typeof isPathHealthy === "function") {
+    diagnosis = (await isPathHealthy(query, {
+      timeoutMs: BASELINE_DIAGNOSIS_TIMEOUT_MS,
+    }))
+      ? "cli-query-path-healthy"
+      : "cli-query-path-unhealthy";
+  }
+
+  // A fixed enum and a fixed sentence. Both are chosen by a boolean; neither is
+  // derived from any response.
+  const annotated = new DemoBaselineError(
+    `${error.message} ${BASELINE_DIAGNOSIS_SENTENCE[diagnosis]}`,
+    { retryable: error.retryable },
+  );
+
+  annotated.diagnosis = diagnosis;
+  annotated.structuralFailure = error.message;
+
+  return annotated;
 }

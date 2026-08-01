@@ -4,11 +4,12 @@ import { describe, it } from "node:test";
 import { EXPECTED_BASELINE } from "./accounts.mjs";
 import {
   BASELINE_DEADLINE_MS,
+  BASELINE_DIAGNOSIS_SENTENCE,
   BASELINE_MAX_ATTEMPTS,
-  BASELINE_QUICK_ATTEMPTS,
   BASELINE_RETRY_DELAY_MS,
   BASELINE_SQL,
   CANARY_SQL,
+  canaryResultIsHealthy,
   cliQueryPathLooksHealthy,
   compareBaseline,
   DemoBaselineError,
@@ -380,9 +381,8 @@ describe("readBaseline", () => {
     assert.deepEqual(h.baselineCalls, [BASELINE_SQL, BASELINE_SQL]);
   });
 
-  // Round 9's production bound, pinned so it cannot drift silently.
-  it("holds the round 9 production bound", () => {
-    assert.equal(BASELINE_QUICK_ATTEMPTS, 3);
+  // Round 10's production bound, pinned so it cannot drift silently.
+  it("holds the round 10 production bound", () => {
     assert.equal(BASELINE_MAX_ATTEMPTS, 30);
     assert.equal(BASELINE_RETRY_DELAY_MS, 1000);
     assert.equal(BASELINE_DEADLINE_MS, 60_000);
@@ -393,6 +393,39 @@ describe("readBaseline", () => {
       BASELINE_MAX_ATTEMPTS * BASELINE_RETRY_DELAY_MS >
         BASELINE_DEADLINE_MS / 3,
     );
+  });
+
+  // Round 10, finding M1. The whole point: a healthy control query must not be
+  // able to cut a retry short, because nothing proves a baseline-specific
+  // transient is permanent.
+  it("keeps retrying a structural failure even while the control query is healthy", async () => {
+    const h = harness({
+      baseline: [...Array.from({ length: 12 }, () => noRowSet), statusRow()],
+      canary: HEALTHY_CANARY,
+    });
+
+    const counts = await readBaseline(h);
+
+    assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
+    assert.equal(h.baselineCalls.length, 13);
+    // Never consulted during the loop — only ever after it gives up.
+    assert.equal(h.canaryCalls.length, 0);
+  });
+
+  it("recovers a baseline-specific transient on the last attempt with a healthy control query", async () => {
+    const h = harness({
+      baseline: [
+        ...Array.from({ length: BASELINE_MAX_ATTEMPTS - 1 }, () => noRowSet),
+        statusRow(),
+      ],
+      canary: HEALTHY_CANARY,
+    });
+
+    const counts = await readBaseline(h);
+
+    assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
+    assert.equal(h.baselineCalls.length, BASELINE_MAX_ATTEMPTS);
+    assert.equal(h.canaryCalls.length, 0);
   });
 
   // The failure boundary: each structural shape, repeated past the quick
@@ -415,7 +448,8 @@ describe("readBaseline", () => {
       assert.equal(h.baselineCalls.length, 9);
       assert.equal(h.waits.length, 8);
       // Consulted once per retry beyond the quick allowance.
-      assert.equal(h.canaryCalls.length, 8 - BASELINE_QUICK_ATTEMPTS + 1);
+      // The loop succeeded, so no diagnosis was ever needed.
+      assert.equal(h.canaryCalls.length, 0);
     });
 
     it(`recovers on the very last attempt when ${label} persists`, async () => {
@@ -435,8 +469,8 @@ describe("readBaseline", () => {
     });
   }
 
-  // Evidence-based termination: a healthy canary proves the transport is fine,
-  // so the structural failure will not clear and waiting is pointless.
+  // Termination is bounded by time and attempts only. The canary labels the
+  // failure afterwards; it never shortens the loop.
   for (const [label, response, message] of [
     ["missing rows", noRowSet, "The baseline query returned no row set."],
     ["non-array rows", nonArrayRows, "The baseline query returned no row set."],
@@ -446,7 +480,7 @@ describe("readBaseline", () => {
       "The baseline query did not return exactly one row.",
     ],
   ]) {
-    it(`stops at the quick allowance for ${label} when the canary is healthy`, async () => {
+    it(`exhausts the full ceiling for persistent ${label} even when the canary is healthy`, async () => {
       const h = harness({
         baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => response),
         canary: HEALTHY_CANARY,
@@ -456,16 +490,23 @@ describe("readBaseline", () => {
         () => readBaseline(h),
         (error) => {
           assert.ok(error instanceof DemoBaselineError);
-          assert.equal(error.message, message);
+          // The structural message is preserved verbatim, with the fixed
+          // diagnosis appended.
+          assert.equal(error.structuralFailure, message);
+          assert.equal(error.diagnosis, "cli-query-path-healthy");
+          assert.equal(
+            error.message,
+            `${message} ${BASELINE_DIAGNOSIS_SENTENCE["cli-query-path-healthy"]}`,
+          );
 
           return true;
         },
       );
 
-      // Exactly the quick allowance, one canary, and no wait after the stop.
-      assert.equal(h.baselineCalls.length, BASELINE_QUICK_ATTEMPTS);
+      // The healthy canary shortened nothing, and ran only once, after the end.
+      assert.equal(h.baselineCalls.length, BASELINE_MAX_ATTEMPTS);
+      assert.equal(h.waits.length, BASELINE_MAX_ATTEMPTS - 1);
       assert.equal(h.canaryCalls.length, 1);
-      assert.equal(h.waits.length, BASELINE_QUICK_ATTEMPTS - 1);
     });
 
     it(`exhausts the attempt ceiling for persistent ${label} when the canary stays broken`, async () => {
@@ -478,7 +519,8 @@ describe("readBaseline", () => {
         () => readBaseline(h),
         (error) => {
           assert.ok(error instanceof DemoBaselineError);
-          assert.equal(error.message, message);
+          assert.equal(error.structuralFailure, message);
+          assert.equal(error.diagnosis, "cli-query-path-unhealthy");
 
           return true;
         },
@@ -486,6 +528,7 @@ describe("readBaseline", () => {
 
       assert.equal(h.baselineCalls.length, BASELINE_MAX_ATTEMPTS);
       assert.equal(h.waits.length, BASELINE_MAX_ATTEMPTS - 1);
+      assert.equal(h.canaryCalls.length, 1);
 
       for (const ms of h.waits) {
         assert.equal(ms, BASELINE_RETRY_DELAY_MS);
@@ -493,18 +536,37 @@ describe("readBaseline", () => {
     });
   }
 
-  // A canary whose transport throws is evidence of an unhealthy path, not a
-  // reason to give up.
-  it("keeps waiting when the canary itself fails to run", async () => {
+  // A canary whose transport throws is an unhealthy diagnosis, not a crash.
+  it("labels the failure unhealthy when the canary itself fails to run", async () => {
     const h = harness({
-      baseline: [noRowSet, noRowSet, noRowSet, noRowSet, statusRow()],
+      baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => noRowSet),
       canary: "throw",
     });
 
-    const counts = await readBaseline(h);
+    await assert.rejects(
+      () => readBaseline(h),
+      (error) => {
+        assert.equal(error.diagnosis, "cli-query-path-unhealthy");
 
-    assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
-    assert.equal(h.baselineCalls.length, 5);
+        return true;
+      },
+    );
+  });
+
+  it("labels the failure unknown when no diagnostic is supplied", async () => {
+    const h = harness({
+      baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => noRowSet),
+    });
+
+    await assert.rejects(
+      () => readBaseline({ ...h, isPathHealthy: null }),
+      (error) => {
+        assert.equal(error.diagnosis, "cli-query-path-unknown");
+        assert.equal(h.canaryCalls.length, 0);
+
+        return true;
+      },
+    );
   });
 
   // The wall clock is the outer bound, and it binds before the attempt ceiling
@@ -520,11 +582,42 @@ describe("readBaseline", () => {
       DemoBaselineError,
     );
 
-    // Waits advance the injected clock, so the deadline is reached after five
-    // of them and the loop stops well short of the 30-attempt ceiling.
-    assert.equal(h.waits.length, 5);
-    assert.equal(h.baselineCalls.length, 6);
+    // Waits advance the injected clock. The loop stops when the remaining
+    // budget can no longer fit another wait plus another attempt, well short of
+    // the 30-attempt ceiling.
+    assert.equal(h.waits.length, 4);
+    assert.equal(h.baselineCalls.length, 5);
     assert.ok(h.baselineCalls.length < BASELINE_MAX_ATTEMPTS);
+  });
+
+  // Round 10, finding M3: the per-attempt timeout must shrink to fit what is
+  // left of the deadline, or an in-flight query can overrun the whole budget.
+  it("caps each attempt's timeout to the remaining deadline", async () => {
+    const seen = [];
+    const h = harness({
+      baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => noRowSet),
+      canary: BROKEN_CANARY,
+    });
+
+    const query = async (sql, options) => {
+      if (sql !== CANARY_SQL) {
+        seen.push(options?.timeoutMs);
+      }
+
+      return h.query(sql, options);
+    };
+
+    await assert.rejects(
+      () => readBaseline({ ...h, query, deadlineMs: 5000 }),
+      DemoBaselineError,
+    );
+
+    // Strictly decreasing, never above the deadline, never below 1.
+    assert.deepEqual(seen, [5000, 4000, 3000, 2000, 1000]);
+
+    for (const ms of seen) {
+      assert.ok(ms >= 1 && ms <= 5000);
+    }
   });
 
   // The seams exist for these tests; they must not be a way to exceed or remove
@@ -749,16 +842,35 @@ describe("readBaseline", () => {
           );
         }
 
-        // The fixed sanitized set, and nothing else.
+        // The fixed sanitized set, and nothing else. An exhaustion message is
+        // a fixed structural sentence plus a fixed diagnosis sentence; both
+        // halves are constants, so the whole message is one of a closed set.
+        const structural = [
+          "The baseline query did not return exactly one row.",
+          "The baseline query returned no row set.",
+          "Could not read the baseline query result.",
+          "The baseline query returned a non-integer count.",
+        ];
+        const permitted = new Set([
+          ...structural,
+          ...structural.flatMap((base) =>
+            Object.values(BASELINE_DIAGNOSIS_SENTENCE).map(
+              (sentence) => `${base} ${sentence}`,
+            ),
+          ),
+        ]);
+
         assert.ok(
-          [
-            "The baseline query did not return exactly one row.",
-            "The baseline query returned no row set.",
-            "Could not read the baseline query result.",
-            "The baseline query returned a non-integer count.",
-          ].includes(error.message),
+          permitted.has(error.message),
           `unexpected message: ${error.message}`,
         );
+
+        if (error.structuralFailure !== undefined) {
+          assert.ok(structural.includes(error.structuralFailure));
+          assert.ok(
+            Object.keys(BASELINE_DIAGNOSIS_SENTENCE).includes(error.diagnosis),
+          );
+        }
 
         // `retryable` is a boolean decided at the throw site, never a value
         // copied out of the response.
@@ -795,32 +907,74 @@ describe("cliQueryPathLooksHealthy", () => {
     }
   });
 
+  // Round 10, finding M2. The contract is exactly one row whose `ok` is the
+  // integer 1 — nothing looser. A control whose own result is not checked is
+  // not a control.
   for (const [label, response] of [
     ["the boundary envelope", JSON.stringify({ rows: [{ ok: 1 }] })],
     ["a bare array", JSON.stringify([{ ok: 1 }])],
+    [
+      "an extra column alongside ok",
+      JSON.stringify({ rows: [{ ok: 1, x: 2 }] }),
+    ],
   ]) {
-    it(`reports healthy for ${label}`, async () => {
-      assert.equal(await cliQueryPathLooksHealthy(async () => response), true);
+    it(`reports healthy for ${label}`, () => {
+      assert.equal(canaryResultIsHealthy(response), true);
     });
   }
 
-  for (const [label, respond] of [
-    ["a missing row set", async () => JSON.stringify({ warning: "w" })],
-    ["a non-array row set", async () => JSON.stringify({ rows: null })],
-    ["an empty row set", async () => JSON.stringify({ rows: [] })],
-    ["two rows", async () => JSON.stringify({ rows: [{ ok: 1 }, { ok: 1 }] })],
-    ["malformed JSON", async () => "not json"],
-    [
-      "a transport failure",
-      async () => {
-        throw new Error("query failed");
-      },
-    ],
+  for (const [label, response] of [
+    // The shapes round 9 wrongly accepted.
+    ["an empty row object", JSON.stringify({ rows: [{}] })],
+    ["a string ok", JSON.stringify({ rows: [{ ok: "bad" }] })],
+    ["a numeric string ok", JSON.stringify({ rows: [{ ok: "1" }] })],
+    ["a boolean ok", JSON.stringify({ rows: [{ ok: true }] })],
+    ["a null ok", JSON.stringify({ rows: [{ ok: null }] })],
+    ["a different integer", JSON.stringify({ rows: [{ ok: 0 }] })],
+    ["another different integer", JSON.stringify({ rows: [{ ok: 2 }] })],
+    ["a non-integer number", JSON.stringify({ rows: [{ ok: 1.5 }] })],
+    ["an object ok", JSON.stringify({ rows: [{ ok: { n: 1 } }] })],
+    ["an array ok", JSON.stringify({ rows: [{ ok: [1] }] })],
+    ["a null row", JSON.stringify({ rows: [null] })],
+    ["an array row", JSON.stringify({ rows: [[1]] })],
+    ["a scalar row", JSON.stringify({ rows: [1] })],
+    // The shapes it already rejected.
+    ["a missing row set", JSON.stringify({ warning: "w" })],
+    ["a non-array row set", JSON.stringify({ rows: null })],
+    ["an empty row set", JSON.stringify({ rows: [] })],
+    ["two rows", JSON.stringify({ rows: [{ ok: 1 }, { ok: 1 }] })],
+    ["malformed JSON", "not json"],
+    ["an empty string", ""],
+    ["a null document", "null"],
   ]) {
-    it(`reports unhealthy for ${label}`, async () => {
-      assert.equal(await cliQueryPathLooksHealthy(respond), false);
+    it(`reports unhealthy for ${label}`, () => {
+      assert.equal(canaryResultIsHealthy(response), false);
     });
   }
+
+  it("reports unhealthy for a transport failure without throwing", async () => {
+    assert.equal(
+      await cliQueryPathLooksHealthy(async () => {
+        throw new Error("query failed");
+      }),
+      false,
+    );
+  });
+
+  it("reports healthy only through the strict contract", async () => {
+    assert.equal(
+      await cliQueryPathLooksHealthy(async () =>
+        JSON.stringify({ rows: [{ ok: 1 }] }),
+      ),
+      true,
+    );
+    assert.equal(
+      await cliQueryPathLooksHealthy(async () =>
+        JSON.stringify({ rows: [{ ok: "1" }] }),
+      ),
+      false,
+    );
+  });
 
   it("asks only the canary question", async () => {
     const asked = [];

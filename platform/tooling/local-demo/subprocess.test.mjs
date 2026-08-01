@@ -6,10 +6,12 @@ import { describe, it } from "node:test";
 import {
   DemoSubprocessError,
   describeSubprocessFailure,
+  describeSubprocessTimeout,
   runCapturedStdout,
   runSuppressed,
   runSuppressedOrThrow,
   SIGNAL_TERMINATION_EXIT_CODE,
+  SUBPROCESS_TIMEOUT_EXIT_CODE,
   succeeded,
 } from "./subprocess.mjs";
 
@@ -63,6 +65,190 @@ function fakeSpawn({
     return child;
   };
 }
+
+// Round 10, finding M3. A child that never closes on its own, so the timeout is
+// the only thing that can end the call. It records every signal it is sent and
+// can be told when — or whether — to close in response.
+function hangingChild({ closeOn = "SIGTERM", closeCode = null } = {}) {
+  const signals = [];
+  const child = new EventEmitter();
+
+  child.stdout = null;
+  child.stderr = null;
+  child.kill = (signal) => {
+    signals.push(signal);
+
+    if (signal === closeOn) {
+      queueMicrotask(() => child.emit("close", closeCode, signal));
+    }
+
+    return true;
+  };
+
+  return { child, signals };
+}
+
+describe("subprocess timeouts", () => {
+  it("resolves normally when the child finishes inside its timeout", async () => {
+    const result = await runCapturedStdout("cmd", [], {
+      spawnFn: fakeSpawn({ exitCode: 0, stdout: "done" }),
+      timeoutMs: 5000,
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "done");
+  });
+
+  it("terminates a stuck child and rejects with a sanitized timeout", async () => {
+    const { child, signals } = hangingChild();
+
+    await assert.rejects(
+      () =>
+        runCapturedStdout("cmd", [], {
+          spawnFn: () => child,
+          label: "local scalar query",
+          timeoutMs: 5,
+          killGraceMs: 5,
+        }),
+      (error) => {
+        assert.ok(error instanceof DemoSubprocessError);
+        assert.equal(error.exitCode, SUBPROCESS_TIMEOUT_EXIT_CODE);
+        assert.equal(error.timedOut, true);
+        assert.ok(error.message.includes("local scalar query"));
+        assert.ok(error.message.includes("5ms"));
+
+        return true;
+      },
+    );
+
+    // The exact spawned child was signalled, by its own handle.
+    assert.deepEqual(signals, ["SIGTERM"]);
+  });
+
+  it("escalates to SIGKILL when SIGTERM is ignored", async () => {
+    const { child, signals } = hangingChild({ closeOn: "SIGKILL" });
+
+    await assert.rejects(
+      () =>
+        runCapturedStdout("cmd", [], {
+          spawnFn: () => child,
+          timeoutMs: 5,
+          killGraceMs: 5,
+        }),
+      DemoSubprocessError,
+    );
+
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  });
+
+  it("still settles when the child ignores SIGKILL entirely", async () => {
+    const { child, signals } = hangingChild({ closeOn: "never" });
+
+    await assert.rejects(
+      () =>
+        runCapturedStdout("cmd", [], {
+          spawnFn: () => child,
+          timeoutMs: 5,
+          killGraceMs: 5,
+        }),
+      (error) => {
+        assert.equal(error.timedOut, true);
+
+        return true;
+      },
+    );
+
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  });
+
+  // Double settlement is the classic defect in this shape of code: a late
+  // `close` or `error` arriving after the timeout already rejected.
+  it("cannot be settled twice by a late close or error", async () => {
+    const { child } = hangingChild({ closeOn: "never" });
+
+    const settled = [];
+    const promise = runCapturedStdout("cmd", [], {
+      spawnFn: () => child,
+      timeoutMs: 5,
+      killGraceMs: 5,
+    }).then(
+      () => settled.push("resolved"),
+      () => settled.push("rejected"),
+    );
+
+    await promise;
+
+    // Everything a dying child could still emit, after the fact.
+    child.emit("close", 0, null);
+    child.emit("close", 1, "SIGKILL");
+    child.emit("error", new Error("late spawn error"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.deepEqual(settled, ["rejected"]);
+  });
+
+  it("does not reject a child that closes just before its deadline", async () => {
+    const { child } = hangingChild({ closeOn: "never" });
+
+    const promise = runCapturedStdout("cmd", [], {
+      spawnFn: () => child,
+      timeoutMs: 50,
+      killGraceMs: 5,
+    });
+
+    queueMicrotask(() => child.emit("close", 0, null));
+
+    const result = await promise;
+
+    assert.equal(result.exitCode, 0);
+  });
+
+  it("kills nothing when no timeout is configured", async () => {
+    const { child, signals } = hangingChild({ closeOn: "never" });
+
+    const promise = runCapturedStdout("cmd", [], { spawnFn: () => child });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(signals, []);
+
+    child.emit("close", 0, null);
+    assert.equal((await promise).exitCode, 0);
+  });
+
+  it("leaves no timer holding the event loop open", async () => {
+    // A pending kill timer must be unref'd or cleared; if it were neither, the
+    // handle count would keep climbing across calls.
+    const before = process.getActiveResourcesInfo().length;
+
+    for (let i = 0; i < 5; i += 1) {
+      await runCapturedStdout("cmd", [], {
+        spawnFn: fakeSpawn({ exitCode: 0, stdout: "x" }),
+        timeoutMs: 10_000,
+      });
+    }
+
+    assert.ok(process.getActiveResourcesInfo().length <= before + 1);
+  });
+});
+
+describe("describeSubprocessTimeout", () => {
+  it("is built from the label and the timeout only", () => {
+    const message = describeSubprocessTimeout("local scalar query", 20_000);
+
+    assert.ok(message.includes("local scalar query"));
+    assert.ok(message.includes("20000ms"));
+  });
+
+  it("cannot carry output, because it never receives any", () => {
+    assert.equal(describeSubprocessTimeout.length, 2);
+
+    const message = describeSubprocessTimeout("label", 1);
+
+    for (const secret of CREDENTIAL_BEARING_OUTPUT.split("\n")) {
+      assert.ok(!message.includes(secret));
+    }
+  });
+});
 
 describe("describeSubprocessFailure", () => {
   it("is built from the label and exit code only", () => {
