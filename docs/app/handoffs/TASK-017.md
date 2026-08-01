@@ -1,10 +1,12 @@
 # TASK-017 handoff — Safe Local App Demo Environment and Synthetic Fixtures
 
-Status: **Round 5 complete.** Every Codex finding from rounds 1 through 4 is
-fixed, with a test for each. All verification re-run, including the local
-database authorization suite, a real end-to-end consent verification, and three
-full stop → cold `demo:reset` → `demo:verify` cycles. Stopped for GPT/Codex
-read-only review. Not merged. Worktree not removed.
+Status: **Round 6 complete.** Every Codex finding from rounds 1 through 5 is
+fixed, with a test for each. Round 6 answered its Medium finding with
+measurement — a local-only probe across two full container-transition cycles —
+and the evidence narrowed the retry rather than enlarging it. All verification
+re-run, including the local database authorization suite, a real end-to-end
+consent verification, and a cold `demo:reset` → `demo:verify` cycle. Stopped for
+GPT/Codex read-only review. Not merged. Worktree not removed.
 
 **One acceptance criterion is deliberately still open — AC3.** See the acceptance
 table. It is not "met at the data layer" any more; it stays open until the
@@ -39,6 +41,136 @@ credential-printing `db:start`. It is the only addition to the command surface, 
 is non-destructive — no reset, no fixture, no user, no write — and AC12 is
 unaffected: starting a stopped stack is not reseeding it. The packet's in-scope
 list is left as approved rather than edited to match; this section is the record.
+
+## Round 6: the findings and what was done
+
+Three findings — one Medium, two Low. The Medium one asked for evidence rather
+than a code change, and the evidence changed what the other fix should be.
+
+### The measurement, first
+
+Round 5 defended a retry budget with an argument. Round 6 measured it. A
+throwaway probe — written **outside the repository**, in the session scratchpad,
+and not committed — polled the baseline query continuously across two full
+`stop → cold start → db reset` cycles.
+
+**What the probe was allowed to record:** an enumerated structural
+classification, an attempt number, and an elapsed millisecond count. Nothing
+else. The classifier looks only at whether a key exists and what *type* it is;
+it never reads a value, and it never prints stdout, a row, a credential, a URL,
+or a health value. The classifications are a closed set: `one-row`,
+`rows-array-length-N`, `rows-missing`, `rows-not-array(type)`,
+`document-not-object`, `malformed-json`, `non-integer-count`,
+`subprocess-failure`.
+
+**Measurement A — is the database ready when `readBaseline` actually runs?**
+Poll starts after the command returns.
+
+| Cycle | After cold `supabase start` | After `db reset --local --no-seed` |
+| --- | --- | --- |
+| 1 | `one-row` on attempt 1 | `one-row` on attempt 1 |
+| 2 | `one-row` on attempt 1 | `one-row` on attempt 1 |
+
+**4 of 4, first attempt, no gap at all.** The only classification observed in the
+entire measurement was `one-row`.
+
+**Measurement B — the readiness ramp, polled from t=0 *while* the command runs.**
+This is the window the incident would have to fall in.
+
+| Cycle | Phase | Unreachable from | First `one-row` | Command returned |
+| --- | --- | --- | --- | --- |
+| 1 | cold start | 1545ms | 5026ms | 26998ms |
+| 1 | `db reset` | 1563ms | 23348ms | 35117ms |
+| 2 | cold start | 1693ms | 5709ms | 27452ms |
+| 2 | `db reset` | 1702ms | 24603ms | 37293ms |
+
+Two facts come out of this, and both matter more than the timings:
+
+1. **An unready local database produces a non-zero exit — never a well-formed
+   document with the wrong number of rows.** Across roughly a hundred probe
+   attempts spanning every unready moment of four container transitions, the
+   only two classifications ever observed were `subprocess-failure` and
+   `one-row`. `rows-missing`, `rows-not-array`, `rows-array-length-N`,
+   `malformed-json`, and `non-integer-count` **never occurred once**.
+2. **The database is ready long before the command that resets it returns** —
+   by 11.8s in cycle 1 and 12.7s in cycle 2. And `readBaseline` does not even
+   run there: `db reset`, two real Auth signups, and the fixture application all
+   have to succeed against that same database first.
+
+### 1. Medium — the retry budget is not proven sufficient
+
+**Kept at four attempts and 500ms, and the reason is now measured rather than
+argued.**
+
+For the phenomenon that is real and reproducible — local readiness — the budget
+is not marginal, it is enormous: the required allowance measured **0ms in 4 of 4
+cycles**, against a 1.5s budget, with three successful database round-trips
+already standing between the reset and the baseline read. A budget in the tens of
+seconds would be sizing for a window this code structurally cannot be in.
+
+**What I could not do is reproduce the incident.** The retried condition — a row
+array of the wrong length — did not occur once in any measurement. So I cannot
+give you a duration for it, and I will not invent one: increasing the budget
+against an unmeasured window is exactly the arbitrary increase this finding asked
+me to avoid. The retry stays as bounded, cheap insurance, and it is now honest
+about what it is.
+
+The budget is pinned by a test rather than left as whatever the constants happen
+to say, so changing it requires re-reading this evidence.
+
+**A more useful outcome than a bigger number:** because finding 2 splits the
+classification, a recurrence will now say *which* shape it was. "…returned no
+row set" and "…did not return exactly one row" are different messages, and
+whichever appears next tells us which branch fired — something round 5's single
+message could not.
+
+### 2. Low — retry classification was broader than its explanation
+
+Codex is right, and the measurement decides it. Round 5 retried
+
+```text
+!Array.isArray(rows) || rows.length !== 1
+```
+
+so `{}`, `{ rows: null }`, and `{ rows: {} }` each cost four attempts and 1.5
+seconds, while every comment and paragraph described only a wrong row *count*.
+
+**Resolved by narrowing, which is option one of the two offered.** I took it
+because the second option requires proving those shapes are a transient
+readiness condition, and measurement B proves the opposite: readiness failures
+are non-zero exits. There was no evidence behind retrying a missing row set, and
+round 5 should not have claimed one.
+
+- `Array.isArray(rows) && rows.length !== 1` → **retryable**, message unchanged.
+- Missing or non-array `rows`, and a document that is not an object → **fails
+  immediately**, with a new fixed sanitized message, *"The baseline query
+  returned no row set."*
+- Malformed JSON, non-integer counts, subprocess failures, and real count
+  mismatches are unchanged and still never retried or hidden.
+
+Fourteen new tests cover the classification directly: two retryable shapes
+(empty array, two rows) asserting `retryable === true` and the unchanged
+message; eight fail-fast shapes (`{}`, `{ rows: null }`, `{ rows: {} }`,
+`{ rows: "1" }`, `{ rows: 1 }`, an envelope with `boundary`/`warning` and no
+`rows`, a non-object document, and `null`) asserting the new message and
+`retryable === false`; and a `readBaseline`-level test asserting each of those
+costs **exactly one attempt and zero waits**. The sentinel-leak scan gained three
+cases aimed at the new branch, including one where the offending `rows` value
+*is* the sentinel.
+
+### 3. Low — rollback documentation was inconsistent
+
+Also correct. The table called `git revert 6fef4cb 26d78dd` "Round 5 only" while
+round 5 was three commits including the handoff, so running it would have left
+this document describing code that was no longer on the branch.
+
+The Rollback section now states plainly that **every command in the table is
+implementation-only**, adds a column naming the documentation left in place, and
+explains why no documentation commit appears in any of them: the handoff is the
+review record for six rounds including every defect I disclosed, and reverting it
+would delete that record while leaving the history that makes it checkable. The
+correct move after a code revert is to edit this file in the revert commit, and
+the documentation commits are listed by round so that is a mechanical step.
 
 ## Round 5: the finding and what was done
 
@@ -569,7 +701,9 @@ change this round.
 | 12 | `89fb9c6` | `fix(demo): fail closed on a lock record that is not readable yet` |
 | 13 | `26d78dd6d13a7b22a846971e75086fbe558d1992` | `fix(demo): retry only the transient baseline row-count condition` |
 | 14 | `6fef4cb4fcdb612e32abb9630c80fecb081f0017` | `fix(demo): clamp the baseline retry's test seams to the bound` |
-| 15 | *this commit* | `docs(task-017): record the round 5 review response` |
+| 15 | `b4067b06ca937df47e5b4719aa7287417141b14f` | `docs(task-017): record the round 5 review response` |
+| 16 | `939435e6deaa6ae06243e0fbaacfdabd7cd88bfb` | `fix(demo): narrow the baseline retry to a measured condition` |
+| 17 | *this commit* | `docs(task-017): record the round 6 review response` |
 
 All on `feat/TASK-017-safe-local-app-demo`, cut from `ccd7d44`. **No existing
 commit was amended, rebased, or rewritten in any round** — each round is additive
@@ -583,6 +717,20 @@ cannot be printed inside itself, and is resolvable with
 `git log --oneline ccd7d44..HEAD`.
 
 ## Changed files
+
+Round 6 alone — **two files** in one code commit, no new file, no command added
+or removed:
+
+> `platform/tooling/local-demo/baseline.mjs`,
+> `platform/tooling/local-demo/baseline.test.mjs`, plus this handoff.
+
+The readiness probe that produced the round 6 evidence was written in the session
+scratchpad **outside the repository** and is deliberately **not committed**. It is
+a diagnostic, not a test: it needs Docker, takes several minutes, and stops and
+restarts the local stack. Committing it would put a slow, environment-dependent
+script in a suite that is currently fast and hermetic. Its logic is described
+above in enough detail to rebuild, and what it proved is now pinned by
+deterministic unit tests that need no database.
 
 Round 5 alone — **two files** across its two code commits, no new file, no
 command added or removed:
@@ -658,9 +806,11 @@ Run from `platform/` unless noted. **All green.**
 | `corepack pnpm format:check` | exit 0 — all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test:tooling` | exit 0 — **41 suites, 324 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312, round 4: 315) |
+| `corepack pnpm test:tooling` | exit 0 — **42 suites, 336 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312, round 4: 315, round 5: 324) |
+| Readiness probe, measurement A (post-command), 2 cycles × 2 phases | `one-row` on attempt 1, **4 of 4**, no gap |
+| Readiness probe, measurement B (during the ramp), ~100 attempts | only `subprocess-failure` and `one-row` ever observed; the retried condition **never occurred** |
 | `corepack pnpm test` | exit 0 — **40 test files, 790 tests, 0 failures**, unchanged |
-| **stop → cold `demo:reset` → `demo:verify`**, run three times | exit 0 each time — **0** Supabase containers before each cold start; identical baseline every time; the `demo:verify` immediately after each cold reset passed. The third cycle ran against the final round 5 code |
+| **stop → cold `demo:reset` → `demo:verify`**, run four times | exit 0 each time — **0** Supabase containers before each cold start; identical baseline every time; the `demo:verify` immediately after each cold reset passed. The fourth cycle ran against the final round 6 code |
 | `corepack pnpm demo:reset` | exit 0 — identical baseline every time |
 | `corepack pnpm demo:verify` | exit 0 — baseline verified |
 | `corepack pnpm demo:verify:consent` | exit 0 — **9/9 checks passed** |
@@ -681,7 +831,12 @@ Run from `platform/` unless noted. **All green.**
 | Supabase containers after `demo:stop`, running / including stopped | **0 / 0** |
 | Final worktree status | **clean** |
 
-The tooling suite grew from 210 to 293 to 312 to 315 to **324** tests. Round 5
+The tooling suite grew from 210 to 293 to 312 to 315 to 324 to **336** tests.
+Round 6 added twelve: ten pinning the exact retryable/fail-fast classification
+across the shapes in finding 2, one pinning the chosen budget so it cannot drift
+away from the evidence, and one asserting the fail-fast shapes cost exactly one
+attempt and no wait. The sentinel-leak scan also gained three cases for the new
+branch. Round 5
 added nine, all in a new `readBaseline` suite: recovery after one structural
 failure, the SQL sent unchanged on every attempt, budget exhaustion failing
 closed with bounded attempts and bounded waits, an out-of-bounds `attempts` seam
@@ -1026,20 +1181,35 @@ line in the test files resembles a real credential to a secret scanner.
     through it. I ran a final `demo:reset` before stopping, so the environment you
     inherit is a valid baseline — but the commands can desynchronize, and the fix
     is always `demo:reset`.
-14. **The baseline readiness retry is bounded, and the bound may be too small
-    for the window the Product Owner actually hit.** Four attempts and 1.5
-    seconds total. In the reported incident the condition survived an immediate
-    `demo:verify`, so this fix would have shortened that failure at best, not
-    prevented it. It is deliberately not larger: a longer wait buys a slower
-    failure, not a different one, and the budget should grow only on evidence
-    about how long the window really is. The recovery is unchanged — run
-    `demo:reset` again.
-15. **The retry was not observed firing against the real stack.** All three live
-    cold cycles this round passed on the first read, which is what "intermittent"
-    means. The loop's behaviour is established by deterministic unit tests with
-    the query and the wait injected; nobody has watched it recover a real cold
-    start.
-16. **Docker Desktop was already running at the start of this round** (I started
+14. **The incident that motivated the retry was never reproduced, and its cause
+    is still unknown.** This is the honest headline of round 6. Roughly a hundred
+    probe attempts across four container transitions produced only
+    `subprocess-failure` and `one-row`; the condition the retry covers did not
+    occur once. So the retry is insurance against something I have measured the
+    *absence* of, not something I have characterised. If it recurs, the two
+    distinct messages will at least say which branch fired — that is the
+    diagnostic this round bought, and it is worth more than the retry itself.
+    ~~Round 5: the bound may be too small for the window the Product Owner hit.~~
+    **Superseded by round 6's measurement**, which shows the readiness window at
+    that point is 0ms and that readiness failures take a different shape
+    entirely. The old claim assumed the incident was a readiness gap; nothing
+    supports that.
+15. **The retry has still never been observed firing against a real stack**, now
+    across four cold cycles rather than three. Its behaviour rests entirely on
+    deterministic unit tests with the query and the wait injected.
+16. **The measurement is one machine, one Docker backend, two cycles.** Windows
+    11 with the WSL 2 backend, Supabase CLI `v2.109.1`. The consistency between
+    cycles was high — the four transitions agree to within a few hundred
+    milliseconds — but a slower machine, a cold image pull, or a different CLI
+    version could move the ramp timings. What I would not expect to move is the
+    *shape* finding: an unready database failing with a non-zero exit rather
+    than a malformed envelope is CLI behaviour, not a timing artefact.
+17. **The readiness probe is not committed**, so this evidence is not
+    reproducible by running the test suite. It is reproducible by rebuilding the
+    probe from the description above. I judged a slow, Docker-dependent,
+    stack-restarting diagnostic to be the wrong thing to add to a fast hermetic
+    suite; if you disagree, that is a reasonable place to push back.
+18. **Docker Desktop was already running at the start of this round** (I started
     it in round 2 and left it running, as reported then). It is **still running**;
     quitting it is a machine-wide action I left to you. No Supabase container is
     running.
@@ -1062,23 +1232,48 @@ and the local Docker volume, removable with
 `corepack pnpm exec supabase stop --no-backup` — **note that this discards the
 local database**, which is exactly why `demo:stop` never passes that flag.
 
-Partial reverts, newest first:
+Partial reverts, newest first.
 
-| To undo | Command |
-| --- | --- |
-| Round 5 only, keeping rounds 1–4 | `git revert 6fef4cb 26d78dd` |
-| Rounds 4–5, keeping rounds 1–3 | `git revert 6fef4cb 26d78dd 89fb9c6` |
-| Rounds 3–5, keeping rounds 1–2 | `git revert 6fef4cb 26d78dd 89fb9c6 772353e ed199e3` |
-| Rounds 2–5, keeping round 1 | `git revert 6fef4cb 26d78dd 89fb9c6 772353e ed199e3 b2547ec 2a7b2d5` |
-| The implementation, keeping the documentation | `git revert 60d0118 6df9417` |
+**Every command in this table is implementation-only.** None of them touches a
+documentation commit, so after running one the handoff will still describe code
+that is no longer on the branch. That is deliberate — see below — but it means
+the table is a code rollback, not a "make the branch look like round N" button.
+Round 5's table entry previously called the two-code-commit command "round 5
+only" while round 5 was three commits including this document, which was
+misleading in exactly that way; the column is now explicit.
 
-**Round 5 is the one round that reverts cleanly on its own**, provided both of
-its commits go together and newest first. They touch only `baseline.mjs` and its
-test, nothing else imports the seams they add, and reverting them returns
-`readBaseline` to a single attempt — which fails closed with the same message,
-just sooner. It is independent of every lock round in both directions. Reverting
-`26d78dd` **without** `6fef4cb` will conflict, since the clamp edits the loop the
-first commit introduced.
+| To undo (code only) | Command | Documentation left in place |
+| --- | --- | --- |
+| Round 6 code, keeping rounds 1–5 | `git revert 939435e` | round 6 handoff |
+| Rounds 5–6 code, keeping rounds 1–4 | `git revert 939435e 6fef4cb 26d78dd` | rounds 5–6 handoff |
+| Rounds 4–6 code, keeping rounds 1–3 | `git revert 939435e 6fef4cb 26d78dd 89fb9c6` | rounds 4–6 handoff |
+| Rounds 3–6 code, keeping rounds 1–2 | `git revert 939435e 6fef4cb 26d78dd 89fb9c6 772353e ed199e3` | rounds 3–6 handoff |
+| Rounds 2–6 code, keeping round 1 | `git revert 939435e 6fef4cb 26d78dd 89fb9c6 772353e ed199e3 b2547ec 2a7b2d5` | rounds 2–6 handoff |
+| All implementation, keeping all documentation | `git revert 60d0118 6df9417` | everything |
+
+Round 6 has a single code commit, `939435e`, so it appears inline above. Only
+this closeout commit's own SHA cannot be printed inside itself.
+
+**Why no documentation commit appears in any of these commands.** The handoff is
+the review record for six rounds, including the disclosure of every defect I
+introduced. Reverting it would delete that record while leaving the branch
+history that makes it verifiable, which is the one outcome worse than a stale
+document. If you revert code and want the prose to match, **edit this file in the
+revert commit** — do not revert the documentation commits. For reference, they
+are `5267856` (round 1), `b2547ec` and `ef4a9c5` (round 2), `772353e` and
+`ef2f9ef` (round 3), `89fb9c6` (round 4, code and documentation together),
+`b4067b0` (round 5), and this round's closeout.
+
+**Round 5's two code commits revert cleanly together**, newest first. They touch
+only `baseline.mjs` and its test, and nothing else imports the seams they add.
+Reverting `26d78dd` **without** `6fef4cb` will conflict, because the clamp edits
+the loop the first commit introduced. Round 6's code commits sit on top of both
+and must come off first.
+
+Reverting the whole retry — rounds 5 and 6 together — returns `readBaseline` to a
+single attempt. That still fails closed with the same fixed sanitized message;
+it just fails sooner, and a cold-start readiness blip becomes a failed
+`demo:reset` again rather than a recovered one.
 
 **Reverting any lock round on its own is not recommended**, and the reason is the
 same each time: a partly reverted lock is worse than no lock. Round 3 without
@@ -1090,7 +1285,41 @@ rounds 2, 3, and 4 together.
 
 ## For the reviewer (GPT/Codex, read-only)
 
-The earlier focus lists still stand. What is new in round 5, highest value first:
+The earlier focus lists still stand. What is new in round 6, highest value first:
+
+1. **Whether the probe measured the right thing.** Its central claim is that an
+   unready local database fails with a non-zero exit rather than a malformed
+   envelope, and everything in round 6 follows from that. It was measured across
+   four container transitions on one machine. If there is a readiness state my
+   two phases skipped — a partially healthy Kong, a pooler that accepts a
+   connection and then answers oddly, a `db reset` that fails midway — that state
+   is where the classification could still be wrong.
+2. **Whether narrowing was the right option for finding 2.** I chose fail-fast
+   for missing/non-array rows because I could not prove those shapes transient
+   and the measurement pointed away from them. The cost, if the Product Owner's
+   incident *was* one of those shapes, is that it now fails on attempt 1 instead
+   of attempt 4 — the same failure, sooner, with a message that identifies it. I
+   think that is strictly better than a silent four-attempt delay. Check that
+   reasoning.
+3. **Whether keeping the budget at 1.5s is defensible given I could not
+   reproduce the incident.** My argument is that 0ms was needed in 4 of 4
+   measurements, that three successful database round-trips precede the baseline
+   read, and that enlarging against an unmeasured window is guessing. The
+   opposite reading — that an unreproduced intermittent fault deserves a wider
+   margin precisely because it is not understood — is not unreasonable, and it
+   is the Product Owner's call more than mine.
+4. **The new fixed message.** *"The baseline query returned no row set."* Check
+   it says nothing about what was actually received, and that the branch cannot
+   be reached with a valid one-row document.
+5. **That the probe is not committed.** Argued under changed files and
+   limitations. If you think this evidence should be reproducible from the repo
+   rather than from a description, say so — it is a real trade and I picked one
+   side of it.
+6. **The rollback table's honesty.** It is now labelled implementation-only with
+   a column for what documentation survives. Confirm no row would leave the
+   branch in a state the prose misdescribes without saying so.
+
+What was new in round 5, and still worth your attention:
 
 1. **The claim that "not exactly one row" cannot be a state report.** The whole
    fix rests on it: `BASELINE_SQL` has no outer `from` and no outer predicate, so
