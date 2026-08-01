@@ -1,14 +1,15 @@
 # TASK-017 handoff — Safe Local App Demo Environment and Synthetic Fixtures
 
-Status: **Round 7 complete.** Every Codex finding from rounds 1 through 6 is
-fixed. Round 7 is **documentation-only** — it corrects the rollback table, which
-round 6 had left inaccurate. No code, test, migration, config, package file, or
-README changed, and no verification command was re-run because nothing
-executable moved; `git diff --name-only 59437f0..HEAD` lists this file alone.
-Round 6's own results stand: the retry narrowing, its measurement, and a full
-verification pass including the database authorization suite, an end-to-end
-consent verification, and a cold `demo:reset` → `demo:verify` cycle. Stopped for
-GPT/Codex read-only review. Not merged. Worktree not removed.
+Status: **Round 8 complete.** Round 8 fixes a real failure the Product Owner
+reproduced on their own machine — one that **round 6 had concluded was
+impossible**. Both structural baseline conditions are retryable again, on a wider
+bound, with distinct messages preserved. Round 6's measurements are kept as
+historical evidence with its conclusion explicitly marked superseded. Full
+verification re-run, including the database authorization suite, an end-to-end
+consent verification, and a stop → cold `demo:reset` → `demo:verify` cycle.
+**The intermittent condition did not recur during my verification**, so nothing
+here claims to have watched the retry fire. Stopped for GPT/Codex read-only
+review. Not merged. Worktree not removed.
 
 **One acceptance criterion is deliberately still open — AC3.** See the acceptance
 table. It is not "met at the data layer" any more; it stays open until the
@@ -99,6 +100,14 @@ Two facts come out of this, and both matter more than the timings:
    run there: `db reset`, two real Auth signups, and the fixture application all
    have to succeed against that same database first.
 
+> **Superseded by round 8, in part.** The measurements above are kept because
+> they are real and still useful — the timings and the "unready means non-zero
+> exit" observation both stand as *observations*. What does **not** stand is the
+> conclusion drawn from fact 1: that a missing or non-array row set is therefore
+> a permanent CLI-contract failure. The Product Owner hit exactly that shape
+> three times in a row and it cleared on its own. This probe simply never
+> provoked it, and I mistook that for proof it could not happen. See round 8.
+
 ### 1. Medium — the retry budget is not proven sufficient
 
 **Kept at four attempts and 500ms, and the reason is now measured rather than
@@ -160,6 +169,19 @@ costs **exactly one attempt and zero waits**. The sentinel-leak scan gained thre
 cases aimed at the new branch, including one where the offending `rows` value
 *is* the sentinel.
 
+> **Superseded by round 8.** Narrowing was the wrong call, and the reason is
+> instructive: I said option two "requires proving those shapes are a transient
+> readiness condition" and treated my failure to provoke them as proof of the
+> negative. The Product Owner then reproduced exactly that shape. Both shapes are
+> retryable again as of round 8. The one part of this finding that survives is
+> the **separate message**, which is what later identified which branch fired —
+> that distinction was worth making and is kept.
+>
+> Codex's underlying complaint was still correct: the classification and its
+> explanation disagreed. Round 8 resolves it the other way, by widening the
+> explanation to match a retryable classification instead of narrowing the
+> classification to match a too-confident explanation.
+
 ### 3. Low — rollback documentation was inconsistent
 
 Also correct. The table called `git revert 6fef4cb 26d78dd` "Round 5 only" while
@@ -178,6 +200,96 @@ explained why no documentation commit appears in a rollback command.
 > pointed at without checking the commits the wording described. See the Rollback
 > section for what the table says now — two verified commands, and an explicit
 > statement that anything older is a manual rollback.
+
+## Round 8: the finding and what was done
+
+**The Product Owner reproduced the failure round 6 declared impossible.** That is
+the whole round, and the correction matters more than the code.
+
+### What happened
+
+1. `demo:reset` failed with **"The baseline query returned no row set."**
+2. An immediate `demo:verify` failed with the same message.
+3. A second `demo:reset` failed with the same message again.
+4. A later safe structural probe returned the normal envelope, with `rows` an
+   array of length 1.
+5. `demo:verify` then passed.
+6. A subsequent controlled `demo:reset` passed and wrote the credentials file.
+
+A condition that fails three times and then clears on its own, with no
+intervening fix, is transient. **Round 6's conclusion is disproven.**
+
+### Why round 6 got it wrong
+
+Round 6 measured a local stack across two `stop → cold start → db reset` cycles,
+found that an unready database fails with a **non-zero exit** rather than a
+malformed envelope, and concluded that a missing row set had to be a permanent
+CLI-contract violation. It made that shape fail immediately, and I wrote that up
+as the disciplined, evidence-led choice.
+
+The measurement was not wrong about what it saw. The **inference** was wrong: I
+treated "I could not provoke this in four container transitions on one machine"
+as "this cannot happen". Those are not the same claim, and only the first one was
+supported. The round 6 write-up even said the incident was never reproduced and
+listed that as a limitation — and then reasoned as though it had been ruled out.
+
+The general lesson, recorded because this is the second round in a row where my
+reasoning outran my evidence: **an absence of reproduction is not evidence of
+impossibility**, and a real failure on the Product Owner's machine outranks my
+inability to reproduce it.
+
+### The change
+
+Both structural shapes are retryable again, on one shared budget:
+
+| Parsed result | Round 6 | Round 8 |
+| --- | --- | --- |
+| `rows` missing or not an array | fail immediately | **retryable** |
+| `rows` an array, length ≠ 1 | retryable | **retryable** |
+| Malformed JSON | fail immediately | fail immediately |
+| Non-integer count | fail immediately | fail immediately |
+| Subprocess failure | fail immediately | fail immediately |
+| Real count mismatch | returned, never retried | returned, never retried |
+
+**The two messages stay distinct.** *"The baseline query returned no row set."*
+and *"The baseline query did not return exactly one row."* Round 6's one durable
+contribution was creating that distinction, and it is what told us which branch
+the Product Owner actually hit. Collapsing them now would throw away the only
+diagnostic this whole sequence produced; a test asserts they stay different.
+
+**The bound moves from 4 attempts / 500ms to 10 attempts / 1000ms.**
+
+**9000ms is the maximum *wait* budget, not the maximum duration.** The nine waits
+are the only part of the elapsed time this module controls. Each of the ten
+attempts also spawns a Supabase CLI process and waits for it to answer, and round
+6 measured a single baseline query at roughly 1.5s against a healthy stack. A
+full exhaustion is therefore ~9s of waiting **plus** ten query round-trips, and
+the wall-clock total can exceed twenty seconds. Nothing promises otherwise and no
+caller sets a deadline against it.
+
+**Ten attempts do not promise to outlast the Product Owner's incident.** That one
+survived a whole `demo:reset` and an immediate `demo:verify` — a far longer
+window than any budget here would cover. The wider bound makes a short blip
+recoverable and leaves a long one failing closed, which is the honest shape for a
+condition whose duration is still unknown. The recovery when it is not enough is
+unchanged: run `demo:reset` again.
+
+Unchanged and re-asserted: credentials stay unwritten until the baseline passes
+comparison (the throw propagates out of `resetUnderLock` before
+`writeCredentialsFile`); exhaustion rethrows the last error unchanged so it fails
+closed; and nothing derived from the response reaches any error surface.
+
+### Honest limits of this round's verification
+
+**I did not reproduce the intermittent condition either.** Every live command I
+ran this round succeeded on its first read. The verification below shows the
+pipeline still works end to end with the wider bound; it does **not** show the
+retry firing, because nothing transient occurred while I was watching. The retry
+path's behaviour rests entirely on the deterministic unit tests, where both the
+query and the wait are injected.
+
+So: the *fix* is driven by the Product Owner's evidence, and the *tests* prove
+the fix behaves as specified. Neither is a claim that I saw it recover live.
 
 ## Round 7: the finding and what was done
 
@@ -730,7 +842,9 @@ change this round.
 | 15 | `b4067b06ca937df47e5b4719aa7287417141b14f` | `docs(task-017): record the round 5 review response` |
 | 16 | `939435e6deaa6ae06243e0fbaacfdabd7cd88bfb` | `fix(demo): narrow the baseline retry to a measured condition` |
 | 17 | `59437f052af8d796618df8b992e919d80245df31` | `docs(task-017): record the round 6 review response` |
-| 18 | *this commit* | `docs(task-017): correct the rollback table` |
+| 18 | `dc21f484b865b20acfc4adcca234844233ea415d` | `docs(task-017): correct the rollback table` |
+| 19 | `0748048034f3cdcc8a6a8221a8d563274ccc3ee6` | `fix(demo): retry both structural baseline conditions on a wider bound` |
+| 20 | *this commit* | `docs(task-017): record the round 8 review response` |
 
 All on `feat/TASK-017-safe-local-app-demo`, cut from `ccd7d44`. **No existing
 commit was amended, rebased, or rewritten in any round** — each round is additive
@@ -751,6 +865,15 @@ Each round's closing documentation commit cannot print its own SHA inside itself
 all of them are resolvable with `git log --oneline ccd7d44..HEAD`.
 
 ## Changed files
+
+Round 8 alone — **two files** in one code commit, no new file, no command added
+or removed:
+
+> `platform/tooling/local-demo/baseline.mjs`,
+> `platform/tooling/local-demo/baseline.test.mjs`, plus this handoff.
+
+`reset.mjs` and `demo-verify.mjs` still call `readBaseline()` with no arguments;
+the wider bound lives entirely behind that call.
 
 Round 7 alone — **one file**, this handoff, in one documentation-only commit:
 
@@ -847,11 +970,12 @@ Run from `platform/` unless noted. **All green.**
 | `corepack pnpm format:check` | exit 0 — all files match |
 | `corepack pnpm lint` | exit 0 |
 | `corepack pnpm typecheck` | exit 0 |
-| `corepack pnpm test:tooling` | exit 0 — **42 suites, 336 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312, round 4: 315, round 5: 324) |
+| `corepack pnpm test:tooling` | exit 0 — **42 suites, 348 tests, 0 failures** (round 1: 210, round 2: 293, round 3: 312, round 4: 315, round 5: 324, round 6: 336) |
 | Readiness probe, measurement A (post-command), 2 cycles × 2 phases | `one-row` on attempt 1, **4 of 4**, no gap |
 | Readiness probe, measurement B (during the ramp), ~100 attempts | only `subprocess-failure` and `one-row` ever observed; the retried condition **never occurred** |
 | `corepack pnpm test` | exit 0 — **40 test files, 790 tests, 0 failures**, unchanged |
-| **stop → cold `demo:reset` → `demo:verify`**, run four times | exit 0 each time — **0** Supabase containers before each cold start; identical baseline every time; the `demo:verify` immediately after each cold reset passed. The fourth cycle ran against the final round 6 code |
+| **stop → cold `demo:reset` → `demo:verify`**, run five times | exit 0 each time — **0** Supabase containers before each cold start; identical baseline every time; the `demo:verify` immediately after each cold reset passed. The fifth cycle ran against the final round 8 code |
+| Round 8: did the intermittent condition recur? | **No.** Every live command succeeded on its first read, so the retry was never exercised against a real stack this round |
 | `corepack pnpm demo:reset` | exit 0 — identical baseline every time |
 | `corepack pnpm demo:verify` | exit 0 — baseline verified |
 | `corepack pnpm demo:verify:consent` | exit 0 — **9/9 checks passed** |
@@ -872,7 +996,18 @@ Run from `platform/` unless noted. **All green.**
 | Supabase containers after `demo:stop`, running / including stopped | **0 / 0** |
 | Final worktree status | **clean** |
 
-The tooling suite grew from 210 to 293 to 312 to 315 to 324 to **336** tests.
+The tooling suite grew from 210 to 293 to 312 to 315 to 324 to 336 to **348**
+tests. Round 8 reworked the `readBaseline` suite around the wider bound and added
+twelve net: recovery for each retryable shape after repeated failure and again on
+the **tenth and last** attempt; exhaustion at **exactly ten attempts and nine
+waits** for missing rows, non-array rows, and wrong cardinality, each asserting
+its own distinct message; the production bound pinned at 10 × 1000ms with the
+9000ms wait budget stated; seams rejected when they try to **exceed** the bound
+(`attempts: 11`, `delayMs: 1001`) as well as when they try to remove it; a seam
+honoured when it asks for less; exactly-one-query assertions for malformed JSON,
+non-integer counts, and subprocess failure; a count mismatch queried once and
+returned unaltered; and a leak scan extended to `error.cause` and to both
+retryable branches driven to exhaustion.
 Round 6 added twelve: ten pinning the exact retryable/fail-fast classification
 across the shapes in finding 2, one pinning the chosen budget so it cannot drift
 away from the evidence, and one asserting the fail-fast shapes cost exactly one
@@ -1250,7 +1385,23 @@ line in the test files resembles a real credential to a secret scanner.
     probe from the description above. I judged a slow, Docker-dependent,
     stack-restarting diagnostic to be the wrong thing to add to a fast hermetic
     suite; if you disagree, that is a reasonable place to push back.
-18. **Docker Desktop was already running at the start of this round** (I started
+18. **The retry's duration is still unknown, and ten attempts may not be
+    enough.** The Product Owner's incident survived a full `demo:reset` and an
+    immediate `demo:verify` — much longer than 9000ms of waiting plus ten query
+    round-trips. This makes a short blip recoverable; it does not promise to
+    outlast that incident, and I did not widen it further because there is still
+    no measurement of how long the condition actually lasts. The recovery when
+    it is not enough is unchanged: run `demo:reset` again.
+19. **A wider bound makes a genuinely broken baseline slower to report.** Ten
+    attempts against a persistently wrong structural result costs ~9s of waiting
+    plus ten CLI round-trips before it fails. That is the price of the retry, it
+    is paid only on the failure path, and it is bounded — but it is real, and it
+    is longer than the 1.5s round 6 charged.
+20. **Round 8 did not reproduce the condition either.** Every live command this
+    round succeeded on its first read. The fix follows the Product Owner's
+    evidence; the tests prove the fix behaves as specified; neither is a claim
+    that I watched it recover.
+21. **Docker Desktop was already running at the start of this round** (I started
     it in round 2 and left it running, as reported then). It is **still running**;
     quitting it is a machine-wide action I left to you. No Supabase container is
     running.
@@ -1289,9 +1440,10 @@ commits that are not implementation commits at all. Verified against
 - `git revert 60d0118 6df9417` was labelled "all implementation". It is not: it
   reverts the two round 1 implementation commits while every later fix
   (`2a7b2d5`, `ed199e3`, the code in `89fb9c6`, `26d78dd`, `6fef4cb`,
-  `939435e`) stays on the branch, and several of those edit files `60d0118`
-  created. It would conflict, and if forced through it would leave a
-  half-existing tooling directory. It has been removed rather than reworded.
+  `939435e`, and now `0748048`) stays on the branch, and several of those edit
+  files `60d0118` created. It would conflict, and if forced through it would
+  leave a half-existing tooling directory. It has been removed rather than
+  reworded.
 
 **What the branch actually contains**, by round:
 
@@ -1303,24 +1455,28 @@ commits that are not implementation commits at all. Verified against
 | 4 | — **mixed**: `89fb9c6` is code *and* documentation in one commit — | |
 | 5 | `26d78dd`, `6fef4cb` | `b4067b0` |
 | 6 | `939435e` | `59437f0` |
-| 7 | none | this commit |
+| 7 | none | `dc21f48` |
+| 8 | `0748048` | this commit |
 
-**The two commands below are the only partial reverts I am willing to state.**
-Both are code-only in the strict sense — every commit named touches nothing but
-`platform/tooling/local-demo/baseline.mjs` and its test — and both leave **all**
-documentation, including this file, on the branch.
+**The three commands below are the only partial reverts I am willing to state.**
+All are code-only in the strict sense — every commit named touches nothing but
+`platform/tooling/local-demo/baseline.mjs` and its test, confirmed with
+`git show --name-only` — and all leave **every** documentation commit, including
+this file, on the branch.
 
 | To undo | Command | State afterwards |
 | --- | --- | --- |
-| Round 6's code, keeping rounds 1–5 | `git revert 939435e` | `readBaseline` returns to the round 5 retry: the wider classification, same 4 × 500ms budget. Every handoff round, including round 6's account of the narrowing, remains and is now stale |
-| Rounds 5–6 code — the whole retry, keeping rounds 1–4 | `git revert 939435e 6fef4cb 26d78dd` | `readBaseline` returns to a single attempt. It still fails closed with the same fixed sanitized message; it just fails sooner. Every handoff round remains and rounds 5–6 are now stale |
+| Round 8's code, keeping rounds 1–7 | `git revert 0748048` | `readBaseline` returns to round 6's behaviour: a missing row set fails immediately, 4 × 500ms. **Not recommended** — that is the behaviour the Product Owner's reproduced failure disproved. Every handoff round remains and round 8's account is now stale |
+| Rounds 6–8 code, keeping rounds 1–5 | `git revert 0748048 939435e` | `readBaseline` returns to the round 5 retry: both shapes retryable, 4 × 500ms. Closer to correct than reverting round 8 alone. Every handoff round remains; rounds 6 and 8 are now stale |
+| Rounds 5–8 code — the whole retry, keeping rounds 1–4 | `git revert 0748048 939435e 6fef4cb 26d78dd` | `readBaseline` returns to a single attempt. It still fails closed with the same fixed sanitized messages; it just fails sooner, and the Product Owner's intermittent failure becomes a failed `demo:reset` every time it occurs. Every handoff round remains; rounds 5–8 are now stale |
 
 Run them newest-first exactly as written. The basis for calling these clean is
 checkable rather than asserted: `git log 26d78dd^..HEAD -- baseline.mjs
-baseline.test.mjs` lists exactly those three commits and nothing else, so
-reverting all three restores both files bit-for-bit to their `26d78dd^` content.
-Reverting `26d78dd` **without** `6fef4cb` will conflict, because the clamp edits
-the loop the first commit introduced.
+baseline.test.mjs` lists exactly those four commits and nothing else, so
+reverting all four restores both files bit-for-bit to their `26d78dd^` content.
+Each command is a prefix of the next, so any partial chain also applies cleanly —
+but only newest-first. Reverting an older one while a newer one is still applied
+will conflict, because each edits the loop its predecessor introduced.
 
 ### Anything reaching round 4 or earlier is a manual rollback
 
@@ -1364,7 +1520,37 @@ file in the revert commit** to say so.
 
 ## For the reviewer (GPT/Codex, read-only)
 
-The earlier focus lists still stand. What is new in round 6, highest value first:
+The earlier focus lists still stand. What is new in round 8, highest value first:
+
+1. **Whether ten attempts and 1000ms is the right bound**, given the incident it
+   answers outlasted a whole `demo:reset` plus a `demo:verify`. I did not go
+   wider because the condition's duration is still unmeasured and a longer wait
+   mostly buys a slower failure. If you think the evidence supports 30s or a
+   different shape entirely — an outer deadline rather than an attempt count —
+   say so.
+2. **Whether the two structural shapes should really share one budget.** They now
+   do, and they may have different durations. Splitting them would let each be
+   tuned separately at the cost of a second set of constants; I judged one shared
+   bound simpler and no less correct while both durations are unknown.
+3. **The message distinction.** It is the only diagnostic that survived rounds
+   6–8, and a test pins it. Confirm nothing can make the two branches produce the
+   same string, and that an exhaustion still reports the branch that actually
+   fired rather than the first one encountered.
+4. **The seam clamps now sit at the production values themselves.** A test may
+   ask for fewer attempts or a shorter delay, never more. Check there is no gap —
+   particularly that `attempts: 11` and `delayMs: 1001` both fall back to the
+   production numbers rather than being partially honoured.
+5. **`error.cause`.** The leak scan now covers it and asserts it stays
+   `undefined`. If a future edit chains the underlying failure, that is the most
+   likely route for response content to escape.
+6. **Whether I have now over-corrected.** Round 6 narrowed on thin evidence;
+   round 8 widened on one reproduced incident. Both were single data points
+   pointing opposite ways. The difference I claim is that a reproduced failure is
+   evidence of possibility while a failed reproduction is not evidence of
+   impossibility — but if you think round 8 is the same mistake with the sign
+   flipped, that is worth saying plainly.
+
+What was new in round 6, and still worth your attention:
 
 1. **Whether the probe measured the right thing.** Its central claim is that an
    unready local database fails with a non-zero exit rather than a malformed
