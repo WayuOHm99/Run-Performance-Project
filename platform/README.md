@@ -122,6 +122,7 @@ persistent test data is needed. These commands are local-only; never add
 
 ```powershell
 corepack pnpm demo:reset     # rebuild the synthetic baseline (destructive, local only)
+corepack pnpm demo:start     # bring a stopped stack back up, output suppressed
 corepack pnpm demo:web       # launch Web         (resets nothing)
 corepack pnpm demo:android   # launch Android Emulator (resets nothing)
 corepack pnpm demo:stop      # stop this project only
@@ -135,6 +136,12 @@ is to grant and revoke it yourself through the real UI.
 `demo:reset` is the only destructive command, and it is destructive only to the
 local Supabase project. Launching the app never resets or reseeds. None of these
 commands read or modify `apps/mobile/.env.local`.
+
+Prefer `demo:start` over `db:start` when a demo stack needs bringing back: both
+run the same non-destructive `supabase start`, but `demo:start` discards the
+credential block described under **Credential hygiene** below instead of printing
+it. The destructive demo commands also take an exclusive lock in
+`platform/.local-demo/`, so two of them can never interleave on the same stack.
 
 The demo tooling lives in `tooling/local-demo/` and has its own unit tests:
 
@@ -157,6 +164,12 @@ corepack pnpm db:start *> $null
 $LASTEXITCODE
 docker ps
 ```
+
+For demo work, `corepack pnpm demo:start` does this for you: it runs the same
+`supabase start` with all three streams discarded at the OS level, then confirms
+the stack is up by reading only the local API URL and publishable key back
+through the credential filter. Nothing else from `supabase status` is ever held
+by that process.
 
 Generated local runtime state is ignored through `platform/supabase/.gitignore`
 and `platform/.prettierignore`; Docker volumes live outside the repository.

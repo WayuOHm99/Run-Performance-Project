@@ -23,27 +23,53 @@ docker version --format '{{.Server.Os}}'
 
 The value must be `linux`.
 
-## The four commands
+## The commands
 
 Run all of them from `platform/`.
 
 | Command | What it does | Destructive? |
 | --- | --- | --- |
 | `corepack pnpm demo:reset` | Rebuilds the demo baseline from scratch | **Yes — to the local Supabase project only** |
+| `corepack pnpm demo:start` | Brings the stopped stack back up, with its credential block suppressed | No — existing data is kept |
 | `corepack pnpm demo:web` | Launches the Web surface | No |
 | `corepack pnpm demo:android` | Launches the Android Emulator surface | No |
 | `corepack pnpm demo:stop` | Stops this project's containers | No — local data is kept |
 
-Two read-only helpers exist for verification:
+Two helpers exist for verification:
 
 | Command | What it does |
 | --- | --- |
-| `corepack pnpm demo:verify` | Re-reads the baseline counts. Changes nothing. |
+| `corepack pnpm demo:verify` | Re-reads the baseline counts. Read-only; changes nothing. |
 | `corepack pnpm demo:verify:consent` | Proves the consent boundary end to end. **Destructive**, and restores the baseline itself. |
 
 **Launching never resets.** `demo:web` and `demo:android` run no reset, apply no
 fixture, and create no user. Rebuilding the data is always an explicit
 `demo:reset`.
+
+**Use `demo:start`, not `db:start`, to bring the stack back.** They run the same
+non-destructive `supabase start`, but `db:start` prints the stack's credential
+block — a local database URL, a JWT secret, and a service-role key — into your
+terminal scrollback, and `demo:start` discards that output at the OS level.
+
+### Only one destructive command at a time
+
+`demo:reset`, `demo:stop`, `demo:verify:consent`, and `demo:start` take an
+exclusive lock file, `platform/.local-demo/demo.lock`, before they touch the
+stack. A second one **refuses to run** rather than queueing:
+
+```text
+Another destructive demo command is already running (demo:reset, pid 12345).
+```
+
+That is not fussiness. Two resets interleaved produce a database built by one run
+and a credential file written by the other, so the password you are given no
+longer opens the accounts that exist. A reset landing in the middle of
+`demo:verify:consent` leaves a sharing grant behind, which is exactly the
+zero-consent baseline the demo promises.
+
+If a command was killed hard and the lock survived it, the next run detects the
+dead owner and takes over by itself. If it somehow does not, delete
+`platform/.local-demo/demo.lock` and try again.
 
 ## First run
 
@@ -63,6 +89,11 @@ Local demo credentials written to: platform/.local-demo/credentials.txt
 Open that file to get the shared password for both accounts. It is git-ignored,
 regenerated on every reset, and must never be committed, screenshotted, or pasted
 into an AI chat.
+
+**If the file is missing, the reset did not finish.** It is deleted before the
+database is wiped and written again only after the baseline has been verified, so
+it either describes the accounts that exist or it does not exist at all. It is
+never left holding a password that no longer works. Run `demo:reset` again.
 
 ## The baseline
 
@@ -149,8 +180,12 @@ only field the tooling reads out of `supabase status` is the local
 `sb_publishable_` key — the same class of credential the mobile app is allowed to
 hold.
 
-If you ever need the raw values, run the Supabase CLI yourself. Do not paste the
-output anywhere.
+Every command that could print that block — `demo:start`, `demo:reset`,
+`demo:stop`, and the stack start inside them — runs it with all three streams
+discarded at the OS level. None of them tells you to run `db:start` instead.
+
+If you ever need the raw values, run the Supabase CLI yourself, deliberately. Do
+not paste the output anywhere.
 
 ## Stopping
 
@@ -161,7 +196,7 @@ corepack pnpm demo:stop
 Stops **only this project's** containers. It never uses `--all`, which would stop
 unrelated Supabase projects, and never `--no-backup`, which would discard your
 local database volume. Your demo data survives; bring it back with
-`corepack pnpm db:start`.
+`corepack pnpm demo:start`.
 
 To confirm nothing is left running:
 
@@ -173,12 +208,21 @@ docker ps -a --filter name=supabase --format "{{.Names}}"
 
 **"The local Supabase stack is not running."** `demo:web` and `demo:android`
 deliberately refuse to start it, so that launching can never become a hidden
-rebuild. Run `corepack pnpm db:start` to bring it back with your data, or
+rebuild. Run `corepack pnpm demo:start` to bring it back with your data, or
 `corepack pnpm demo:reset` to rebuild the baseline.
 
 **A command failed and printed only an exit code.** That is intentional: the
 underlying output can carry credentials, so it is discarded rather than shown.
 Re-run the underlying Supabase CLI command yourself to diagnose it.
+
+**"… was terminated by SIGTERM and did not complete."** Something killed the
+Supabase CLI part-way — a Ctrl-C, a Docker restart, an out-of-memory kill. The
+command reports it as a failure rather than carrying on, because a `db reset`
+that was killed half-way leaves a half-migrated database. Run `demo:reset` again;
+the credential file was already discarded, so there is nothing stale to clean up.
+
+**"Another destructive demo command is already running."** Exactly what it says;
+see *Only one destructive command at a time* above.
 
 **The coach sees nothing after granting.** Refresh. Access is decided on each
 query by PostgreSQL, and an already-rendered screen is not recalled.
