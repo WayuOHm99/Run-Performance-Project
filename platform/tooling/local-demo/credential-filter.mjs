@@ -21,7 +21,11 @@
 // closed here rather than falling back to `ANON_KEY`, which is a legacy JWT.
 
 import { assertCanonicalLocalUrl } from "./endpoint.mjs";
-import { runCapturedStdout, subprocessFailure } from "./subprocess.mjs";
+import {
+  runCapturedStdout,
+  subprocessFailure,
+  succeeded,
+} from "./subprocess.mjs";
 
 const PUBLISHABLE_KEY_PATTERN = /^sb_publishable_[A-Za-z0-9_-]{20,}$/;
 
@@ -100,16 +104,20 @@ export function extractLocalCredentials(statusJsonText) {
 // Runs the CLI and returns only the filtered result. The captured stdout is
 // scoped to this function and is unreachable from the outside.
 export async function readLocalCredentials(options) {
-  const { exitCode, stdout } = await runCapturedStdout(
+  const { exitCode, signal, stdout } = await runCapturedStdout(
     options.command,
     options.args,
     { cwd: options.cwd, env: options.env, label: "supabase status" },
   );
 
-  if (exitCode !== 0) {
+  // A status call killed part-way through returns a truncated document, which
+  // would fail the parse below with a less useful message. It is reported as the
+  // subprocess failure it is instead.
+  if (!succeeded({ exitCode, signal })) {
     throw subprocessFailure(
-      "The local Supabase stack is not running. Start it with `corepack pnpm demo:reset` (which also rebuilds the baseline) or `corepack pnpm db:start` (which does not)",
+      "The local Supabase stack is not running. Start it with `corepack pnpm demo:start` (which starts it and rebuilds nothing) or `corepack pnpm demo:reset` (which also rebuilds the baseline). Both keep the stack's credential output suppressed",
       exitCode,
+      signal,
     );
   }
 

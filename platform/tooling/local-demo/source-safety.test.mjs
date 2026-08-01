@@ -238,6 +238,88 @@ describe("decision 5 and 7 — nothing secret is ever printed", () => {
   });
 });
 
+describe("decision 9 — no health value is written down", () => {
+  // A committed `rpe: 5, overall_feeling: 3` would be an exact health value
+  // living permanently in the repository, which acceptance criterion 8 forbids
+  // however synthetic it is. The consent verification generates its values at
+  // run time instead; what is committed is the schema's domain, not a reading.
+  const healthAssignments = [
+    /\brpe\s*:\s*-?\d/,
+    /\boverallFeeling\s*:\s*-?\d/,
+    /\brpe\s*=\s*-?\d/,
+    /\boverall_feeling\s*=\s*-?\d/,
+  ];
+
+  for (const { name, code } of sourceFiles) {
+    it(`${name} assigns no literal health value`, () => {
+      for (const pattern of healthAssignments) {
+        assert.ok(
+          !pattern.test(code),
+          `${name} must not hard-code a health value (${pattern})`,
+        );
+      }
+    });
+  }
+
+  it("the consent verification generates its check-in at run time", () => {
+    const consent = sourceFiles.find(
+      (file) => file.name === "demo-verify-consent.mjs",
+    );
+
+    assert.ok(consent.code.includes("randomInt"));
+    assert.ok(consent.code.includes("synthesizeCheckIn"));
+  });
+});
+
+describe("the destructive commands hold the interprocess lock", () => {
+  // Two destructive commands driving the same local stack at once produce a
+  // database built by one run and a credential file written by the other.
+  for (const name of [
+    "reset.mjs",
+    "demo-stop.mjs",
+    "demo-verify-consent.mjs",
+  ]) {
+    it(`${name} runs under withDemoLock`, () => {
+      const file = sourceFiles.find((candidate) => candidate.name === name);
+
+      assert.ok(file, `expected ${name} to exist`);
+      assert.ok(
+        file.code.includes("withDemoLock"),
+        `${name} must serialize itself against other destructive commands`,
+      );
+    });
+  }
+
+  it("the lock file lives in the ignored local demo directory", () => {
+    const paths = sourceFiles.find((file) => file.name === "paths.mjs");
+
+    assert.ok(paths.code.includes('LOCAL_DEMO_DIR, "demo.lock"'));
+  });
+});
+
+describe("the restart path never prints a credential block", () => {
+  // `supabase start` ends by printing a database URL, a JWT secret, and a
+  // service-role key. The command the Product Owner is told to run must be one
+  // that suppresses that, which is why `demo:start` exists and why nothing here
+  // points at `db:start`.
+  it("demo:start runs the suppressed start, not an inherited-stdio one", () => {
+    const start = sourceFiles.find((file) => file.name === "demo-start.mjs");
+
+    assert.ok(start, "expected demo-start.mjs to exist");
+    assert.ok(start.code.includes("startLocalStack"));
+    assert.ok(!start.code.includes("runInheritedStdio"));
+  });
+
+  it("no module tells the Product Owner to run db:start", () => {
+    for (const { name, code } of sourceFiles) {
+      assert.ok(
+        !code.includes("db:start"),
+        `${name} must point at demo:start, whose output is suppressed`,
+      );
+    }
+  });
+});
+
 describe("decision 6 — real Auth signup only", () => {
   for (const { name, code } of sourceFiles) {
     it(`${name} uses no admin or bypass path`, () => {

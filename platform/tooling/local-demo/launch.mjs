@@ -16,7 +16,9 @@
 //
 // If the stack is not running this fails with an instruction rather than
 // starting it, so "launching the app" can never become a side effect that
-// rebuilds anything.
+// rebuilds anything. The instruction names `demo:start`, which brings the stack
+// up with its credential block suppressed — the Product Owner is never told to
+// run a command that prints a service-role key to their terminal.
 
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -28,6 +30,9 @@ import { runInheritedStdio } from "./subprocess.mjs";
 import { statusCommand } from "./supabase-cli.mjs";
 
 const EXPO_FLAG = { web: "--web", android: "--android" };
+
+// Stopping the dev server from the keyboard is not a failure.
+const INTERACTIVE_STOP_SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGHUP"]);
 
 const require = createRequire(import.meta.url);
 
@@ -82,7 +87,7 @@ export async function launchDemo(surface) {
     "  credential:   local publishable key (validated, not printed)\n",
   );
 
-  const { exitCode } = await runInheritedStdio(
+  const { exitCode, signal } = await runInheritedStdio(
     process.execPath,
     [resolveExpoCli(), "start", flag],
     {
@@ -96,7 +101,11 @@ export async function launchDemo(surface) {
     },
   );
 
-  process.exitCode = exitCode;
+  // Ctrl-C is how a foreground dev server is *supposed* to end, so an interrupt
+  // is reported as a clean stop. Every other signal, and every non-zero code, is
+  // a failure — the general rule from `subprocess.mjs` holds here, with this one
+  // documented exception.
+  process.exitCode = INTERACTIVE_STOP_SIGNALS.has(signal) ? 0 : exitCode;
 }
 
 export function runLaunch(surface) {

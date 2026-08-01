@@ -1,5 +1,20 @@
+// **Assertions here never pass a rendered credential file to an assertion that
+// prints its input.** `assert.match(contents, /…/)` reports the whole input
+// string on failure, and that input is a file containing a password — so a
+// single failing test would print the credential this task exists to keep out of
+// terminal scrollback. Every check below is `assert.ok(...)` with a fixed
+// message, which reports the message and nothing else.
+//
+// For the same reason the rendering tests use a fixed synthetic stand-in rather
+// than a freshly generated password: even a value that opens nothing real should
+// not be printable by a failing assertion.
+
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { existsSync } from "node:fs";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
 import {
   ATHLETE_EMAIL,
@@ -7,13 +22,32 @@ import {
   DEMO_ACCOUNTS,
   DEMO_TEAM_ID,
 } from "./accounts.mjs";
-import { renderCredentialsFile } from "./credentials-file.mjs";
+import {
+  discardCredentialsFile,
+  renderCredentialsFile,
+  writeCredentialsFile,
+} from "./credentials-file.mjs";
 import { buildDemoEnv } from "./launch.mjs";
 import {
   generateLocalDemoPassword,
   isPlausibleLocalDemoPassword,
 } from "./password.mjs";
 import { CREDENTIALS_DISPLAY_PATH } from "./paths.mjs";
+
+// Assembled from fragments so no line in this file looks like a credential to a
+// secret scanner, and fixed so no assertion can print a real generated one.
+const SYNTHETIC_PASSWORD = ["synthetic", "local", "demo", "secret"].join("-");
+
+// `assert.ok` reports only the message it is given. `assert.match` and
+// `assert.equal` would report the input, which for these tests is the credential
+// file itself.
+function assertContains(haystack, needle, what) {
+  assert.ok(haystack.includes(needle), `expected the ${what}`);
+}
+
+function assertOmits(haystack, needle, what) {
+  assert.ok(!haystack.includes(needle), `the ${what} must not appear`);
+}
 
 describe("generateLocalDemoPassword", () => {
   it("produces a 32-character URL-safe password", () => {
@@ -64,20 +98,39 @@ describe("DEMO_ACCOUNTS", () => {
 });
 
 describe("renderCredentialsFile", () => {
-  const password = generateLocalDemoPassword();
   const contents = renderCredentialsFile({
     accounts: DEMO_ACCOUNTS,
-    password,
+    password: SYNTHETIC_PASSWORD,
     generatedAt: "2026-07-31T00:00:00.000Z",
   });
 
   it("contains the password so the Product Owner can sign in", () => {
-    assert.ok(contents.includes(password));
+    assertContains(contents, SYNTHETIC_PASSWORD, "password to be written");
+  });
+
+  // The generated password reaches the file too, but the assertion reports only
+  // whether it did — never the file, and never the value.
+  it("writes a generated password without any assertion printing it", () => {
+    const generated = generateLocalDemoPassword();
+    const rendered = renderCredentialsFile({
+      accounts: DEMO_ACCOUNTS,
+      password: generated,
+      generatedAt: "2026-07-31T00:00:00.000Z",
+    });
+
+    assert.ok(
+      rendered.includes(generated),
+      "expected the generated password to be written",
+    );
+    assert.ok(
+      isPlausibleLocalDemoPassword(generated),
+      "expected a well-formed generated password",
+    );
   });
 
   it("lists both synthetic accounts", () => {
-    assert.ok(contents.includes(ATHLETE_EMAIL));
-    assert.ok(contents.includes(COACH_EMAIL));
+    assertContains(contents, ATHLETE_EMAIL, "athlete address");
+    assertContains(contents, COACH_EMAIL, "coach address");
   });
 
   it("carries no publishable key, token, session, or database URL", () => {
@@ -90,20 +143,137 @@ describe("renderCredentialsFile", () => {
       "access_token",
       "service_role",
     ]) {
-      assert.ok(
-        !contents.includes(fragment),
-        `the credential file must not contain ${fragment}`,
-      );
+      assertOmits(contents, fragment, `credential fragment ${fragment}`);
     }
   });
 
   it("says it is local-only and git-ignored", () => {
-    assert.match(contents, /LOCAL/);
-    assert.match(contents, /git-ignored/);
+    assertContains(contents, "LOCAL", "local-only notice");
+    assertContains(contents, "git-ignored", "git-ignored notice");
   });
 
   it("states the baseline has no grant and no check-in", () => {
-    assert.match(contents, /no sharing grant and no check-in/);
+    assertContains(
+      contents,
+      "no sharing grant and no check-in",
+      "zero-consent baseline notice",
+    );
+  });
+});
+
+// Decision 7, and the staleness problem underneath it: the password in this file
+// is only true of the accounts the same reset created.
+describe("writeCredentialsFile", () => {
+  let directory;
+  let file;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "local-demo-credentials-"));
+    file = join(directory, "credentials.txt");
+  });
+
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  async function write(password) {
+    return writeCredentialsFile({
+      accounts: DEMO_ACCOUNTS,
+      password,
+      directory,
+      file,
+    });
+  }
+
+  it("returns the safe display path, never the file's location or contents", async () => {
+    const returned = await write(SYNTHETIC_PASSWORD);
+
+    assert.equal(returned, CREDENTIALS_DISPLAY_PATH);
+  });
+
+  it("replaces a previous file completely, leaving no trace of the old password", async () => {
+    const previous = ["synthetic", "previous", "demo", "secret"].join("-");
+
+    await write(previous);
+    await write(SYNTHETIC_PASSWORD);
+
+    const contents = await readFile(file, "utf8");
+
+    assertContains(contents, SYNTHETIC_PASSWORD, "current password");
+    assertOmits(contents, previous, "previous password");
+  });
+
+  // A crash between the write and the rename must not leave a file that looks
+  // like a credential file.
+  it("leaves no temporary file behind", async () => {
+    await write(SYNTHETIC_PASSWORD);
+
+    const entries = await readdir(directory);
+
+    assert.deepEqual(entries, ["credentials.txt"]);
+  });
+
+  it("replaces a leftover temporary file from an earlier crash", async () => {
+    await writeFile(`${file}.${process.pid}.tmp`, "partial", "utf8");
+
+    await write(SYNTHETIC_PASSWORD);
+
+    const entries = await readdir(directory);
+
+    assert.deepEqual(entries, ["credentials.txt"]);
+  });
+
+  // The important one. A truncated file is not merely useless: it is a password
+  // that silently does not work, which reads as a broken demo rather than a
+  // broken file.
+  it("never publishes a partially written file", async () => {
+    await write(SYNTHETIC_PASSWORD);
+
+    const contents = await readFile(file, "utf8");
+    const complete = renderCredentialsFile({
+      accounts: DEMO_ACCOUNTS,
+      password: SYNTHETIC_PASSWORD,
+      generatedAt: "ignored",
+    });
+
+    // Same body, modulo the generated-at line, which is a timestamp.
+    assert.equal(
+      contents.split("\n").length,
+      complete.split("\n").length,
+      "expected a complete file",
+    );
+    assertContains(contents, "Accounts:", "accounts section");
+    assertContains(contents, COACH_EMAIL, "coach address");
+  });
+});
+
+describe("discardCredentialsFile", () => {
+  let directory;
+  let file;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "local-demo-credentials-"));
+    file = join(directory, "credentials.txt");
+  });
+
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("removes a stale credential file and any temporary file", async () => {
+    await writeFile(file, "stale", "utf8");
+    await writeFile(`${file}.${process.pid}.tmp`, "partial", "utf8");
+
+    await discardCredentialsFile({ file });
+
+    assert.equal(existsSync(file), false);
+    assert.deepEqual(await readdir(directory), []);
+  });
+
+  it("is a no-op when nothing is there", async () => {
+    await discardCredentialsFile({ file });
+
+    assert.equal(existsSync(file), false);
   });
 });
 

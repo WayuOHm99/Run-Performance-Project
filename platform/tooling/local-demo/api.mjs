@@ -13,6 +13,9 @@
 //
 // Every request is asserted against the canonical local endpoint first, so a
 // password or a token cannot be sent anywhere but the local stack.
+//
+// Response bodies are never parsed with `response.json()`. That method surfaces
+// `JSON.parse`'s own error, which quotes the body — see `parseJsonBody` below.
 
 import { assertCanonicalLocalUrl } from "./endpoint.mjs";
 
@@ -42,6 +45,40 @@ function failure(what, status) {
     `${what} failed (HTTP ${status}). The response body was discarded unread on purpose.`,
     status,
   );
+}
+
+// The leak path that `await response.json()` opens directly.
+//
+// `JSON.parse` reports the input in its own error message — "Unexpected token
+// 'x', \"...\" is not valid JSON" quotes the body verbatim. A malformed body is
+// exactly the case where that body is most likely to be a PostgREST or GoTrue
+// error document carrying a database error string, a hint naming a column, or a
+// partially written session. Letting that SyntaxError propagate would print all
+// of it.
+//
+// So the body is read as text, parsed inside a `catch` that discards the parse
+// error entirely, and the text goes out of scope unreferenced. Neither the body
+// nor any substring of it can reach the caller, a log line, or a stack trace.
+async function parseJsonBody(response, what) {
+  let text;
+
+  try {
+    text = await response.text();
+  } catch {
+    throw new DemoApiError(
+      `${what} returned a response body that could not be read. It was discarded unread on purpose.`,
+      response.status,
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new DemoApiError(
+      `${what} returned a malformed response body. The body was discarded unread on purpose; re-run the request yourself against the local stack if you need to see it.`,
+      response.status,
+    );
+  }
 }
 
 function authHeaders(publishableKey, accessToken) {
@@ -93,7 +130,7 @@ export async function signIn({ apiUrl, publishableKey, email, password }) {
     throw failure("Local Auth sign-in", response.status);
   }
 
-  const payload = await response.json();
+  const payload = await parseJsonBody(response, "Local Auth sign-in");
   const accessToken = payload?.access_token;
   const userId = payload?.user?.id;
 
@@ -130,7 +167,7 @@ export async function countRows({
     throw failure(`Reading ${table}`, response.status);
   }
 
-  const rows = await response.json();
+  const rows = await parseJsonBody(response, `Reading ${table}`);
 
   if (!Array.isArray(rows)) {
     throw new DemoApiError(

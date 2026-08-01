@@ -21,6 +21,7 @@ import {
   runCapturedStdout,
   runSuppressedOrThrow,
   subprocessFailure,
+  succeeded,
 } from "./subprocess.mjs";
 
 const require = createRequire(import.meta.url);
@@ -93,14 +94,14 @@ export async function applyLocalSqlFile(relativePath) {
 // The only place a query result is read back. Callers must keep the SQL to
 // scalar aggregates; see `baseline.mjs`.
 export async function queryLocalScalars(sql) {
-  const { exitCode, stdout } = await runCapturedStdout(
+  const { exitCode, signal, stdout } = await runCapturedStdout(
     process.execPath,
     cliArgs(["db", "query", "--local", "-o", "json", sql]),
     { ...baseOptions, label: "local scalar query" },
   );
 
-  if (exitCode !== 0) {
-    throw subprocessFailure("local scalar query", exitCode);
+  if (!succeeded({ exitCode, signal })) {
+    throw subprocessFailure("local scalar query", exitCode, signal);
   }
 
   return stdout;

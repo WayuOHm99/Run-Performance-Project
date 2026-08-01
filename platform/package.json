@@ -16,6 +16,7 @@
     "db:start": "supabase start",
     "db:stop": "supabase stop",
     "db:status": "supabase status",
+    "demo:start": "node tooling/local-demo/demo-start.mjs",
     "demo:reset": "node tooling/local-demo/demo-reset.mjs",
     "demo:web": "node tooling/local-demo/demo-web.mjs",
     "demo:android": "node tooling/local-demo/demo-android.mjs",

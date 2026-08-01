@@ -22,6 +22,10 @@ export const LOCAL_DEMO_DIR = join(PLATFORM_DIR, ".local-demo");
 
 export const CREDENTIALS_FILE = join(LOCAL_DEMO_DIR, "credentials.txt");
 
+// The interprocess lock for destructive demo commands. In the same ignored
+// directory, so nothing about it is ever committed.
+export const LOCK_FILE = join(LOCAL_DEMO_DIR, "demo.lock");
+
 // Passed to the Supabase CLI as a path relative to `PLATFORM_DIR`, which is the
 // directory holding `supabase/config.toml`.
 export const FIXTURE_SQL_RELATIVE = "supabase/fixtures/local-demo.sql";
@@ -29,3 +33,5 @@ export const FIXTURE_SQL_RELATIVE = "supabase/fixtures/local-demo.sql";
 // What the Product Owner is told. A repository-relative path, never an absolute
 // one, so it is safe to show and safe to paste.
 export const CREDENTIALS_DISPLAY_PATH = "platform/.local-demo/credentials.txt";
+
+export const LOCK_DISPLAY_PATH = "platform/.local-demo/demo.lock";

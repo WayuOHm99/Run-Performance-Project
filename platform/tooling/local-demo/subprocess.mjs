@@ -19,31 +19,70 @@
 // output-leak path that matters most: the natural way to write this is
 // `throw new Error(stderr)`, which would print a service-role key the first time
 // the CLI failed.
+//
+// A child that is killed by a signal is a **failure**, never a success. Node
+// reports `code === null` in that case, and the obvious `code ?? 0` reads a
+// killed `db reset` as a completed one. Every result here therefore carries the
+// signal alongside the code, and `succeeded()` is the only definition of success
+// in this tooling.
 
 import { spawn } from "node:child_process";
+
+// A child killed by a signal reports a `null` exit code. Treating that as 0 is
+// the failure mode this constant exists to prevent: a `supabase db reset` that
+// is killed part-way through leaves a half-migrated database, and reporting it
+// as success would let the reset pipeline carry on and write a credential file
+// for a baseline that was never built. 128 is the shell convention for
+// "terminated by a signal" and is deliberately non-zero.
+export const SIGNAL_TERMINATION_EXIT_CODE = 128;
+
+// Node's signal names are fixed identifiers, not child output, but they are
+// still passed through a shape check so nothing else can ever reach a message
+// through this parameter.
+function sanitizeSignal(signal) {
+  return typeof signal === "string" && /^SIG[A-Z0-9]{1,12}$/.test(signal)
+    ? signal
+    : null;
+}
 
 export class DemoSubprocessError extends Error {
   name = "DemoSubprocessError";
 
-  constructor(message, exitCode) {
+  constructor(message, exitCode, signal = null) {
     super(message);
     this.exitCode = exitCode;
+    this.signal = sanitizeSignal(signal);
   }
 }
 
-// The message is built from the caller-supplied label and the numeric exit code
-// only. Nothing derived from stdout or stderr can reach it.
-export function describeSubprocessFailure(label, exitCode) {
+// The message is built from the caller-supplied label, the numeric exit code,
+// and — at most — a signal name matched against the shape above. Nothing derived
+// from stdout or stderr can reach it.
+export function describeSubprocessFailure(label, exitCode, signal = null) {
+  const terminatingSignal = sanitizeSignal(signal);
+
+  if (terminatingSignal) {
+    return `${label} was terminated by ${terminatingSignal} and did not complete. Output was suppressed on purpose; re-run the underlying command yourself if you need to diagnose it.`;
+  }
+
   const code = Number.isInteger(exitCode) ? exitCode : "unknown";
 
   return `${label} failed (exit code ${code}). Output was suppressed on purpose; re-run the underlying command yourself if you need to diagnose it.`;
 }
 
-export function subprocessFailure(label, exitCode) {
+export function subprocessFailure(label, exitCode, signal = null) {
   return new DemoSubprocessError(
-    describeSubprocessFailure(label, exitCode),
+    describeSubprocessFailure(label, exitCode, signal),
     exitCode,
+    signal,
   );
+}
+
+// The one place the "did this child succeed?" question is answered. A zero exit
+// code is not enough on its own: a signalled child can report one on some
+// platforms, so the signal is checked too.
+export function succeeded({ exitCode, signal }) {
+  return exitCode === 0 && !signal;
 }
 
 function runWith(command, args, options, stdio) {
@@ -78,8 +117,18 @@ function runWith(command, args, options, stdio) {
       );
     });
 
-    child.on("close", (code) => {
-      resolve({ exitCode: code ?? 0, stdout });
+    // `code` is null exactly when the child was killed by a signal. It is mapped
+    // to a non-zero code here rather than at each call site, so no caller can
+    // forget and read a kill as a success.
+    child.on("close", (code, signal) => {
+      const terminatingSignal = sanitizeSignal(signal);
+
+      resolve({
+        exitCode:
+          typeof code === "number" ? code : SIGNAL_TERMINATION_EXIT_CODE,
+        signal: terminatingSignal,
+        stdout,
+      });
     });
   });
 }
@@ -87,23 +136,27 @@ function runWith(command, args, options, stdio) {
 // stdio `ignore` on every stream. Nothing is buffered here, so nothing can be
 // leaked by a later change to error handling.
 export async function runSuppressed(command, args, options = {}) {
-  const result = await runWith(command, args, options, [
+  const { exitCode, signal } = await runWith(command, args, options, [
     "ignore",
     "ignore",
     "ignore",
   ]);
 
-  return result.exitCode;
+  return { exitCode, signal };
 }
 
 export async function runSuppressedOrThrow(command, args, options = {}) {
-  const exitCode = await runSuppressed(command, args, options);
+  const result = await runSuppressed(command, args, options);
 
-  if (exitCode !== 0) {
-    throw subprocessFailure(options.label ?? command, exitCode);
+  if (!succeeded(result)) {
+    throw subprocessFailure(
+      options.label ?? command,
+      result.exitCode,
+      result.signal,
+    );
   }
 
-  return exitCode;
+  return result.exitCode;
 }
 
 // stderr stays `ignore`: the Supabase CLI writes progress lines there, and there
