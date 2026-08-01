@@ -27,9 +27,15 @@ export class DemoBaselineError extends Error {
   }
 }
 
-// A bounded, deterministic retry budget for exactly one condition: a
-// well-formed baseline document whose `rows` is not exactly one row. Four
-// attempts, three waits, so the worst case adds 1.5s and then fails.
+// A bounded, deterministic retry budget for exactly one condition: a baseline
+// document whose row set exists but is not exactly one row. Four attempts,
+// three waits, so the worst case adds 1.5s and then fails.
+//
+// Round 6 re-derived these numbers from measurement rather than keeping them by
+// default; see the long note on `readBaseline`. The short version: the readiness
+// gap at the point this runs measured 0ms in 4 of 4 cold cycles, and an unready
+// database fails with a non-zero exit instead of this condition, so there is no
+// measured window that a larger budget would cover.
 export const BASELINE_ATTEMPTS = 4;
 export const BASELINE_RETRY_DELAY_MS = 500;
 
@@ -85,7 +91,24 @@ export function parseBaselineRow(stdout) {
 
   const rows = document?.rows;
 
-  if (!Array.isArray(rows) || rows.length !== 1) {
+  // Two different failures, deliberately separated in round 6.
+  //
+  // A document with **no row set at all** — `{}`, `{ rows: null }`,
+  // `{ rows: {} }`, or a document that is not an object — is not a database
+  // that is still coming up. It is output that does not match the CLI's result
+  // contract, and round 6 measured what an unready local database actually
+  // produces: a **non-zero exit**, never a well-formed envelope missing its
+  // `rows` array. Round 5 lumped this in with the row-count condition and
+  // retried it four times on no evidence. It now fails immediately, with its
+  // own fixed sanitized message.
+  if (!Array.isArray(rows)) {
+    throw new DemoBaselineError("The baseline query returned no row set.");
+  }
+
+  // A row set that exists but is the wrong size is the one retryable
+  // condition. See `readBaseline` for why, and for what round 6 could and
+  // could not measure about it.
+  if (rows.length !== 1) {
     throw new DemoBaselineError(
       "The baseline query did not return exactly one row.",
       { retryable: true },
@@ -133,35 +156,60 @@ export function formatBaseline(counts) {
     .join("\n");
 }
 
-// Bounded retry, one condition only.
-//
-// On a cold stack the first baseline read has been observed to come back as a
-// well-formed envelope — `boundary`, `warning`, `rows` — whose `rows` is not the
-// single row the query can only ever produce. The SQL is ten scalar subqueries
-// with no `from` and no predicate on the outer select, so exactly one row is the
-// only result the database can return; anything else means the read did not
-// reach a ready database, not that the demo is in a different state. That is the
-// one condition retried here.
+// Bounded retry, one condition only: a row set that exists and is the wrong
+// size. The SQL is ten scalar subqueries with no `from` and no predicate on the
+// outer select, so exactly one row is the only result the database can return;
+// a different cardinality is not a report about the demo's contents.
 //
 // Why retrying it is safe: the query is a read-only aggregate with no side
-// effect, so re-running it changes nothing; and a retry can only ever end in one
-// of the same three outcomes as the first attempt. It cannot mask a wrong
-// baseline, because a wrong baseline parses fine — `compareBaseline` is a
-// separate step that this function never reaches into and never re-runs.
+// effect, so re-running it changes nothing. It cannot mask a wrong baseline,
+// because a wrong baseline parses fine — `compareBaseline` is a separate step
+// that this function never reaches into and never re-runs.
 //
-// Why the other two failures are *not* retried:
+// ## What round 6 measured, and why the budget did not grow
+//
+// The budget stayed at four attempts and 500ms because the measurements say a
+// larger one would be sizing for a window this code cannot be in. On this
+// machine, over two `stop → cold start → db reset` cycles polled continuously:
+//
+//   - Once `supabase start` or `db reset` **returns**, the first baseline query
+//     answers with exactly one row, 4 times out of 4, with no gap at all.
+//   - **While** either command is still running the database is genuinely
+//     unreachable — up to ~21.8s during `db reset`, which restarts containers.
+//     Every single one of those failures was a **non-zero exit**, never a
+//     well-formed document with the wrong number of rows.
+//
+// The second point is the important one: an unready local database does not
+// produce the retried condition. It produces a subprocess failure, which is a
+// different error that is deliberately not retried.
+//
+// And by the time this function runs, `db reset`, two real Auth signups, and
+// the fixture application have all already succeeded against that same
+// database. Three successful round-trips are a stronger readiness proof than
+// any timer, so a readiness gap here has already closed.
+//
+// The condition this retry covers was therefore **never reproduced**. It is
+// kept as bounded, cheap insurance for the incident that motivated it, not
+// because its duration is known — no duration was measurable, and enlarging a
+// budget against an unmeasured window is the arbitrary increase this was asked
+// not to be.
+//
+// Why the other failures are *not* retried:
 //
 //   - A **count mismatch** is not a failure of this function at all. It is a
-//     real, correct read of a database that is in the wrong state, and the
-//     caller must see it on the first attempt.
-//   - **Malformed JSON** and a **non-integer count** are not retried, because I
-//     cannot prove they are transient. Malformed output means the CLI wrote
-//     something other than a result document, and a non-integer count means a
-//     `count(*)::int` came back as something that is not an integer; both are
-//     consistent with a broken invocation or a changed contract, and retrying a
-//     broken contract only delays a failure that should be immediate. Requiring
-//     proof rather than plausibility is deliberate: an unprovable retry is how a
-//     permanent fault gets reported as a slow one.
+//     real, correct read of a database in the wrong state, and the caller must
+//     see it on the first attempt.
+//   - **A missing or non-array row set** is not retried as of round 6. Round 5
+//     did retry it, on the assumption it was the same readiness condition; the
+//     measurements above say readiness failures are non-zero exits instead, so
+//     the assumption had no evidence behind it. It now fails immediately.
+//   - **Malformed JSON**, a **non-integer count**, and a **subprocess failure**
+//     are not retried. The first two are consistent with a broken invocation or
+//     a changed CLI contract, and retrying a broken contract only delays a
+//     failure that should be immediate. The third is the shape an unready
+//     database actually takes — but it is also the shape a genuinely broken one
+//     takes, and the pipeline's own earlier steps already prove the database was
+//     reachable, so treating it as transient here would hide a real fault.
 //
 // When the budget is exhausted the last error is rethrown unchanged, so a
 // persistent structural failure fails closed with the same fixed sanitized

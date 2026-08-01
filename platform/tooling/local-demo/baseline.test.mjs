@@ -139,6 +139,58 @@ describe("parseBaselineRow", () => {
     );
   });
 
+  // Round 6, finding 2. The two failures below used to be one, and the
+  // classification is now exactly as narrow as the explanation for it.
+  describe("classification of a wrong row set", () => {
+    // Retryable: the row set exists, so the CLI honoured its result contract
+    // and only the cardinality is wrong.
+    for (const [label, rows] of [
+      ["empty", []],
+      ["two rows", [EXPECTED_BASELINE, EXPECTED_BASELINE]],
+    ]) {
+      it(`marks an array of the wrong length retryable (${label})`, () => {
+        try {
+          parseBaselineRow(JSON.stringify({ rows }));
+          assert.fail("expected a rejection");
+        } catch (error) {
+          assert.equal(
+            error.message,
+            "The baseline query did not return exactly one row.",
+          );
+          assert.equal(error.retryable, true);
+        }
+      });
+    }
+
+    // Not retryable: round 6 measured what an unready local database produces —
+    // a non-zero exit — so a document with no row set is a contract violation,
+    // not a database still coming up.
+    for (const [label, document] of [
+      ["empty object", {}],
+      ["null rows", { rows: null }],
+      ["object rows", { rows: {} }],
+      ["string rows", { rows: "1" }],
+      ["numeric rows", { rows: 1 }],
+      ["envelope without rows", { boundary: "b", warning: "w" }],
+      ["document that is not an object", 5],
+      ["null document", null],
+    ]) {
+      it(`fails a missing or non-array row set immediately (${label})`, () => {
+        try {
+          parseBaselineRow(JSON.stringify(document));
+          assert.fail("expected a rejection");
+        } catch (error) {
+          assert.ok(error instanceof DemoBaselineError);
+          assert.equal(
+            error.message,
+            "The baseline query returned no row set.",
+          );
+          assert.equal(error.retryable, false);
+        }
+      });
+    }
+  });
+
   it("rejects a non-integer count", () => {
     assert.throws(
       () => parseBaselineRow(statusRow({ profiles: "2" })),
@@ -250,6 +302,29 @@ describe("readBaseline", () => {
     assert.deepEqual(calls, [BASELINE_SQL, BASELINE_SQL]);
   });
 
+  // Round 6, finding 1. The budget is a decision backed by measurement, so it
+  // is pinned here rather than left as whatever the constants happen to say.
+  // Changing either number should require changing this test and re-reading the
+  // evidence in the handoff.
+  it("holds the bound round 6 chose from measurement", () => {
+    assert.equal(BASELINE_ATTEMPTS, 4);
+    assert.equal(BASELINE_RETRY_DELAY_MS, 500);
+
+    // Three waits, not four: no wait follows the final attempt.
+    const worstCaseMs = (BASELINE_ATTEMPTS - 1) * BASELINE_RETRY_DELAY_MS;
+
+    assert.equal(worstCaseMs, 1500);
+
+    // The measured readiness gap at the point `readBaseline` runs was 0ms in 4
+    // of 4 cold cycles, and the database was already ready ~11.8s before
+    // `db reset` even returned. A budget in the tens of seconds would be
+    // sizing for a window this code cannot be in.
+    assert.ok(
+      worstCaseMs <= 5000,
+      "the retry must stay a short readiness allowance, not a timeout",
+    );
+  });
+
   it("exhausts a bounded budget and then fails closed", async () => {
     const { calls, query } = scriptedQuery(
       Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
@@ -347,6 +422,38 @@ describe("readBaseline", () => {
     );
   });
 
+  // Round 6, finding 2: these shapes were retried four times by round 5 on no
+  // evidence. They now cost exactly one attempt and no wait.
+  it("does not retry a missing or non-array row set", async () => {
+    for (const document of [
+      {},
+      { rows: null },
+      { rows: {} },
+      { rows: "1" },
+      { boundary: "b", warning: "w" },
+      5,
+    ]) {
+      const { calls, query } = scriptedQuery([JSON.stringify(document)]);
+      const { waits, wait } = recordingWait();
+
+      await assert.rejects(
+        () => readBaseline({ query, wait }),
+        (error) => {
+          assert.ok(error instanceof DemoBaselineError);
+          assert.equal(
+            error.message,
+            "The baseline query returned no row set.",
+          );
+
+          return true;
+        },
+      );
+
+      assert.equal(calls.length, 1, `${JSON.stringify(document)} was retried`);
+      assert.deepEqual(waits, []);
+    }
+  });
+
   // Decision 4 of this round: unprovable transience is not retried.
   it("does not retry malformed output or a non-integer count", async () => {
     for (const response of [
@@ -383,6 +490,11 @@ describe("readBaseline", () => {
       [`not json at all ${SENTINEL}`],
       [JSON.stringify({ rows: [{ profiles: SENTINEL }] })],
       [JSON.stringify({ boundary: SENTINEL, rows: [{ leak: SENTINEL }] })],
+      // Round 6's new fail-fast branch, including the case where the
+      // offending `rows` value is itself the thing that must not escape.
+      [JSON.stringify({ boundary: SENTINEL, rows: SENTINEL })],
+      [JSON.stringify({ warning: SENTINEL })],
+      [JSON.stringify({ rows: { leaked: SENTINEL } })],
     ];
 
     for (const scripted of responses) {
@@ -421,6 +533,7 @@ describe("readBaseline", () => {
         assert.ok(
           [
             "The baseline query did not return exactly one row.",
+            "The baseline query returned no row set.",
             "Could not read the baseline query result.",
             "The baseline query returned a non-integer count.",
           ].includes(error.message),
