@@ -3,9 +3,13 @@ import { describe, it } from "node:test";
 
 import { EXPECTED_BASELINE } from "./accounts.mjs";
 import {
-  BASELINE_ATTEMPTS,
+  BASELINE_DEADLINE_MS,
+  BASELINE_MAX_ATTEMPTS,
+  BASELINE_QUICK_ATTEMPTS,
   BASELINE_RETRY_DELAY_MS,
   BASELINE_SQL,
+  CANARY_SQL,
+  cliQueryPathLooksHealthy,
   compareBaseline,
   DemoBaselineError,
   formatBaseline,
@@ -213,6 +217,30 @@ describe("parseBaselineRow", () => {
     });
   });
 
+  // Round 9: a row set is a row set whether or not it arrives wrapped. This is
+  // defensive against contract drift, not a fix for an observed shape — the
+  // pinned CLI emitted the envelope in every one of round 9's structural probes.
+  it("accepts a bare array as well as the boundary envelope", () => {
+    const bare = JSON.stringify([EXPECTED_BASELINE]);
+
+    assert.deepEqual({ ...parseBaselineRow(bare) }, EXPECTED_BASELINE);
+  });
+
+  it("still requires exactly one row in a bare array", () => {
+    assert.throws(
+      () => parseBaselineRow(JSON.stringify([])),
+      (error) => {
+        assert.equal(
+          error.message,
+          "The baseline query did not return exactly one row.",
+        );
+        assert.equal(error.retryable, true);
+
+        return true;
+      },
+    );
+  });
+
   it("rejects a non-integer count", () => {
     assert.throws(
       () => parseBaselineRow(statusRow({ profiles: "2" })),
@@ -271,185 +299,261 @@ describe("readBaseline", () => {
   // response into the error.
   const SENTINEL = "SENTINEL-cli-response-must-not-escape";
 
-  function scriptedQuery(responses) {
-    const calls = [];
-
-    return {
-      calls,
-      query: async (sql) => {
-        calls.push(sql);
-
-        const response = responses[calls.length - 1];
-
-        if (response === undefined) {
-          throw new Error("the query was called more times than scripted");
-        }
-
-        return response;
-      },
-    };
-  }
-
-  function recordingWait() {
-    const waits = [];
-
-    return { waits, wait: async (ms) => void waits.push(ms) };
-  }
-
-  // The observed cold-start failure: a well-formed envelope carrying the wrong
-  // number of rows, immediately followed by a good read.
-  const notReady = JSON.stringify({
+  // The three structural shapes, all carrying the sentinel so any leak shows.
+  const noRowSet = JSON.stringify({ boundary: SENTINEL, warning: SENTINEL });
+  const nonArrayRows = JSON.stringify({ rows: SENTINEL, warning: SENTINEL });
+  const wrongCardinality = JSON.stringify({
     boundary: SENTINEL,
     warning: SENTINEL,
     rows: [],
   });
 
-  it("recovers when a structural failure is followed by one valid row", async () => {
-    const { calls, query } = scriptedQuery([notReady, statusRow()]);
-    const { waits, wait } = recordingWait();
+  const HEALTHY_CANARY = JSON.stringify({ rows: [{ ok: 1 }] });
+  const BROKEN_CANARY = JSON.stringify({ warning: SENTINEL });
 
-    const counts = await readBaseline({ query, wait, delayMs: 7 });
+  // Routes by SQL, so baseline reads and canary probes are counted separately
+  // and the clock only moves when the code under test actually waits.
+  function harness({ baseline = [], canary = BROKEN_CANARY } = {}) {
+    const baselineCalls = [];
+    const canaryCalls = [];
+    const waits = [];
+    let clock = 0;
+
+    const query = async (sql) => {
+      if (sql === CANARY_SQL) {
+        canaryCalls.push(sql);
+
+        if (canary === "throw") {
+          throw new Error(`canary transport failed ${SENTINEL}`);
+        }
+
+        return typeof canary === "function"
+          ? canary(canaryCalls.length)
+          : canary;
+      }
+
+      baselineCalls.push(sql);
+
+      const response = baseline[baselineCalls.length - 1];
+
+      if (response === undefined) {
+        throw new Error(
+          "the baseline query was called more times than scripted",
+        );
+      }
+
+      return response;
+    };
+
+    return {
+      query,
+      baselineCalls,
+      canaryCalls,
+      waits,
+      wait: async (ms) => {
+        waits.push(ms);
+        clock += ms;
+      },
+      now: () => clock,
+    };
+  }
+
+  const notReady = wrongCardinality;
+
+  it("recovers when a structural failure is followed by one valid row", async () => {
+    const h = harness({ baseline: [notReady, statusRow()] });
+
+    const counts = await readBaseline(h);
 
     assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
-    assert.equal(calls.length, 2);
-    assert.deepEqual(waits, [7]);
+    assert.equal(h.baselineCalls.length, 2);
+    assert.deepEqual(h.waits, [BASELINE_RETRY_DELAY_MS]);
+    // Inside the quick allowance, so no diagnosis was needed.
+    assert.equal(h.canaryCalls.length, 0);
   });
 
-  it("passes the count-only SQL on every attempt", async () => {
-    const { calls, query } = scriptedQuery([notReady, statusRow()]);
-    const { wait } = recordingWait();
+  it("passes the count-only SQL on every baseline attempt", async () => {
+    const h = harness({ baseline: [notReady, statusRow()] });
 
-    await readBaseline({ query, wait });
+    await readBaseline(h);
 
-    assert.deepEqual(calls, [BASELINE_SQL, BASELINE_SQL]);
+    assert.deepEqual(h.baselineCalls, [BASELINE_SQL, BASELINE_SQL]);
   });
 
-  // Round 8's production bound, pinned so it cannot drift silently.
-  it("holds the round 8 production bound", () => {
-    assert.equal(BASELINE_ATTEMPTS, 10);
+  // Round 9's production bound, pinned so it cannot drift silently.
+  it("holds the round 9 production bound", () => {
+    assert.equal(BASELINE_QUICK_ATTEMPTS, 3);
+    assert.equal(BASELINE_MAX_ATTEMPTS, 30);
     assert.equal(BASELINE_RETRY_DELAY_MS, 1000);
+    assert.equal(BASELINE_DEADLINE_MS, 60_000);
 
-    // Nine waits, not ten: no wait follows the final attempt.
-    const maxWaitBudgetMs = (BASELINE_ATTEMPTS - 1) * BASELINE_RETRY_DELAY_MS;
-
-    assert.equal(maxWaitBudgetMs, 9000);
+    // The deadline is the binding constraint in practice: 30 attempts at a
+    // second of waiting plus a ~1.5s query each would run well past 60s.
+    assert.ok(
+      BASELINE_MAX_ATTEMPTS * BASELINE_RETRY_DELAY_MS >
+        BASELINE_DEADLINE_MS / 3,
+    );
   });
 
-  // Both structural shapes recover, and both are driven all the way to the
-  // last attempt so the full budget is exercised rather than assumed.
+  // The failure boundary: each structural shape, repeated past the quick
+  // allowance, recovers as long as the canary shows the path is unhealthy.
   for (const [label, transient] of [
-    ["missing rows", JSON.stringify({ boundary: SENTINEL, warning: SENTINEL })],
-    ["non-array rows", JSON.stringify({ rows: null, warning: SENTINEL })],
+    ["missing rows", noRowSet],
+    ["non-array rows", nonArrayRows],
     ["object rows", JSON.stringify({ rows: { leaked: SENTINEL } })],
-    ["wrong cardinality", notReady],
+    ["wrong cardinality", wrongCardinality],
   ]) {
-    it(`recovers when ${label} repeats and is then followed by one valid row`, async () => {
-      const { calls, query } = scriptedQuery([
-        transient,
-        transient,
-        transient,
-        statusRow(),
-      ]);
-      const { waits, wait } = recordingWait();
+    it(`recovers when ${label} repeats well past the quick allowance`, async () => {
+      const h = harness({
+        baseline: [...Array.from({ length: 8 }, () => transient), statusRow()],
+        canary: BROKEN_CANARY,
+      });
 
-      const counts = await readBaseline({ query, wait });
+      const counts = await readBaseline(h);
 
       assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
-      assert.equal(calls.length, 4);
-      assert.deepEqual(waits, [
-        BASELINE_RETRY_DELAY_MS,
-        BASELINE_RETRY_DELAY_MS,
-        BASELINE_RETRY_DELAY_MS,
-      ]);
+      assert.equal(h.baselineCalls.length, 9);
+      assert.equal(h.waits.length, 8);
+      // Consulted once per retry beyond the quick allowance.
+      assert.equal(h.canaryCalls.length, 8 - BASELINE_QUICK_ATTEMPTS + 1);
     });
 
     it(`recovers on the very last attempt when ${label} persists`, async () => {
-      const { calls, query } = scriptedQuery([
-        ...Array.from({ length: BASELINE_ATTEMPTS - 1 }, () => transient),
-        statusRow(),
-      ]);
-      const { waits, wait } = recordingWait();
+      const h = harness({
+        baseline: [
+          ...Array.from({ length: BASELINE_MAX_ATTEMPTS - 1 }, () => transient),
+          statusRow(),
+        ],
+        canary: BROKEN_CANARY,
+      });
 
-      const counts = await readBaseline({ query, wait });
+      const counts = await readBaseline(h);
 
       assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
-      assert.equal(calls.length, 10);
-      assert.equal(waits.length, 9);
+      assert.equal(h.baselineCalls.length, BASELINE_MAX_ATTEMPTS);
+      assert.equal(h.waits.length, BASELINE_MAX_ATTEMPTS - 1);
     });
   }
 
-  // Exhaustion, per structural shape, with the message that identifies it.
+  // Evidence-based termination: a healthy canary proves the transport is fine,
+  // so the structural failure will not clear and waiting is pointless.
   for (const [label, response, message] of [
-    [
-      "missing rows",
-      JSON.stringify({ boundary: SENTINEL }),
-      "The baseline query returned no row set.",
-    ],
-    [
-      "non-array rows",
-      JSON.stringify({ rows: SENTINEL }),
-      "The baseline query returned no row set.",
-    ],
+    ["missing rows", noRowSet, "The baseline query returned no row set."],
+    ["non-array rows", nonArrayRows, "The baseline query returned no row set."],
     [
       "wrong cardinality",
-      notReady,
+      wrongCardinality,
       "The baseline query did not return exactly one row.",
     ],
   ]) {
-    it(`exhausts exactly 10 attempts on persistent ${label}, then fails closed`, async () => {
-      const { calls, query } = scriptedQuery(
-        Array.from({ length: BASELINE_ATTEMPTS }, () => response),
-      );
-      const { waits, wait } = recordingWait();
+    it(`stops at the quick allowance for ${label} when the canary is healthy`, async () => {
+      const h = harness({
+        baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => response),
+        canary: HEALTHY_CANARY,
+      });
 
       await assert.rejects(
-        () => readBaseline({ query, wait }),
+        () => readBaseline(h),
         (error) => {
           assert.ok(error instanceof DemoBaselineError);
-          // The distinct fixed sanitized message for this branch.
           assert.equal(error.message, message);
 
           return true;
         },
       );
 
-      // Exact counts, and exactly one bounded wait between each pair of
-      // attempts — never one after the last.
-      assert.equal(calls.length, 10);
-      assert.equal(waits.length, 9);
-      assert.deepEqual(
-        waits,
-        Array.from({ length: 9 }, () => 1000),
+      // Exactly the quick allowance, one canary, and no wait after the stop.
+      assert.equal(h.baselineCalls.length, BASELINE_QUICK_ATTEMPTS);
+      assert.equal(h.canaryCalls.length, 1);
+      assert.equal(h.waits.length, BASELINE_QUICK_ATTEMPTS - 1);
+    });
+
+    it(`exhausts the attempt ceiling for persistent ${label} when the canary stays broken`, async () => {
+      const h = harness({
+        baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => response),
+        canary: BROKEN_CANARY,
+      });
+
+      await assert.rejects(
+        () => readBaseline(h),
+        (error) => {
+          assert.ok(error instanceof DemoBaselineError);
+          assert.equal(error.message, message);
+
+          return true;
+        },
       );
+
+      assert.equal(h.baselineCalls.length, BASELINE_MAX_ATTEMPTS);
+      assert.equal(h.waits.length, BASELINE_MAX_ATTEMPTS - 1);
+
+      for (const ms of h.waits) {
+        assert.equal(ms, BASELINE_RETRY_DELAY_MS);
+      }
     });
   }
+
+  // A canary whose transport throws is evidence of an unhealthy path, not a
+  // reason to give up.
+  it("keeps waiting when the canary itself fails to run", async () => {
+    const h = harness({
+      baseline: [noRowSet, noRowSet, noRowSet, noRowSet, statusRow()],
+      canary: "throw",
+    });
+
+    const counts = await readBaseline(h);
+
+    assert.deepEqual({ ...counts }, EXPECTED_BASELINE);
+    assert.equal(h.baselineCalls.length, 5);
+  });
+
+  // The wall clock is the outer bound, and it binds before the attempt ceiling
+  // when each wait is long enough.
+  it("stops at the deadline even while the canary stays broken", async () => {
+    const h = harness({
+      baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => noRowSet),
+      canary: BROKEN_CANARY,
+    });
+
+    await assert.rejects(
+      () => readBaseline({ ...h, deadlineMs: 5000 }),
+      DemoBaselineError,
+    );
+
+    // Waits advance the injected clock, so the deadline is reached after five
+    // of them and the loop stops well short of the 30-attempt ceiling.
+    assert.equal(h.waits.length, 5);
+    assert.equal(h.baselineCalls.length, 6);
+    assert.ok(h.baselineCalls.length < BASELINE_MAX_ATTEMPTS);
+  });
 
   // The seams exist for these tests; they must not be a way to exceed or remove
   // the production bound. A zero or NaN budget would otherwise skip the loop and
   // leave no error to throw at all.
-  it("falls back to the production budget when the attempts seam is out of bounds", async () => {
-    for (const attempts of [
+  it("falls back to the production ceiling when the attempts seam is out of bounds", async () => {
+    for (const maxAttempts of [
       0,
       -1,
       2.5,
       Number.NaN,
       Number.POSITIVE_INFINITY,
-      // Above the production bound: must not be honoured.
-      11,
+      // Above the production ceiling: must not be honoured.
+      31,
       1000,
     ]) {
-      const { calls, query } = scriptedQuery(
-        Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
-      );
+      const h = harness({
+        baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => notReady),
+        canary: BROKEN_CANARY,
+      });
 
       await assert.rejects(
-        () => readBaseline({ query, wait: async () => {}, attempts }),
+        () => readBaseline({ ...h, maxAttempts }),
         DemoBaselineError,
       );
       assert.equal(
-        calls.length,
-        BASELINE_ATTEMPTS,
-        `attempts=${attempts} escaped the bound`,
+        h.baselineCalls.length,
+        BASELINE_MAX_ATTEMPTS,
+        `maxAttempts=${maxAttempts} escaped the ceiling`,
       );
     }
   });
@@ -463,50 +567,70 @@ describe("readBaseline", () => {
       1001,
       "1000",
     ]) {
-      const { query } = scriptedQuery(
-        Array.from({ length: BASELINE_ATTEMPTS }, () => notReady),
-      );
-      const { waits, wait } = recordingWait();
+      const h = harness({
+        baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => notReady),
+        canary: BROKEN_CANARY,
+      });
 
       await assert.rejects(
-        () => readBaseline({ query, wait, delayMs }),
+        () => readBaseline({ ...h, delayMs }),
         DemoBaselineError,
       );
 
-      assert.equal(waits.length, 9);
-
-      for (const ms of waits) {
+      for (const ms of h.waits) {
         assert.equal(ms, BASELINE_RETRY_DELAY_MS, `delayMs=${delayMs} escaped`);
       }
     }
   });
 
-  // A seam may still make a test fast by asking for less.
-  it("honours a smaller budget from the seams", async () => {
-    const { calls, query } = scriptedQuery([notReady, notReady]);
-    const { waits, wait } = recordingWait();
+  it("never waits past the production deadline when the seam asks for more", async () => {
+    const h = harness({
+      baseline: Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => notReady),
+      canary: BROKEN_CANARY,
+    });
 
     await assert.rejects(
-      () => readBaseline({ query, wait, attempts: 2, delayMs: 7 }),
+      () => readBaseline({ ...h, deadlineMs: 10 * BASELINE_DEADLINE_MS }),
       DemoBaselineError,
     );
 
-    assert.equal(calls.length, 2);
-    assert.deepEqual(waits, [7]);
+    // The oversized deadline fell back to the production one, so the clock
+    // never advanced past it.
+    assert.ok(h.waits.length * BASELINE_RETRY_DELAY_MS <= BASELINE_DEADLINE_MS);
+  });
+
+  // A seam may still make a test fast by asking for less.
+  it("honours a smaller budget from the seams", async () => {
+    const h = harness({
+      baseline: [notReady, notReady],
+      canary: BROKEN_CANARY,
+    });
+
+    await assert.rejects(
+      () => readBaseline({ ...h, maxAttempts: 2, delayMs: 7 }),
+      DemoBaselineError,
+    );
+
+    assert.equal(h.baselineCalls.length, 2);
+    assert.deepEqual(h.waits, [7]);
   });
 
   // A real read of a wrong database. Retrying it would turn a visible, correct
-  // answer into three more of the same, and hiding it would defeat the whole
-  // baseline guarantee.
+  // answer into more of the same, and hiding it would defeat the whole baseline
+  // guarantee.
   it("does not retry or hide a count mismatch", async () => {
     const seeded = statusRow({ sharing_grants: 1, daily_check_ins: 4 });
-    const { calls, query } = scriptedQuery([seeded]);
-    const { waits, wait } = recordingWait();
+    const h = harness({ baseline: [seeded] });
 
-    const counts = await readBaseline({ query, wait });
+    const counts = await readBaseline(h);
 
-    assert.equal(calls.length, 1, "a mismatching baseline must not be re-read");
-    assert.deepEqual(waits, []);
+    assert.equal(
+      h.baselineCalls.length,
+      1,
+      "a mismatching baseline must not be re-read",
+    );
+    assert.deepEqual(h.waits, []);
+    assert.equal(h.canaryCalls.length, 0);
 
     // Returned as-is, so the caller's comparison still sees the real state.
     assert.equal(counts.sharing_grants, 1);
@@ -516,6 +640,23 @@ describe("readBaseline", () => {
         .map((mismatch) => mismatch.key)
         .sort(),
       ["daily_check_ins", "sharing_grants"],
+    );
+  });
+
+  // A count mismatch must stay visible even while the transport is sick — the
+  // canary must never be able to turn a real mismatch into a retry.
+  it("returns a count mismatch unaltered even when the canary is broken", async () => {
+    const seeded = statusRow({ sharing_grants: 9 });
+    const h = harness({ baseline: [seeded], canary: BROKEN_CANARY });
+
+    const counts = await readBaseline(h);
+
+    assert.equal(h.baselineCalls.length, 1);
+    assert.equal(h.canaryCalls.length, 0);
+    assert.equal(counts.sharing_grants, 9);
+    assert.deepEqual(
+      compareBaseline(counts).map((m) => m.key),
+      ["sharing_grants"],
     );
   });
 
@@ -529,35 +670,32 @@ describe("readBaseline", () => {
     ],
   ]) {
     it(`queries exactly once for ${label}`, async () => {
-      const { calls, query } = scriptedQuery([response]);
-      const { waits, wait } = recordingWait();
+      const h = harness({ baseline: [response] });
 
-      await assert.rejects(
-        () => readBaseline({ query, wait }),
-        DemoBaselineError,
-      );
-      assert.equal(calls.length, 1);
-      assert.deepEqual(waits, []);
+      await assert.rejects(() => readBaseline(h), DemoBaselineError);
+      assert.equal(h.baselineCalls.length, 1);
+      assert.deepEqual(h.waits, []);
+      assert.equal(h.canaryCalls.length, 0);
     });
   }
 
   // A transport failure is not this function's condition either.
   it("queries exactly once for a subprocess failure", async () => {
     let calls = 0;
-    const { waits, wait } = recordingWait();
+    const h = harness({ baseline: [] });
     const query = async () => {
       calls += 1;
       throw new Error(`local scalar query failed ${SENTINEL}`);
     };
 
-    await assert.rejects(() => readBaseline({ query, wait }));
+    await assert.rejects(() => readBaseline({ ...h, query }));
     assert.equal(calls, 1);
-    assert.deepEqual(waits, []);
+    assert.deepEqual(h.waits, []);
   });
 
   it("leaks no response content into the error it throws", async () => {
     const exhaust = (response) =>
-      Array.from({ length: BASELINE_ATTEMPTS }, () => response);
+      Array.from({ length: BASELINE_MAX_ATTEMPTS }, () => response);
 
     const responses = [
       // Both retryable branches, driven to exhaustion so the error that
@@ -574,10 +712,12 @@ describe("readBaseline", () => {
     ];
 
     for (const scripted of responses) {
-      const { query } = scriptedQuery(scripted);
+      // The canary carries the sentinel too, so a leak through the diagnosis
+      // path would be caught here as well.
+      const h = harness({ baseline: scripted, canary: BROKEN_CANARY });
 
       try {
-        await readBaseline({ query, wait: async () => {}, delayMs: 0 });
+        await readBaseline(h);
         assert.fail("expected a rejection");
       } catch (error) {
         assert.ok(error instanceof DemoBaselineError);
@@ -628,6 +768,70 @@ describe("readBaseline", () => {
         assert.equal(error.cause, undefined);
       }
     }
+  });
+});
+
+describe("cliQueryPathLooksHealthy", () => {
+  // The evidence the retry's termination condition rests on. It answers one
+  // question with a boolean and never throws.
+  it("reads nothing from the database", () => {
+    assert.equal(CANARY_SQL, "select 1::int as ok");
+
+    for (const forbidden of [
+      "public.",
+      "auth.",
+      "profiles",
+      "teams",
+      "team_memberships",
+      "sharing_grants",
+      "daily_check_ins",
+      "count(",
+      "from",
+    ]) {
+      assert.ok(
+        !CANARY_SQL.includes(forbidden),
+        `the canary must not reference ${forbidden}`,
+      );
+    }
+  });
+
+  for (const [label, response] of [
+    ["the boundary envelope", JSON.stringify({ rows: [{ ok: 1 }] })],
+    ["a bare array", JSON.stringify([{ ok: 1 }])],
+  ]) {
+    it(`reports healthy for ${label}`, async () => {
+      assert.equal(await cliQueryPathLooksHealthy(async () => response), true);
+    });
+  }
+
+  for (const [label, respond] of [
+    ["a missing row set", async () => JSON.stringify({ warning: "w" })],
+    ["a non-array row set", async () => JSON.stringify({ rows: null })],
+    ["an empty row set", async () => JSON.stringify({ rows: [] })],
+    ["two rows", async () => JSON.stringify({ rows: [{ ok: 1 }, { ok: 1 }] })],
+    ["malformed JSON", async () => "not json"],
+    [
+      "a transport failure",
+      async () => {
+        throw new Error("query failed");
+      },
+    ],
+  ]) {
+    it(`reports unhealthy for ${label}`, async () => {
+      assert.equal(await cliQueryPathLooksHealthy(respond), false);
+    });
+  }
+
+  it("asks only the canary question", async () => {
+    const asked = [];
+
+    await cliQueryPathLooksHealthy(async (sql) => {
+      asked.push(sql);
+
+      return JSON.stringify({ rows: [{ ok: 1 }] });
+    });
+
+    assert.deepEqual(asked, [CANARY_SQL]);
   });
 });
 
