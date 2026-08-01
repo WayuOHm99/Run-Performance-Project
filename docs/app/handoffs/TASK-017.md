@@ -1,10 +1,12 @@
 # TASK-017 handoff — Safe Local App Demo Environment and Synthetic Fixtures
 
-Status: **Round 6 complete.** Every Codex finding from rounds 1 through 5 is
-fixed, with a test for each. Round 6 answered its Medium finding with
-measurement — a local-only probe across two full container-transition cycles —
-and the evidence narrowed the retry rather than enlarging it. All verification
-re-run, including the local database authorization suite, a real end-to-end
+Status: **Round 7 complete.** Every Codex finding from rounds 1 through 6 is
+fixed. Round 7 is **documentation-only** — it corrects the rollback table, which
+round 6 had left inaccurate. No code, test, migration, config, package file, or
+README changed, and no verification command was re-run because nothing
+executable moved; `git diff --name-only 59437f0..HEAD` lists this file alone.
+Round 6's own results stand: the retry narrowing, its measurement, and a full
+verification pass including the database authorization suite, an end-to-end
 consent verification, and a cold `demo:reset` → `demo:verify` cycle. Stopped for
 GPT/Codex read-only review. Not merged. Worktree not removed.
 
@@ -164,13 +166,37 @@ Also correct. The table called `git revert 6fef4cb 26d78dd` "Round 5 only" while
 round 5 was three commits including the handoff, so running it would have left
 this document describing code that was no longer on the branch.
 
-The Rollback section now states plainly that **every command in the table is
-implementation-only**, adds a column naming the documentation left in place, and
-explains why no documentation commit appears in any of them: the handoff is the
-review record for six rounds including every defect I disclosed, and reverting it
-would delete that record while leaving the history that makes it checkable. The
-correct move after a code revert is to edit this file in the revert commit, and
-the documentation commits are listed by round so that is a mechanical step.
+The round 6 rewrite added a column naming the documentation left in place, and
+explained why no documentation commit appears in a rollback command.
+
+> **Superseded by round 7.** The round 6 rewrite fixed the label and then made a
+> worse error underneath it: it declared every command "implementation-only"
+> while three of them contained `89fb9c6` (a mixed code-and-documentation
+> commit), `772353e`, and `b2547ec` (both documentation-only), and it kept an
+> "all implementation" command that reverts only round 1's implementation while
+> six later code commits stay on the branch. I corrected the wording Codex
+> pointed at without checking the commits the wording described. See the Rollback
+> section for what the table says now — two verified commands, and an explicit
+> statement that anything older is a manual rollback.
+
+## Round 7: the finding and what was done
+
+One Low finding, documentation-only. No code, test, migration, config, package
+file, or README changed; `git diff --name-only 59437f0..HEAD` lists this file
+alone.
+
+Codex found that round 6's rollback table was still wrong, in a way round 6
+introduced. The details and the correction are in the Rollback section rather
+than duplicated here, because that is where someone rolling back will look.
+
+What I take from it, since this is three rounds in a row where the rollback
+guidance was wrong: **I had never verified the composition of the commits I was
+writing commands out of.** Round 7 started by running `git show --name-only` on
+all seventeen commits on the branch and building the round-composition table from
+the output. Every claim in the Rollback section now traces to that, and the one
+"these revert cleanly" claim is backed by a `git log` invocation the reviewer can
+run. Prose about history should be derived from the history, not from memory of
+what I intended each commit to be.
 
 ## Round 5: the finding and what was done
 
@@ -703,20 +729,35 @@ change this round.
 | 14 | `6fef4cb4fcdb612e32abb9630c80fecb081f0017` | `fix(demo): clamp the baseline retry's test seams to the bound` |
 | 15 | `b4067b06ca937df47e5b4719aa7287417141b14f` | `docs(task-017): record the round 5 review response` |
 | 16 | `939435e6deaa6ae06243e0fbaacfdabd7cd88bfb` | `fix(demo): narrow the baseline retry to a measured condition` |
-| 17 | *this commit* | `docs(task-017): record the round 6 review response` |
+| 17 | `59437f052af8d796618df8b992e919d80245df31` | `docs(task-017): record the round 6 review response` |
+| 18 | *this commit* | `docs(task-017): correct the rollback table` |
 
 All on `feat/TASK-017-safe-local-app-demo`, cut from `ccd7d44`. **No existing
 commit was amended, rebased, or rewritten in any round** — each round is additive
-on top of the last, so the review history stays legible. Round 4 is a **single
-commit** covering both its code and its documentation; round 5 is **three** — the
-retry, the seam clamp I found while writing the reviewer notes, then this record.
-Keeping the clamp as its own commit rather than amending `26d78dd` is deliberate:
-the defect it fixes is disclosed below, and hiding it inside the first commit
-would have made the disclosure unverifiable. This documentation commit's own SHA
-cannot be printed inside itself, and is resolvable with
-`git log --oneline ccd7d44..HEAD`.
+on top of the last, so the review history stays legible.
+
+Composition by round — **code commits plus documentation commits** — is set out
+in the round-composition table in the Rollback section, derived from
+`git show --name-only` on all seventeen predecessors rather than from memory.
+The short version: **round 4 is one mixed commit** carrying code and
+documentation together; **round 5 is two code commits plus one documentation
+commit**; **round 6 is one of each**; **round 7 is documentation only**.
+
+Round 5's clamp was kept as its own commit rather than amended into `26d78dd`
+deliberately: the defect it fixes is disclosed below, and hiding it inside the
+first commit would have made the disclosure unverifiable.
+
+Each round's closing documentation commit cannot print its own SHA inside itself;
+all of them are resolvable with `git log --oneline ccd7d44..HEAD`.
 
 ## Changed files
+
+Round 7 alone — **one file**, this handoff, in one documentation-only commit:
+
+> `docs/app/handoffs/TASK-017.md`
+
+Confirmed with `git diff --name-only 59437f0..HEAD`. No code, test, migration,
+config, package file, lockfile, README, or fixture changed.
 
 Round 6 alone — **two files** in one code commit, no new file, no command added
 or removed:
@@ -1232,56 +1273,94 @@ and the local Docker volume, removable with
 `corepack pnpm exec supabase stop --no-backup` — **note that this discards the
 local database**, which is exactly why `demo:stop` never passes that flag.
 
-Partial reverts, newest first.
+### Partial reverts
 
-**Every command in this table is implementation-only.** None of them touches a
-documentation commit, so after running one the handoff will still describe code
-that is no longer on the branch. That is deliberate — see below — but it means
-the table is a code rollback, not a "make the branch look like round N" button.
-Round 5's table entry previously called the two-code-commit command "round 5
-only" while round 5 was three commits including this document, which was
-misleading in exactly that way; the column is now explicit.
+**Round 7 rewrote this subsection because the round 6 version was wrong.** It
+claimed every command in it was "implementation-only" and built commands out of
+commits that are not implementation commits at all. Verified against
+`git show --name-only` for all seventeen commits on the branch, the errors were:
 
-| To undo (code only) | Command | Documentation left in place |
+- `89fb9c6` (round 4) is a **mixed** commit — `lock.mjs`, `lock.test.mjs`,
+  `paths.mjs`, **and** `platform/README.md` **and** this handoff. It was listed
+  inside "code only" commands.
+- `772353e` and `b2547ec` are **documentation-only** — each touches only
+  `docs/app/LOCAL-DEMO.md` and `platform/README.md`. Both were listed inside
+  "code only" commands, which is the exact opposite of what they are.
+- `git revert 60d0118 6df9417` was labelled "all implementation". It is not: it
+  reverts the two round 1 implementation commits while every later fix
+  (`2a7b2d5`, `ed199e3`, the code in `89fb9c6`, `26d78dd`, `6fef4cb`,
+  `939435e`) stays on the branch, and several of those edit files `60d0118`
+  created. It would conflict, and if forced through it would leave a
+  half-existing tooling directory. It has been removed rather than reworded.
+
+**What the branch actually contains**, by round:
+
+| Round | Code commits | Documentation commits |
 | --- | --- | --- |
-| Round 6 code, keeping rounds 1–5 | `git revert 939435e` | round 6 handoff |
-| Rounds 5–6 code, keeping rounds 1–4 | `git revert 939435e 6fef4cb 26d78dd` | rounds 5–6 handoff |
-| Rounds 4–6 code, keeping rounds 1–3 | `git revert 939435e 6fef4cb 26d78dd 89fb9c6` | rounds 4–6 handoff |
-| Rounds 3–6 code, keeping rounds 1–2 | `git revert 939435e 6fef4cb 26d78dd 89fb9c6 772353e ed199e3` | rounds 3–6 handoff |
-| Rounds 2–6 code, keeping round 1 | `git revert 939435e 6fef4cb 26d78dd 89fb9c6 772353e ed199e3 b2547ec 2a7b2d5` | rounds 2–6 handoff |
-| All implementation, keeping all documentation | `git revert 60d0118 6df9417` | everything |
+| 1 | `6df9417`, `60d0118` | `d8e585b`, `97697d4`, `5267856` |
+| 2 | `2a7b2d5` | `b2547ec`, `ef4a9c5` |
+| 3 | `ed199e3` | `772353e`, `ef2f9ef` |
+| 4 | — **mixed**: `89fb9c6` is code *and* documentation in one commit — | |
+| 5 | `26d78dd`, `6fef4cb` | `b4067b0` |
+| 6 | `939435e` | `59437f0` |
+| 7 | none | this commit |
 
-Round 6 has a single code commit, `939435e`, so it appears inline above. Only
-this closeout commit's own SHA cannot be printed inside itself.
+**The two commands below are the only partial reverts I am willing to state.**
+Both are code-only in the strict sense — every commit named touches nothing but
+`platform/tooling/local-demo/baseline.mjs` and its test — and both leave **all**
+documentation, including this file, on the branch.
 
-**Why no documentation commit appears in any of these commands.** The handoff is
-the review record for six rounds, including the disclosure of every defect I
-introduced. Reverting it would delete that record while leaving the branch
-history that makes it verifiable, which is the one outcome worse than a stale
-document. If you revert code and want the prose to match, **edit this file in the
-revert commit** — do not revert the documentation commits. For reference, they
-are `5267856` (round 1), `b2547ec` and `ef4a9c5` (round 2), `772353e` and
-`ef2f9ef` (round 3), `89fb9c6` (round 4, code and documentation together),
-`b4067b0` (round 5), and this round's closeout.
+| To undo | Command | State afterwards |
+| --- | --- | --- |
+| Round 6's code, keeping rounds 1–5 | `git revert 939435e` | `readBaseline` returns to the round 5 retry: the wider classification, same 4 × 500ms budget. Every handoff round, including round 6's account of the narrowing, remains and is now stale |
+| Rounds 5–6 code — the whole retry, keeping rounds 1–4 | `git revert 939435e 6fef4cb 26d78dd` | `readBaseline` returns to a single attempt. It still fails closed with the same fixed sanitized message; it just fails sooner. Every handoff round remains and rounds 5–6 are now stale |
 
-**Round 5's two code commits revert cleanly together**, newest first. They touch
-only `baseline.mjs` and its test, and nothing else imports the seams they add.
+Run them newest-first exactly as written. The basis for calling these clean is
+checkable rather than asserted: `git log 26d78dd^..HEAD -- baseline.mjs
+baseline.test.mjs` lists exactly those three commits and nothing else, so
+reverting all three restores both files bit-for-bit to their `26d78dd^` content.
 Reverting `26d78dd` **without** `6fef4cb` will conflict, because the clamp edits
-the loop the first commit introduced. Round 6's code commits sit on top of both
-and must come off first.
+the loop the first commit introduced.
 
-Reverting the whole retry — rounds 5 and 6 together — returns `readBaseline` to a
-single attempt. That still fails closed with the same fixed sanitized message;
-it just fails sooner, and a cold-start readiness blip becomes a failed
-`demo:reset` again rather than a recovered one.
+### Anything reaching round 4 or earlier is a manual rollback
 
-**Reverting any lock round on its own is not recommended**, and the reason is the
-same each time: a partly reverted lock is worse than no lock. Round 3 without
-round 4 deletes a lock that is being created; round 2 without round 3 breaks live
-holders on a timer and can delete another process's lock. With no lock at all —
-the round 1 state — nothing pretends to be protected, and that is a more honest
-failure than a lock that silently lets two resets run. If the lock has to go, take
-rounds 2, 3, and 4 together.
+**I am not giving a command for it, because no single command is accurate.**
+Two independent reasons, either of which is enough:
+
+1. **`89fb9c6` cannot be reverted as code.** Reverting it also reverts this
+   handoff to its round 3 text and `platform/README.md` to its round 3 text,
+   silently discarding the round 4 record — while rounds 5, 6, and 7 of this
+   document, committed later, stay. The result is a handoff that contradicts
+   itself about which rounds happened.
+2. **The lock rounds are not independently revertible**, which was already true
+   and is unchanged: rounds 2, 3, and 4 each fix a defect in the previous one, so
+   a partial revert leaves a lock that is worse than no lock. Round 3 without
+   round 4 deletes a lock that is being created; round 2 without round 3 breaks
+   live holders on a timer and can delete another process's lock. With no lock at
+   all — the round 1 state — nothing pretends to be protected, which is a more
+   honest failure than a lock that silently lets two resets run. So if the lock
+   has to go, rounds 2, 3, and 4 go together — and that set includes the mixed
+   commit.
+
+So the honest instruction is: **roll back to round 4 or earlier by review, not by
+command.** Start from `git log --oneline ccd7d44..HEAD` and the table above,
+decide which files you want at which state, and construct the change deliberately
+— most likely by checking out known-good file contents (`git checkout <sha> --
+<path>`) rather than by reverting commits. Then update this file in the same
+commit to say what you did. That is more work than a one-liner, and inventing a
+one-liner that does not work is worse.
+
+If you want none of it, the whole-branch discard at the top of this section is
+exact and always correct.
+
+**Why no documentation commit appears in either command above.** The handoff is
+the review record for seven rounds, including the disclosure of every defect I
+introduced and every correction a reviewer forced. Reverting it would delete that
+record while leaving the branch history that makes it checkable. That is not a
+recommendation to preserve a flattering account — the record is mostly unflattering
+— it is that a rollback should change code, and a review trail that disappears
+when someone rolls back is not a review trail. **If you revert code, edit this
+file in the revert commit** to say so.
 
 ## For the reviewer (GPT/Codex, read-only)
 
@@ -1315,9 +1394,13 @@ The earlier focus lists still stand. What is new in round 6, highest value first
    limitations. If you think this evidence should be reproducible from the repo
    rather than from a description, say so — it is a real trade and I picked one
    side of it.
-6. **The rollback table's honesty.** It is now labelled implementation-only with
-   a column for what documentation survives. Confirm no row would leave the
-   branch in a state the prose misdescribes without saying so.
+6. ~~**The rollback table's honesty.** It is now labelled implementation-only
+   with a column for what documentation survives.~~ **You found this was still
+   wrong; round 7 rewrote it. Re-check it.** Specifically: that `939435e` and
+   `939435e 6fef4cb 26d78dd` are the only partial reverts now offered, that both
+   really are code-only, that the round-composition table matches
+   `git show --name-only` for all seventeen commits, and that refusing to give a
+   command for round 4 and earlier is the right call rather than an evasion.
 
 What was new in round 5, and still worth your attention:
 
