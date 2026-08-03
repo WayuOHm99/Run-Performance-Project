@@ -2,6 +2,7 @@ import datetime
 import json
 import math
 import sqlite3
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -290,6 +291,7 @@ def pace_axis_ticks(pace_series):
 # แคชสั้นกว่ารอบ sync ที่ถี่ที่สุด (fast activity 15 นาที / fast wellness 30 นาที) ไม่งั้น
 # ข้อมูลลง DB แล้วแต่หน้าจอยังค้างของเก่าโดยไม่มีเหตุผล — 2 นาทีพอให้ query ไม่ถี่เกิน
 CACHE_TTL_SEC = 120
+AUTO_REFRESH_SEC = 60
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -524,6 +526,20 @@ def get_lthr(slug, athlete_id):
     return None, "ไม่มีข้อมูล HR"
 
 
+@st.fragment(run_every=AUTO_REFRESH_SEC)
+def auto_refresh_dashboard():
+    """Clear cached data and rerun the full dashboard once per interval."""
+    now = time.monotonic()
+    last_refresh = st.session_state.get("_dashboard_auto_refresh_at")
+    if last_refresh is None:
+        st.session_state["_dashboard_auto_refresh_at"] = now
+        return
+    if now - last_refresh >= AUTO_REFRESH_SEC:
+        st.session_state["_dashboard_auto_refresh_at"] = now
+        st.cache_data.clear()
+        st.rerun(scope="app")
+
+
 # --- UI START ---
 today = datetime.date.today()
 st.title("Run Performance Dashboard")
@@ -566,7 +582,7 @@ with st.sidebar:
     _c.close()
     _lw_txt = f"{_lw} (ดึงล่าสุด {_lw_fetched[11:16]} น.)" if _lw and _lw_fetched else (_lw or "—")
     st.caption(f"ข้อมูลล่าสุด — กิจกรรม: {_la or '—'} · สุขภาพ: {_lw_txt}")
-    st.caption("ข้อมูลจะอัปเดตเองภายใน 2 นาที หรือกดรีเฟรชหลังนาฬิกา sync")
+    st.caption("ข้อมูลจะรีเฟรชอัตโนมัติทุก 60 วินาที หรือกดรีเฟรชหลังนาฬิกา sync")
 
     athlete_options = dict(zip(athletes_df["display_name"], athletes_df["athlete_id"]))
     selected_name = st.selectbox("นักกีฬา", options=list(athlete_options.keys()), key="selected_athlete")
@@ -1656,3 +1672,6 @@ with tab_splits:
                 _add("intensity_type", "ประเภท", None)  # text
 
                 st.dataframe(pd.DataFrame(table_data), hide_index=True, column_config=cfg)
+
+
+auto_refresh_dashboard()
