@@ -59,22 +59,40 @@ $tasks = @(
         Script      = Join-Path $garmin 'garmin-fast-sync-hidden.vbs'
         TimeLimit   = 'PT10M'
         OnBattery   = $true
-        Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:00' `
+        # เริ่มนาที :05 (→ :05/:20/:35/:50) ไม่ให้ตรงกับ full sync ที่ยิงต้นชั่วโมง —
+        # ชนกันทีไรสายนี้ต้องข้ามรอบเพราะ sync.lock เสียเที่ยวเปล่า
+        Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:05' `
                             -RepetitionInterval (New-TimeSpan -Minutes 15) `
                             -RepetitionDuration (New-TimeSpan -Days 3650)) }
         Optional    = $false
     },
     @{
+        Name        = 'Run-Performance-Garmin-Wellness'
+        Desc        = 'ดึง wellness ที่ขยับระหว่างวัน (body battery/RHR/stress/HRV/นอน/readiness) ทุก 30 นาที'
+        Exe         = 'wscript.exe'
+        Script      = Join-Path $garmin 'garmin-wellness-sync-hidden.vbs'
+        TimeLimit   = 'PT20M'
+        OnBattery   = $true
+        # เหลื่อมจาก Fast (:05/:20/:35/:50) และจาก full sync (ต้นชั่วโมง) กันแย่ง sync.lock
+        Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:12' `
+                            -RepetitionInterval (New-TimeSpan -Minutes 30) `
+                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
+        Optional    = $false
+    },
+    @{
         Name        = 'Run-Performance-Garmin'
-        Desc        = 'ดึงข้อมูล Garmin (กิจกรรม+wellness) ทุกคนลง garmin.db วันละ 2 รอบ 08:00 + 21:00'
+        Desc        = 'ดึงข้อมูล Garmin (กิจกรรม+wellness) ทุกคนลง garmin.db — ช่อง 08:00 + 21:00 (ยิงทุกชั่วโมงแล้วข้ามเองถ้าช่องนั้นทำแล้ว)'
         Exe         = 'wscript.exe'
         Script      = Join-Path $garmin 'garmin-sync-hidden.vbs'
         TimeLimit   = 'PT2H'
         OnBattery   = $true
-        Triggers    = { @(
-                          (New-ScheduledTaskTrigger -Daily -At '08:00'),
-                          (New-ScheduledTaskTrigger -Daily -At '21:00')
-                       ) }
+        # ยิงทุกต้นชั่วโมง แล้วให้ --catch-up-slots 08:00,21:00 ใน .bat ตัดสินว่ารอบไหนของจริง
+        # (รอบส่วนเกิน exit 75 เงียบ ๆ ไม่แตะ API เลย) — ทำแบบนี้เพราะ trigger รายวัน +
+        # StartWhenAvailable ของ Windows ยิงตามให้แค่ครั้งเดียว พลาดแล้วหายทั้งวัน
+        # (เจอจริง 2 ส.ค. 69: เครื่องหลับตอน 08:00 → รอบตามที่ 09:04 ตายเพราะ log ชนกัน → ไม่มี full sync ทั้งวัน)
+        Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:00' `
+                            -RepetitionInterval (New-TimeSpan -Hours 1) `
+                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
         Optional    = $false
     },
     @{

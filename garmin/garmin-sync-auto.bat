@@ -1,13 +1,20 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-echo ---- %date% %time% ---->> "C:\Backup\garmin-sync-log.txt"
 rem NOTE: keep this .bat pure ASCII. Thai text in a .bat breaks cmd.exe parsing
 rem (multibyte bytes get mis-split into bogus commands, even inside rem). Thai belongs
 rem in the .py/.ps1 files, not here.
-rem write ISO start-time marker so notify can tell if fetch_all wrote status THIS run
-rem (prevents a false "sync died" toast on a manual run near a previous run)
-powershell -NoProfile -Command "(Get-Date).ToString('o') | Set-Content -NoNewline -Encoding ASCII 'data\sync_run_start.txt'"
-".venv\Scripts\python.exe" scripts\fetch_all.py --days 3 >> "C:\Backup\garmin-sync-log.txt" 2>&1
+rem IMPORTANT: every sync lane logs to its OWN file. When two lanes shared one log,
+rem cmd.exe could not open the redirect target and the whole command line was skipped
+rem (python never ran, the round vanished silently). See scripts\prep_log.ps1.
+set "LOG=C:\Backup\garmin-sync-full.log"
+rem rotate the log when oversized + write this round's ISO start marker for notify
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\prep_log.ps1" -LogPath "%LOG%" -Marker "data\sync_run_start.txt"
+echo ---- FULL %date% %time% ---->> "%LOG%"
+rem --catch-up-slots: the task fires hourly, this decides which round is real, so a PC
+rem asleep at 08:00 still gets the 08:00 full sync when it wakes (exit 75 = skipped).
+".venv\Scripts\python.exe" scripts\fetch_all.py --days 3 --catch-up-slots 08:00,21:00 >> "%LOG%" 2>&1
+set "SYNC_EXIT=%ERRORLEVEL%"
+if "%SYNC_EXIT%"=="75" exit /b 0
 rem toast alert on failure / bad token / suspicious data (silent when OK); pass exit code
-powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\notify_sync.ps1" -SyncExit %ERRORLEVEL% >> "C:\Backup\garmin-sync-log.txt" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\notify_sync.ps1" -SyncExit %SYNC_EXIT% -Lane full >> "%LOG%" 2>&1

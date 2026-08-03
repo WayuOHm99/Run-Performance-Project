@@ -137,9 +137,9 @@ def fetch_and_insert_activities(
     """Fetch activities by date range and insert into fact_activity (ละเอียด: running dynamics,
     HR time-in-zone, weather, stamina/impact load สำหรับกิจกรรมวิ่ง).
 
-    fast=True ใช้กับ polling ถี่: ดึง activity summary เพียง endpoint เดียว ไม่ดึง
-    detail/weather/splits และไม่ reconcile. ถ้า activity มีอยู่แล้ว จะเก็บ enrichment
-    จาก full sync เดิมไว้ ไม่เขียน NULL ทับ."""
+    fast=True ใช้กับ polling ถี่: ดึง activity summary และเติม splits เฉพาะกิจกรรม
+    ที่มีระยะทางแต่ยังไม่มี splits ใน DB; ไม่ดึง detail/weather และไม่ reconcile.
+    ถ้า activity มีอยู่แล้ว จะเก็บ enrichment จาก full sync เดิมไว้ ไม่เขียน NULL ทับ."""
     print(f"\n📊 Fetching activities from {start_date} to {end_date}...")
 
     activities = safe_call(
@@ -245,8 +245,14 @@ def fetch_and_insert_activities(
         conn.commit()
         count += 1
 
-        # ดึง splits เฉพาะกิจกรรมที่มีระยะทาง (วิ่ง/เดิน) — cross-training ไม่มี split ที่มีความหมาย
-        if has_dist and not fast:
+        # full sync ดึง splits ตามเดิมเพื่อ reconciliation; fast sync เติมเฉพาะกิจกรรม
+        # ที่ยังไม่มี split สักแถว จึงเสีย 1 call ต่อกิจกรรมใหม่ครั้งเดียว ไม่ยิงซ้ำทุก 15 นาที.
+        # กิจกรรมระยะ 0 (เช่น HIIT/indoor cardio) ไม่มี split ที่มีความหมายและต้องข้าม.
+        has_splits = cur.execute(
+            "SELECT 1 FROM fact_activity_split WHERE activity_id = ? LIMIT 1",
+            (activity_id,),
+        ).fetchone()
+        if has_dist and (not fast or not has_splits):
             time.sleep(0.5)
             fetch_and_insert_splits(garmin, conn, activity_id)
             conn.commit()
@@ -371,6 +377,231 @@ def reconcile_only(garmin, conn, athlete_id, start_date, end_date):
 
 # ── Daily Wellness Fetching ──────────────────────────────────
 
+# ── Wellness parsers ────────────────────────────────────────
+# แยกออกมาเป็นฟังก์ชันเพราะใช้ 2 ทาง: full sync (เขียนทั้งแถว) กับ fast wellness
+# (อัปเดตเฉพาะฟิลด์ที่ขยับระหว่างวัน) — คีย์ของ dict = ชื่อคอลัมน์ใน fact_daily_wellness
+
+
+def _parse_stats(stats):
+    """RHR / steps / stress / kcal / floors / body battery ละเอียด / respiration ตื่น."""
+    def _s(*keys):
+        return safe_get(stats, *keys) if stats else None
+    return {
+        "resting_hr": _s("restingHeartRate"),
+        "steps": _s("totalSteps"),
+        "steps_goal": _s("dailyStepGoal"),
+        "stress_avg": _s("averageStressLevel"),
+        "max_stress": _s("maxStressLevel"),
+        "floors_ascended": _s("floorsAscended"),
+        "active_kilocalories": _s("activeKilocalories"),
+        "bmr_kilocalories": _s("bmrKilocalories"),
+        "active_seconds": _s("activeSeconds"),
+        "avg_waking_respiration": _s("avgWakingRespirationValue"),
+        "body_battery_high": _s("bodyBatteryHighestValue"),
+        "body_battery_low": _s("bodyBatteryLowestValue"),
+        "bb_at_wake": _s("bodyBatteryAtWakeTime"),
+        "bb_charged": _s("bodyBatteryChargedValue"),
+        "bb_drained": _s("bodyBatteryDrainedValue"),
+        "bb_during_sleep": _s("bodyBatteryDuringSleep"),
+        "bb_most_recent": _s("bodyBatteryMostRecentValue"),
+    }
+
+
+def _parse_hrv(hrv):
+    out = {"hrv_weekly_avg": None, "hrv_last_night": None, "hrv_status": None}
+    if hrv and isinstance(hrv, dict):
+        summary = safe_get(hrv, "hrvSummary")
+        if summary:
+            out["hrv_weekly_avg"] = safe_get(summary, "weeklyAvg")
+            out["hrv_last_night"] = safe_get(summary, "lastNightAvg")
+            out["hrv_status"] = safe_get(summary, "status")
+        # Alternative structure
+        if out["hrv_weekly_avg"] is None:
+            out["hrv_weekly_avg"] = safe_get(hrv, "weeklyAvg")
+            out["hrv_last_night"] = safe_get(hrv, "lastNightAvg")
+            out["hrv_status"] = safe_get(hrv, "status")
+    return out
+
+
+def _parse_sleep(sleep):
+    out = {"sleep_score": None, "sleep_duration_sec": None, "deep_sleep_sec": None,
+           "light_sleep_sec": None, "rem_sleep_sec": None, "awake_sec": None}
+    if sleep and isinstance(sleep, dict):
+        daily_sleep = safe_get(sleep, "dailySleepDTO")
+        if daily_sleep:
+            out["sleep_duration_sec"] = safe_get(daily_sleep, "sleepTimeSeconds")
+            out["deep_sleep_sec"] = safe_get(daily_sleep, "deepSleepSeconds")
+            out["light_sleep_sec"] = safe_get(daily_sleep, "lightSleepSeconds")
+            out["rem_sleep_sec"] = safe_get(daily_sleep, "remSleepSeconds")
+            out["awake_sec"] = safe_get(daily_sleep, "awakeSleepSeconds")
+            # sleepScores lives INSIDE dailySleepDTO, not at the top level
+            out["sleep_score"] = safe_get(daily_sleep, "sleepScores", "overall", "value")
+        # Fallback for older payload shapes
+        if out["sleep_score"] is None:
+            out["sleep_score"] = (safe_get(sleep, "overallScore")
+                                  or safe_get(sleep, "sleepScores", "overall", "value"))
+    return out
+
+
+def _parse_respiration(respiration):
+    out = {"avg_sleep_respiration": None, "highest_respiration": None,
+           "lowest_respiration": None, "avg_waking_respiration": None}
+    if isinstance(respiration, dict):
+        out["avg_sleep_respiration"] = respiration.get("avgSleepRespirationValue")
+        out["highest_respiration"] = respiration.get("highestRespirationValue")
+        out["lowest_respiration"] = respiration.get("lowestRespirationValue")
+        out["avg_waking_respiration"] = respiration.get("avgWakingRespirationValue")
+    return out
+
+
+def _parse_readiness(readiness):
+    """readiness score/level/feedback + acute load + ACWR ของ Garmin เอง + ปัจจัยย่อย.
+    API คืน LIST อาจว่างถ้านาฬิกาไม่ให้"""
+    out = {"training_readiness": None, "readiness_level": None, "readiness_feedback": None,
+           "acute_load": None, "acwr_percent": None, "hrv_factor_pct": None,
+           "recovery_time_hrs": None, "stress_history_pct": None}
+    if isinstance(readiness, list):
+        obj = readiness[0] if readiness else None
+    elif isinstance(readiness, dict):
+        obj = readiness
+    else:
+        obj = None
+    if isinstance(obj, dict):
+        out["training_readiness"] = obj.get("score") or obj.get("trainingReadinessScore")
+        out["readiness_level"] = obj.get("level")
+        out["readiness_feedback"] = obj.get("feedbackShort")
+        out["acute_load"] = obj.get("acuteLoad")
+        out["acwr_percent"] = obj.get("acwrFactorPercent")
+        out["hrv_factor_pct"] = obj.get("hrvFactorPercent")
+        out["recovery_time_hrs"] = obj.get("recoveryTime")
+        out["stress_history_pct"] = obj.get("stressHistoryFactorPercent")
+    return out
+
+
+def _parse_training_status(training_status):
+    """payload ซ้อนอยู่ใต้ mostRecentTrainingStatus.latestTrainingStatusData.<deviceId>."""
+    value = None
+    if isinstance(training_status, dict):
+        latest = safe_get(training_status, "mostRecentTrainingStatus", "latestTrainingStatusData")
+        if isinstance(latest, dict):
+            for device_data in latest.values():
+                if isinstance(device_data, dict):
+                    value = (device_data.get("trainingStatusFeedbackPhrase")
+                             or device_data.get("trainingStatus"))
+                    if value is not None:
+                        break
+        # Fallback to older top-level shapes
+        if value is None:
+            value = (safe_get(training_status, "trainingStatus")
+                     or safe_get(training_status, "currentDayTrainingStatus"))
+    return {"training_status": value}
+
+
+def _parse_max_metrics(max_metrics):
+    """payload เป็น list ต่อ device — เอาตัวแรกที่มีค่า generic."""
+    out = {"vo2max_trend": None, "fitness_age": None}
+    items = max_metrics if isinstance(max_metrics, list) else [max_metrics]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        generic = item.get("generic")
+        if isinstance(generic, dict):
+            out["vo2max_trend"] = (generic.get("vo2MaxPreciseValue")
+                                   or generic.get("vo2MaxValue"))
+            if out["fitness_age"] is None:
+                out["fitness_age"] = generic.get("fitnessAge")
+            if out["vo2max_trend"] is not None:
+                break
+    return out
+
+
+def _fill_missing(target: dict, extra: dict) -> dict:
+    """เติมเฉพาะคีย์ที่ target ยังว่าง (ใช้กับ waking respiration ที่มาได้ 2 ทาง)."""
+    for key, value in extra.items():
+        if target.get(key) is None:
+            target[key] = value
+    return target
+
+
+def _insert_wellness_row(cur, athlete_id, date_str, values: dict):
+    """เขียนทั้งแถว — PK ของตารางเป็น ON CONFLICT REPLACE จึงทับของเดิมทั้งแถว
+    (ชื่อคอลัมน์มาจาก parser ในไฟล์นี้เท่านั้น ไม่ได้มาจาก input ภายนอก)"""
+    cols = list(values)
+    placeholders = ", ".join(["?"] * (len(cols) + 2))
+    cur.execute(
+        f"INSERT INTO fact_daily_wellness (athlete_id, calendar_date, {', '.join(cols)}) "
+        f"VALUES ({placeholders})",
+        (athlete_id, date_str, *(values[c] for c in cols)),
+    )
+
+
+def _update_wellness_fields(cur, athlete_id, date_str, values: dict) -> int:
+    """อัปเดตเฉพาะคอลัมน์ที่มีค่า (ห้าม INSERT OR REPLACE — จะล้างคอลัมน์อื่นของวันนั้นทิ้ง
+    เช่น sleep/VO2max/LT ที่ full sync เก็บไว้แล้ว). คืนจำนวนคอลัมน์ที่เขียนจริง"""
+    fresh = {k: v for k, v in values.items() if v is not None}
+    if not fresh:
+        return 0
+    cur.execute(
+        "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
+        (athlete_id, date_str),
+    )
+    # ต้องเลื่อน fetched_at ด้วย ไม่งั้นมันจะค้างที่เวลา insert แถวแรกของวัน แล้ว dashboard
+    # (ที่ใช้ fetched_at ตัดสินว่า "ค่าครบวันแล้วหรือยัง") จะอ่านความสดของข้อมูลผิด
+    assignments = ", ".join(f"{c} = ?" for c in fresh)
+    cur.execute(
+        f"UPDATE fact_daily_wellness SET {assignments}, fetched_at = datetime('now') "
+        f"WHERE athlete_id = ? AND calendar_date = ?",
+        (*fresh.values(), athlete_id, date_str),
+    )
+    return len(fresh)
+
+
+def fetch_and_update_wellness_fast(garmin, conn, athlete_id, start_date, end_date):
+    """fast wellness: ดึงเฉพาะค่าที่ "ขยับระหว่างวัน" ของช่วงสั้น ๆ แล้วอัปเดตทับเป็นราย
+    คอลัมน์ (ไม่ล้างของเดิม) — 4 endpoint ต่อวันแทน 9 ของ full sync
+
+    เอาเข้า: stats (body battery/RHR/stress/steps/kcal), HRV, sleep, training readiness
+    ไม่เอา: respiration / training status / VO2max trend / endurance / hill / extras
+            — Garmin คำนวณวันละครั้ง รอ full sync 08:00/21:00 เติมได้ ไม่ต้องยิงถี่
+    """
+    print(f"\n⚡ Fast wellness {start_date} → {end_date} (เฉพาะค่าที่ขยับระหว่างวัน)...")
+
+    cur = conn.cursor()
+    current = start_date
+    count = 0
+
+    while current <= end_date:
+        date_str = current.isoformat()
+        print(f"   {date_str}", end="", flush=True)
+
+        stats = safe_call(garmin.get_stats, date_str)
+        time.sleep(0.3)
+        hrv = safe_call(garmin.get_hrv_data, date_str)
+        time.sleep(0.3)
+        sleep = safe_call(garmin.get_sleep_data, date_str)
+        time.sleep(0.3)
+        readiness = safe_call(garmin.get_training_readiness, date_str)
+
+        values = {
+            **_parse_stats(stats),
+            **_parse_hrv(hrv),
+            **_parse_sleep(sleep),
+            **_parse_readiness(readiness),
+        }
+        n_fields = _update_wellness_fields(cur, athlete_id, date_str, values)
+        # ไม่ถือ write transaction ค้างระหว่าง network calls ของวันถัดไป
+        conn.commit()
+        if n_fields:
+            count += 1
+        print(f" ✓ ({n_fields} ฟิลด์)")
+
+        time.sleep(1.0)
+        current += timedelta(days=1)
+
+    print(f"   ✅ อัปเดต wellness {count} วัน")
+    return count
+
+
 def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
     """Fetch daily wellness metrics day-by-day."""
     print(f"\n🩺 Fetching daily wellness from {start_date} to {end_date}...")
@@ -421,174 +652,22 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
         hill = safe_call(garmin.get_hill_score, date_str)
         time.sleep(0.3)
 
-        # Parse stats (RHR, steps, stress, kcal, floors, body battery ละเอียด, respiration ตื่น)
-        def _s(*keys):
-            return safe_get(stats, *keys) if stats else None
-        resting_hr = _s("restingHeartRate")
-        steps = _s("totalSteps")
-        stress_avg = _s("averageStressLevel")
-        max_stress = _s("maxStressLevel")
-        steps_goal = _s("dailyStepGoal")
-        floors_ascended = _s("floorsAscended")
-        active_kcal = _s("activeKilocalories")
-        bmr_kcal = _s("bmrKilocalories")
-        active_seconds = _s("activeSeconds")
-        waking_resp = _s("avgWakingRespirationValue")
-        bb_high = _s("bodyBatteryHighestValue")
-        bb_low = _s("bodyBatteryLowestValue")
-        bb_at_wake = _s("bodyBatteryAtWakeTime")
-        bb_charged = _s("bodyBatteryChargedValue")
-        bb_drained = _s("bodyBatteryDrainedValue")
-        bb_during_sleep = _s("bodyBatteryDuringSleep")
-        bb_most_recent = _s("bodyBatteryMostRecentValue")
+        values = {
+            **_parse_stats(stats),
+            **_parse_hrv(hrv),
+            **_parse_sleep(sleep),
+            **_parse_readiness(readiness),
+            **_parse_training_status(training_status),
+            **_parse_max_metrics(max_metrics),
+            "endurance_score": endurance.get("overallScore") if isinstance(endurance, dict) else None,
+            "hill_score_overall": hill.get("overallScore") if isinstance(hill, dict) else None,
+            "hill_score_strength": hill.get("strengthScore") if isinstance(hill, dict) else None,
+            "hill_score_endurance": hill.get("enduranceScore") if isinstance(hill, dict) else None,
+        }
+        # waking respiration มาได้ทั้งจาก stats และ respiration — stats มาก่อน แล้วค่อยเติมที่ขาด
+        _fill_missing(values, _parse_respiration(respiration))
 
-        # Parse HRV
-        hrv_weekly = None
-        hrv_last_night = None
-        hrv_status = None
-        if hrv and isinstance(hrv, dict):
-            hrv_summary = safe_get(hrv, "hrvSummary")
-            if hrv_summary:
-                hrv_weekly = safe_get(hrv_summary, "weeklyAvg")
-                hrv_last_night = safe_get(hrv_summary, "lastNightAvg")
-                hrv_status = safe_get(hrv_summary, "status")
-            # Alternative structure
-            if hrv_weekly is None:
-                hrv_weekly = safe_get(hrv, "weeklyAvg")
-                hrv_last_night = safe_get(hrv, "lastNightAvg")
-                hrv_status = safe_get(hrv, "status")
-
-        # Parse sleep
-        sleep_score = None
-        sleep_dur = None
-        deep_sleep = None
-        light_sleep = None
-        rem_sleep = None
-        awake_dur = None
-        if sleep and isinstance(sleep, dict):
-            daily_sleep = safe_get(sleep, "dailySleepDTO")
-            if daily_sleep:
-                sleep_dur = safe_get(daily_sleep, "sleepTimeSeconds")
-                deep_sleep = safe_get(daily_sleep, "deepSleepSeconds")
-                light_sleep = safe_get(daily_sleep, "lightSleepSeconds")
-                rem_sleep = safe_get(daily_sleep, "remSleepSeconds")
-                awake_dur = safe_get(daily_sleep, "awakeSleepSeconds")
-                # sleepScores lives INSIDE dailySleepDTO, not at the top level
-                sleep_score = safe_get(daily_sleep, "sleepScores", "overall", "value")
-            # Fallback for older payload shapes
-            if sleep_score is None:
-                sleep_score = safe_get(sleep, "overallScore") or safe_get(sleep, "sleepScores", "overall", "value")
-
-        # Parse respiration (waking จาก stats ไว้แล้ว — เติม sleep/high/low)
-        sleep_resp = high_resp = low_resp = None
-        if isinstance(respiration, dict):
-            sleep_resp = respiration.get("avgSleepRespirationValue")
-            high_resp = respiration.get("highestRespirationValue")
-            low_resp = respiration.get("lowestRespirationValue")
-            if waking_resp is None:
-                waking_resp = respiration.get("avgWakingRespirationValue")
-
-        # Parse training readiness + ปัจจัยละเอียด (score/level/acute load/ACWR ของ Garmin เอง/
-        # HRV factor/recovery time/stress history) — API คืน LIST อาจว่างถ้านาฬิกาไม่ให้
-        readiness_score = readiness_level = readiness_feedback = None
-        acute_load = acwr_pct = hrv_factor = recovery_time = stress_hist = None
-        if isinstance(readiness, list):
-            readiness_obj = readiness[0] if readiness else None
-        elif isinstance(readiness, dict):
-            readiness_obj = readiness
-        else:
-            readiness_obj = None
-        if isinstance(readiness_obj, dict):
-            readiness_score = readiness_obj.get("score") or readiness_obj.get("trainingReadinessScore")
-            readiness_level = readiness_obj.get("level")
-            readiness_feedback = readiness_obj.get("feedbackShort")
-            acute_load = readiness_obj.get("acuteLoad")
-            acwr_pct = readiness_obj.get("acwrFactorPercent")
-            hrv_factor = readiness_obj.get("hrvFactorPercent")
-            recovery_time = readiness_obj.get("recoveryTime")
-            stress_hist = readiness_obj.get("stressHistoryFactorPercent")
-
-        # Parse training status (nested per-device under
-        # mostRecentTrainingStatus.latestTrainingStatusData.<deviceId>)
-        training_status_val = None
-        if isinstance(training_status, dict):
-            latest = safe_get(training_status, "mostRecentTrainingStatus", "latestTrainingStatusData")
-            if isinstance(latest, dict):
-                for _device_data in latest.values():
-                    if isinstance(_device_data, dict):
-                        training_status_val = (
-                            _device_data.get("trainingStatusFeedbackPhrase")
-                            or _device_data.get("trainingStatus")
-                        )
-                        if training_status_val is not None:
-                            break
-            # Fallback to older top-level shapes
-            if training_status_val is None:
-                training_status_val = (
-                    safe_get(training_status, "trainingStatus")
-                    or safe_get(training_status, "currentDayTrainingStatus")
-                )
-
-        # Parse max metrics (payload เป็น list ต่อ device — เอาตัวแรกที่มีค่า generic)
-        vo2max_trend = fitness_age = None
-        mm_items = max_metrics if isinstance(max_metrics, list) else [max_metrics]
-        for item in mm_items:
-            if not isinstance(item, dict):
-                continue
-            generic = item.get("generic")
-            if isinstance(generic, dict):
-                vo2max_trend = generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue")
-                if fitness_age is None:
-                    fitness_age = generic.get("fitnessAge")
-                if vo2max_trend is not None:
-                    break
-
-        # Parse endurance score
-        endurance_score = None
-        if isinstance(endurance, dict):
-            endurance_score = endurance.get("overallScore")
-
-        # Parse hill score
-        hill_overall = hill_strength = hill_endurance = None
-        if isinstance(hill, dict):
-            hill_overall = hill.get("overallScore")
-            hill_strength = hill.get("strengthScore")
-            hill_endurance = hill.get("enduranceScore")
-
-        cur.execute("""
-            INSERT INTO fact_daily_wellness (
-                athlete_id, calendar_date, resting_hr,
-                hrv_weekly_avg, hrv_last_night, hrv_status,
-                sleep_score, sleep_duration_sec,
-                deep_sleep_sec, light_sleep_sec, rem_sleep_sec, awake_sec,
-                body_battery_high, body_battery_low,
-                bb_at_wake, bb_charged, bb_drained, bb_during_sleep, bb_most_recent,
-                stress_avg, max_stress, steps, steps_goal, floors_ascended,
-                active_kilocalories, bmr_kilocalories, active_seconds,
-                avg_waking_respiration, avg_sleep_respiration, highest_respiration, lowest_respiration,
-                training_readiness, readiness_level, readiness_feedback,
-                acute_load, acwr_percent, hrv_factor_pct, recovery_time_hrs, stress_history_pct,
-                training_status,
-                vo2max_trend, fitness_age, endurance_score,
-                hill_score_overall, hill_score_strength, hill_score_endurance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            athlete_id, date_str, resting_hr,
-            hrv_weekly, hrv_last_night, hrv_status,
-            sleep_score, sleep_dur,
-            deep_sleep, light_sleep, rem_sleep, awake_dur,
-            bb_high, bb_low,
-            bb_at_wake, bb_charged, bb_drained, bb_during_sleep, bb_most_recent,
-            stress_avg, max_stress, steps, steps_goal, floors_ascended,
-            active_kcal, bmr_kcal, active_seconds,
-            waking_resp, sleep_resp, high_resp, low_resp,
-            readiness_score, readiness_level, readiness_feedback,
-            acute_load, acwr_pct, hrv_factor, recovery_time, stress_hist,
-            training_status_val,
-            vo2max_trend, fitness_age, endurance_score,
-            hill_overall, hill_strength, hill_endurance,
-        ))
+        _insert_wellness_row(cur, athlete_id, date_str, values)
         # ไม่ถือ write transaction ค้างระหว่าง network calls ของวันถัดไป
         conn.commit()
         count += 1
@@ -779,7 +858,8 @@ def write_status(slug, ok, reason="ok", error=None,
     tmp.replace(STATUS_DIR / f"{slug}.json")
 
 
-def sanity_check(conn, athlete_id, start_date, end_date, *, include_wellness=True):
+def sanity_check(conn, athlete_id, start_date, end_date, *,
+                 include_wellness=True, include_activities=True):
     """ตรวจความสมบูรณ์ของข้อมูลช่วงที่เพิ่งดึง — คืน list ข้อความเตือน (ว่าง = ปกติ).
 
     หลักการ: Garmin ส่ง response แปลก ๆ มาได้ (ค่าหลักหาย/เป็นศูนย์) แล้วระบบจะเก็บเงียบ ๆ
@@ -788,20 +868,22 @@ def sanity_check(conn, athlete_id, start_date, end_date, *, include_wellness=Tru
     warns = []
 
     # 1) กิจกรรมที่ค่าหลักหาย/เพี้ยน — เวลารวมเป็น 0, วิ่งแต่ไม่มีระยะ/ไม่มี HR
-    rows = conn.execute(
-        """SELECT activity_id, activity_type, start_time_local, duration_sec, distance_m, avg_hr
-           FROM fact_activity
-           WHERE athlete_id = ? AND date(start_time_local) BETWEEN ? AND ?""",
-        (athlete_id, str(start_date), str(end_date))).fetchall()
-    for act_id, atype, started, dur, dist, hr in rows:
-        day = (started or "?")[:10]
-        if not dur or dur <= 0:
-            warns.append(f"กิจกรรม {day} ({atype}) เวลารวมเป็น 0/ว่าง (id {act_id})")
-        elif atype == "running":
-            if not dist or dist <= 0:
-                warns.append(f"วิ่ง {day} ไม่มีระยะทาง (id {act_id})")
-            elif hr is None:
-                warns.append(f"วิ่ง {day} ไม่มี HR — เช็คนาฬิกา/สายวัด (id {act_id})")
+    #    (รอบที่ไม่ได้ดึงกิจกรรมเลย เช่น fast wellness ไม่ต้องเช็ค — จะเตือนซ้ำทุก 30 นาที)
+    if include_activities:
+        rows = conn.execute(
+            """SELECT activity_id, activity_type, start_time_local, duration_sec, distance_m, avg_hr
+               FROM fact_activity
+               WHERE athlete_id = ? AND date(start_time_local) BETWEEN ? AND ?""",
+            (athlete_id, str(start_date), str(end_date))).fetchall()
+        for act_id, atype, started, dur, dist, hr in rows:
+            day = (started or "?")[:10]
+            if not dur or dur <= 0:
+                warns.append(f"กิจกรรม {day} ({atype}) เวลารวมเป็น 0/ว่าง (id {act_id})")
+            elif atype == "running":
+                if not dist or dist <= 0:
+                    warns.append(f"วิ่ง {day} ไม่มีระยะทาง (id {act_id})")
+                elif hr is None:
+                    warns.append(f"วิ่ง {day} ไม่มี HR — เช็คนาฬิกา/สายวัด (id {act_id})")
 
     # 2) วัน wellness ที่ว่างทั้งแถว เฉพาะวันที่จบไปแล้ว — วันนี้ยังไม่จบวัน ค่าอาจยังไม่มา ไม่นับ
     #    (ปกติ = นักกีฬายังไม่เปิดแอป Garmin ให้นาฬิกา sync ขึ้น cloud — ตามคนได้ตรงจุด)
@@ -833,13 +915,23 @@ def main():
                         help="โหมดเช็คกิจกรรมถูกลบฝั่ง Garmin (ดึงแค่รายชื่อ ไม่ดึงรายละเอียด/ไม่ insert) "
                              "→ mark deleted_at ตัวที่หายไป. ใช้รันรายสัปดาห์ (เช่น --days 90 --reconcile)")
     parser.add_argument("--activities-only", action="store_true",
-                        help="fast sync: ดึง activity summary เท่านั้น ไม่ดึง detail/weather/splits, "
-                             "wellness, extras หรือ reconcile")
+                        help="fast sync: ดึง activity summary + splits เฉพาะกิจกรรมที่มีระยะและ"
+                             "ยังไม่มี splits; ไม่ดึง detail/weather/wellness/extras หรือ reconcile")
+    parser.add_argument("--wellness-fast", action="store_true",
+                        help="fast wellness: ดึงเฉพาะค่าที่ขยับระหว่างวัน (body battery/RHR/stress/"
+                             "steps/HRV/นอน/readiness) แล้วอัปเดตทับเป็นรายคอลัมน์ — ไม่ดึงกิจกรรม/"
+                             "extras และไม่ล้างค่าที่ full sync เก็บไว้")
     args = parser.parse_args()
     if args.days < 0:
         parser.error("--days ต้องไม่น้อยกว่า 0")
-    if args.activities_only and (args.skip_activities or args.reconcile):
-        parser.error("--activities-only ใช้ร่วมกับ --skip-activities/--reconcile ไม่ได้")
+    _exclusive = [name for name, on in (
+        ("--activities-only", args.activities_only),
+        ("--wellness-fast", args.wellness_fast),
+        ("--skip-activities", args.skip_activities),
+        ("--reconcile", args.reconcile),
+    ) if on]
+    if len(_exclusive) > 1:
+        parser.error(f"ใช้ร่วมกันไม่ได้: {', '.join(_exclusive)}")
 
     # Set up token path
     token_dir = PROJECT_ROOT / "tokens" / args.athlete
@@ -913,8 +1005,9 @@ def main():
         return
 
     # Fetch data
-    if args.skip_activities:
-        print("\n📊 (ข้ามการดึงกิจกรรม — --skip-activities)")
+    if args.skip_activities or args.wellness_fast:
+        _why = "--skip-activities" if args.skip_activities else "--wellness-fast"
+        print(f"\n📊 (ข้ามการดึงกิจกรรม — {_why})")
         activity_count = 0
     else:
         activity_count = fetch_and_insert_activities(
@@ -925,6 +1018,10 @@ def main():
     if args.activities_only:
         wellness_count = None
         print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
+    elif args.wellness_fast:
+        wellness_count = fetch_and_update_wellness_fast(
+            garmin, conn, athlete_id, start_date, end_date
+        )
     else:
         wellness_count = fetch_and_insert_wellness(
             garmin, conn, athlete_id, start_date, end_date
@@ -934,6 +1031,7 @@ def main():
     warnings = sanity_check(
         conn, athlete_id, start_date, end_date,
         include_wellness=not args.activities_only,
+        include_activities=not args.wellness_fast,
     )
     if warnings:
         print("\n⚠️  Sanity check พบจุดน่าสงสัย:")
