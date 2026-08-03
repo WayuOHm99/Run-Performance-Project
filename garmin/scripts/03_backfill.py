@@ -524,13 +524,31 @@ def _fill_missing(target: dict, extra: dict) -> dict:
 
 
 def _insert_wellness_row(cur, athlete_id, date_str, values: dict):
-    """เขียนทั้งแถว — PK ของตารางเป็น ON CONFLICT REPLACE จึงทับของเดิมทั้งแถว
+    """เขียนแถวของวันนั้น — ต้อง upsert ระบุคอลัมน์เอง **ห้ามปล่อยให้ PK ของตาราง
+    (ON CONFLICT REPLACE) ทำงาน**: REPLACE = ลบแถวเดิมทิ้งแล้วใส่ใหม่ คอลัมน์ที่รอบนี้
+    ไม่ได้ดึงจะกลายเป็น NULL ทั้งหมด
+
+    เจอจริง 3 ส.ค. 69: deep resync 45 วัน ล้าง lactate_threshold ย้อนหลังของพี่เก้าทิ้ง
+    (16 ก.ค. HR 184 / pace 5:04 — ค่าที่ LTHR_BY_SLUG ใน dashboard อ้างอิงอยู่) เพราะ LT
+    ไม่ได้ดึงรายวัน แต่ fetch_extras เขียนให้เฉพาะ "วันล่าสุด" วันเดียว → ทุกวันที่ถูก
+    เขียนซ้ำจะเสีย LT ไป เหลือแค่วันล่าสุดวันเดียว
     (ชื่อคอลัมน์มาจาก parser ในไฟล์นี้เท่านั้น ไม่ได้มาจาก input ภายนอก)"""
     cols = list(values)
+    if not cols:
+        cur.execute(
+            "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
+            (athlete_id, date_str),
+        )
+        return
     placeholders = ", ".join(["?"] * (len(cols) + 2))
+    assignments = ", ".join(f"{c} = excluded.{c}" for c in cols)
+    # fetched_at ต้องเลื่อนเอง: ปกติมันได้ค่า DEFAULT ตอน insert แถวใหม่ แต่ทาง DO UPDATE
+    # ไม่มีใครแตะ → dashboard (ที่ใช้ fetched_at ตัดสินความสดของข้อมูล) จะอ่านผิด
     cur.execute(
         f"INSERT INTO fact_daily_wellness (athlete_id, calendar_date, {', '.join(cols)}) "
-        f"VALUES ({placeholders})",
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT(athlete_id, calendar_date) DO UPDATE SET {assignments}, "
+        f"fetched_at = datetime('now')",
         (athlete_id, date_str, *(values[c] for c in cols)),
     )
 

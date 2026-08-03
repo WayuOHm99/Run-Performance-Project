@@ -361,6 +361,37 @@ class FastWellnessTests(unittest.TestCase):
              52.5, 24.0, 6100.0, 50.0),
         )
 
+    def test_full_wellness_keeps_columns_the_daily_fetch_does_not_own(self):
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+        # lactate threshold เขียนโดย fetch_extras เฉพาะ "วันล่าสุด" วันเดียว ไม่ได้ดึงรายวัน
+        # → รอบ wellness ของวันเดียวกันต้องไม่ล้างมันทิ้ง ไม่งั้น deep resync 45 วันจะลบ
+        # LT ย้อนหลังทั้งหมด (เจอจริง 3 ส.ค. 69: ของพี่เก้า 16 ก.ค. HR 184 หายไปทั้งค่า
+        # เพราะ PRIMARY KEY ของตารางเป็น ON CONFLICT REPLACE = เขียนทับทั้งแถว)
+        conn.execute(
+            """INSERT INTO fact_daily_wellness (
+                athlete_id, calendar_date, lactate_threshold_hr,
+                lactate_threshold_pace_min_km, fetched_at
+            ) VALUES (1, ?, 184, 5.04, '2020-01-01 00:00:00')""",
+            (self.DAY,),
+        )
+        garmin = SyntheticWellnessGarmin()
+
+        with mock.patch.object(backfill.time, "sleep"):
+            backfill.fetch_and_insert_wellness(
+                garmin, conn, 1, backfill.date(2030, 1, 2), backfill.date(2030, 1, 2)
+            )
+
+        row = conn.execute(
+            """SELECT lactate_threshold_hr, lactate_threshold_pace_min_km,
+                      resting_hr, sleep_score, fetched_at
+               FROM fact_daily_wellness WHERE athlete_id = 1 AND calendar_date = ?""",
+            (self.DAY,),
+        ).fetchone()
+        self.assertEqual(row[:4], (184.0, 5.04, 48.0, 82.0))
+        # ยังต้องเลื่อน fetched_at ให้ด้วย — dashboard ใช้ค่านี้ตัดสินความสดของข้อมูล
+        self.assertNotEqual(row[4], "2020-01-01 00:00:00")
+
 
 class FetchAllOrchestrationTests(unittest.TestCase):
     def test_main_uses_bounded_concurrency_and_keeps_status_order(self):
