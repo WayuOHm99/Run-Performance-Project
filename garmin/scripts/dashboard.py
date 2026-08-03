@@ -177,7 +177,7 @@ DB_PATH = PROJECT_ROOT / "data" / "garmin.db"
 # ประเภทกิจกรรมที่นับเป็น "วิ่ง" (ใช้คำนวณ ACWR / 80-20)
 RUN_TYPES = ("running", "track_running", "trail_running", "treadmill_running")
 
-# LTHR จากผลเทสเป็นทางการ (Notion = source of truth) — อัปเดตเมื่อมีเทสใหม่
+# LTHR จากผลเทสเป็นทางการ — ตารางนักกีฬาใน CLAUDE.md คือที่เก็บผลเทส อัปเดตทั้งสองที่ให้ตรงกัน
 # tong: 5K TT 14 ก.ค. 69 | dan: VCR30 8 ก.ค. 69
 # p'kao: เทสแลบ Lactate ไม่มีค่า HR → ใช้ Garmin LT จากนาฬิกา (184 bpm, 16 ก.ค. 69) แทนค่าเดา 89%
 LTHR_BY_SLUG = {"tong": 171, "dan": 178, "p'kao": 184}
@@ -1300,7 +1300,7 @@ with tab_progress:
     st.header(f"ความก้าวหน้า — {selected_name}")
     st.caption(
         f"แนวโน้มระหว่าง {start_date.strftime('%d/%m/%Y')}–{end_date.strftime('%d/%m/%Y')} · "
-        "ใช้ค่าจาก Garmin ดูทิศทาง ส่วนค่าสัมบูรณ์ให้ยึดผลเทสจริงใน Notion"
+        "ใช้ค่าจาก Garmin ดูทิศทาง ส่วนค่าสัมบูรณ์ให้ยึดผลเทสจริง"
     )
 
     # ---------------- VO2max trend ----------------

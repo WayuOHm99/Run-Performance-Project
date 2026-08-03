@@ -36,22 +36,10 @@ Write-Host "โฟลเดอร์โปรเจกต์: $root" -Foreground
 Write-Host ""
 
 # ---------------- นิยามงานทั้งหมด ----------------
-# ExecutionTimeLimit ต่างกันตามงาน: LineSync สั้น (~9 วิ ปกติ), Garmin ยาวได้ (ยิง API หลายคน)
+# ExecutionTimeLimit ต่างกันตามงาน: สายถี่สั้น (fast/wellness), Garmin full ยาวได้ (ยิง API หลายคน)
 # MultipleInstances = IgnoreNew ทุกตัว: รอบใหม่มาตอนรอบเก่ายังไม่จบ ให้ข้ามไป ห้ามฆ่าของเก่า
 
 $tasks = @(
-    @{
-        Name        = 'Run-Performance-LineSync'
-        Desc        = 'ดึงรูป/ข้อความจากกลุ่มไลน์ลงเครื่อง ทุก 15 นาที (ไม่มีหน้าต่าง)'
-        Exe         = 'wscript.exe'
-        Script      = Join-Path $scripts 'sync-hidden.vbs'
-        TimeLimit   = 'PT10M'
-        OnBattery   = $true          # ให้รันแม้ใช้แบตเตอรี่
-        Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:00' `
-                            -RepetitionInterval (New-TimeSpan -Minutes 15) `
-                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
-        Optional    = $false
-    },
     @{
         Name        = 'Run-Performance-Garmin-Fast'
         Desc        = 'ดึง activity summary วันนี้จาก Garmin ทุก 15 นาที (ไม่มีหน้าต่าง)'

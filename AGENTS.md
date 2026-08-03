@@ -6,8 +6,10 @@ This file governs engineering work for the new athlete-and-coach mobile app.
 
 - New app code belongs under `platform/`.
 - Product and engineering decisions belong under `docs/app/`.
-- The existing Garmin, LINE, Streamlit, Notion, and scheduled-task system is a live
-  legacy operation. Do not refactor it as part of app work.
+- The existing Garmin, Streamlit, and scheduled-task system is a live legacy
+  operation. Do not refactor it as part of app work. (The LINE ingest and Notion
+  write-back were removed on 2026-08-03; the system now only fetches Garmin data
+  into SQLite and renders it in the Streamlit dashboard.)
 - Coaching and training-plan tasks continue to follow `CLAUDE.md` and
   `.agents/AGENTS.md`.
 
@@ -22,8 +24,8 @@ Use this order when instructions disagree:
 5. Existing code and automated tests.
 6. AI chat history is context only, never the final source of truth.
 
-Product requirements live in Git. Notion and the Garmin database remain sources of
-truth for current coaching operations, not for app requirements.
+Product requirements live in Git. The Garmin database remains the source of truth
+for current coaching operations, not for app requirements.
 
 ## Protected legacy areas
 
@@ -33,14 +35,13 @@ Treat these paths as read-only unless the active task explicitly names them:
 - `team_data/`
 - `garmin/`
 - `scripts/`
-- `supabase/`
 - `CLAUDE.md`
 - `.agents/AGENTS.md`
 - `.claude/settings.json`
 - `.claude/settings.local.json`
 
-The root `supabase/` directory contains the existing LINE webhook. The new app
-backend must live at `platform/supabase/`.
+The root `supabase/` directory is gone — it held only the LINE webhook, which was
+removed on 2026-08-03. The new app backend lives at `platform/supabase/`.
 
 Never copy production athlete data, Garmin tokens, environment files, database
 dumps, or service-role credentials into `platform/`, tests, prompts, screenshots,
