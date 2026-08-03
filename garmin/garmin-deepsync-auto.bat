@@ -14,5 +14,13 @@ rem capture the sync result before check_drift overwrites ERRORLEVEL (drift exit
 rem its own findings - that must not be reported as "sync failed")
 set "SYNC_EXIT=%ERRORLEVEL%"
 ".venv\Scripts\python.exe" scripts\check_drift.py >> "%LOG%" 2>&1
-if "%SYNC_EXIT%"=="75" exit /b 0
+rem Exit 75 means another sync owns the cross-task lock; skipping is expected. Drop the
+rem start marker when we skip: the watchdog reads a marker with no matching status as
+rem "started and never finished", and a skipped round is not a dead one.
+if "%SYNC_EXIT%"=="75" goto skipped
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\notify_sync.ps1" -SyncExit %SYNC_EXIT% -Lane deep -StartMarker "sync_deep_run_start.txt" >> "%LOG%" 2>&1
+exit /b 0
+
+:skipped
+del /q "data\sync_deep_run_start.txt" >nul 2>&1
+exit /b 0

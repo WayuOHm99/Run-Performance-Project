@@ -12,8 +12,10 @@
 # ก่อนรัน fetch_all) — ไม่ใช่เดาจากอายุไฟล์ (heuristic เดิม >1 ชม. false-fire ตอนกดมือ).
 # ถ้า run_at ของสายเก่ากว่าเวลาเริ่มรอบ = fetch_all ไม่ได้เขียน (ไม่ได้รัน/ตายก่อน).
 #
-# -CheckStale (สาย wellness เรียก ทุก 30 นาที = จังหวะเต้นของระบบ): เฝ้าดูว่ามีสายไหน
-# "เงียบหายไป" ไหม — สายตายเงียบคือปัญหาที่เจ็บที่สุด เพราะไม่มีอะไรเตือนเลย
+# -CheckStale (สาย wellness เรียก ทุก 30 นาที = จังหวะเต้นของระบบ): เฝ้าดูทุกสาย
+# (full/fast/wellness/reconcile/deep) ว่า "เงียบหายไป" หรือ "เริ่มรอบแล้วไม่จบ" ไหม —
+# สายตายเงียบคือปัญหาที่เจ็บที่สุด เพราะไม่มีอะไรเตือนเลย ยิ่งสายที่นาน ๆ เดินที
+# (reconcile รายสัปดาห์ / deep ทุก 4 สัปดาห์) ยิ่งไม่มีใครสังเกต
 #
 # กติกา: สคริปต์แจ้งเตือนต้องไม่ทำให้ Task ล้มเอง — ทุก error ในนี้กลืนเงียบ (exit 0 เสมอ)
 
@@ -21,7 +23,11 @@ param(
     [int]$SyncExit = 0,
     [string]$StartMarker = "sync_run_start.txt",
     [string]$Lane = "",
-    [switch]$CheckStale
+    [switch]$CheckStale,
+    # -StaleOnly: รอบนี้ไม่ได้ทำงานจริง (ข้ามเพราะชน lock) จึงไม่มี "ผลของรอบ" ให้ตรวจ —
+    # เอาไว้ให้สาย wellness ยังเดิน watchdog ได้แม้รอบตัวเองถูกข้าม ไม่งั้นช่วงที่มีสายอื่น
+    # ค้างกอด lock ยาว ๆ (= ช่วงที่น่าจะมีปัญหาที่สุด) watchdog จะเงียบไปพร้อมกันทั้งระบบ
+    [switch]$StaleOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,34 +106,77 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
 
 # ── เฝ้าสายที่เงียบหาย ────────────────────────────────────────
 # เพดานอายุของแต่ละสาย = คาบเดินจริง + เผื่อรอบที่ข้ามเพราะ lock (ต้องหลวมพอไม่ให้เตือนพร่ำ)
-$STALE_LIMIT_MIN = @{ full = 900; fast = 75; wellness = 90 }
+# สายนาน ๆ ครั้งก็ต้องเฝ้าด้วย — ยิ่งห่างยิ่งไม่มีใครสังเกตว่ามันตายไปแล้ว (deepsync
+# 2 ส.ค. 69 ตายตั้งแต่นาทีแรก ไม่มีอะไรเตือนเลย รอบถัดไปคืออีก 4 สัปดาห์)
+$STALE_LIMIT_MIN = [ordered]@{ full = 900; fast = 75; wellness = 90
+                               reconcile = 12240; deep = 44640 }
 $STALE_LABEL = @{ full = "sync เต็ม (08:00/21:00)"; fast = "กิจกรรม (ทุก 15 นาที)";
-                  wellness = "wellness (ทุก 30 นาที)" }
+                  wellness = "wellness (ทุก 30 นาที)";
+                  reconcile = "เช็คกิจกรรมถูกลบ (ทุกอาทิตย์)";
+                  deep = "deep resync (ทุก 4 สัปดาห์)" }
+# start-marker ของแต่ละสาย — .bat เขียนก่อนเริ่มรอบ และลบทิ้งเองเมื่อข้ามรอบ (exit 75)
+# marker ที่ค้างอยู่โดยไม่มีสถานะของรอบนั้นตามมา = รอบนั้น "เริ่มแล้วไม่จบ" ซึ่งเป็นรูที่
+# ใหญ่ที่สุดของระบบเตือน: รอบที่โดนฆ่ากลางทางเตือนตัวเองไม่ได้เลย เพราะ .bat ไม่ได้เดิน
+# ไปถึงบรรทัด notify — marker คือร่องรอยเดียวที่เหลือ
+$STALE_MARKER = @{ full = "sync_run_start.txt"; fast = "sync_fast_run_start.txt";
+                   wellness = "sync_wellness_run_start.txt";
+                   reconcile = "sync_reconcile_run_start.txt";
+                   deep = "sync_deep_run_start.txt" }
+# เผื่อเวลาที่รอบหนึ่งใช้จริง ก่อนจะสรุปว่า "ตายกลางคัน" ไม่ใช่ "กำลังรันอยู่ตอนนี้"
+$RUN_GRACE_MIN = @{ full = 30; fast = 10; wellness = 10; reconcile = 60; deep = 90 }
 $STALE_COOLDOWN_MIN = 360     # เตือนซ้ำได้ทุก 6 ชม. พอให้รู้ตัวโดยไม่รำคาญ
+
+function Format-Age([int]$Minutes) {
+    # สายรายสัปดาห์/รายเดือนถ้าบอกเป็นชั่วโมงจะอ่านไม่ออก (744 ชม. = กี่วันก็ต้องมานั่งหาร)
+    if ($Minutes -ge 2880) { return "{0:N1} วัน" -f ($Minutes / 1440) }
+    return "{0:N1} ชม." -f ($Minutes / 60)
+}
+
+function Read-TimeFile([string]$Path) {
+    if (-not (Test-Path $Path)) { return $null }
+    try { return [datetime]::Parse((Get-Content $Path -Raw).Trim()) } catch { return $null }
+}
 
 function Test-StaleLanes([string]$DataDir) {
     # เครื่องปิด/หลับ = ทุกสายเก่าหมดโดยธรรมชาติ ไม่ใช่ความผิดพลาด → ใช้ heartbeat ของ
     # รอบก่อนหน้าดูว่าเพิ่งกลับมาไหม ถ้าใช่ ข้ามรอบนี้ (รอบหน้าอีก 30 นาทีค่อยว่ากัน)
     $hbPath = Join-Path $DataDir "notify_heartbeat.txt"
     $now = Get-Date
-    $prev = $null
-    if (Test-Path $hbPath) {
-        try { $prev = [datetime]::Parse((Get-Content $hbPath -Raw).Trim()) } catch {}
-    }
+    $prev = Read-TimeFile $hbPath
     $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $hbPath
     if ($null -eq $prev -or ($now - $prev).TotalMinutes -gt 45) { return }
 
     $laneDir = Join-Path $DataDir "sync_lane"
     $stale = @()
     foreach ($name in $STALE_LIMIT_MIN.Keys) {
+        $runAt = $null
         $p = Join-Path $laneDir "$name.json"
-        if (-not (Test-Path $p)) { continue }   # สายที่ยังไม่เคยตั้ง ไม่ต้องเตือน
-        try {
-            $runAt = [datetime]((Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json).run_at)
-        } catch { continue }
+        if (Test-Path $p) {
+            try {
+                $runAt = [datetime]((Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json).run_at)
+            } catch { $runAt = $null }
+        }
+        # สายที่เพิ่มเข้ามาใหม่แล้วลืมใส่ marker/grace ต้องไม่ทำให้ watchdog ทั้งตัวตาย
+        # เงียบ ๆ (Join-Path กับ $null โยน error แล้ว try ข้างนอกจะกลืนหายไปทั้งฟังก์ชัน)
+        $marker = $STALE_MARKER[$name]
+        $startAt = if ($marker) { Read-TimeFile (Join-Path $DataDir $marker) } else { $null }
+        $grace = if ($RUN_GRACE_MIN[$name]) { $RUN_GRACE_MIN[$name] } else { 60 }
+
+        # (1) รอบที่เริ่มแล้วไม่จบ — เริ่มไปแล้วแต่ไม่มีสถานะของรอบนั้นตามมา
+        if ($startAt -and (($null -eq $runAt) -or ($runAt -lt $startAt.AddSeconds(-5)))) {
+            if (($now - $startAt).TotalMinutes -gt $grace) {
+                $stale += "{0}: รอบ {1:d/M HH:mm} เริ่มแล้วไม่จบ (โดนปิด/เครื่องดับกลางทาง)" `
+                          -f $STALE_LABEL[$name], $startAt
+            }
+            # ยังอยู่ในช่วงที่รอบนี้อาจกำลังรันอยู่ — ไม่ต้องไปวัดอายุสถานะเก่าซ้ำ
+            continue
+        }
+
+        # (2) สายที่ไม่มีรอบใหม่มานานเกินคาบ (สายที่ยังไม่เคยเดินเลย ไม่ต้องเตือน)
+        if ($null -eq $runAt) { continue }
         $ageMin = [int]($now - $runAt).TotalMinutes
         if ($ageMin -gt $STALE_LIMIT_MIN[$name]) {
-            $stale += "{0}: เงียบมา {1:N1} ชม." -f $STALE_LABEL[$name], ($ageMin / 60)
+            $stale += "{0}: เงียบมา {1}" -f $STALE_LABEL[$name], (Format-Age $ageMin)
         }
     }
     if ($stale.Count -eq 0) { return }
@@ -153,7 +202,7 @@ try {
                   else { Join-Path $dataDir "sync_status.json" }
     $startPath = Join-Path $dataDir $StartMarker
 
-    Test-Round $statusPath $startPath
+    if (-not $StaleOnly) { Test-Round $statusPath $startPath }
     if ($CheckStale) { Test-StaleLanes $dataDir }
 } catch {
     Write-Output "notify_sync.ps1 error (ไม่กระทบ sync): $_"

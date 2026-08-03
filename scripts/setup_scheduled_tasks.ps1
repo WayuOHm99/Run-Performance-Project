@@ -109,8 +109,9 @@ $tasks = @(
     @{
         Name        = 'Run-Performance-Garmin-Reconcile'
         Desc        = 'เช็คกิจกรรมที่ถูกลบฝั่ง Garmin ย้อน 90 วัน (soft delete) ทุกอาทิตย์ 09:30'
-        Exe         = 'cmd.exe'
-        Script      = Join-Path $garmin 'garmin-reconcile-auto.bat'
+        # ต้องไม่มีหน้าต่างเหมือนสายอื่น — หน้าต่างที่ปิดได้ คือหน้าต่างที่จะโดนปิด
+        Exe         = 'wscript.exe'
+        Script      = Join-Path $garmin 'garmin-reconcile-hidden.vbs'
         TimeLimit   = 'PT2H'
         OnBattery   = $true
         Triggers    = { @(New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '09:30') }
@@ -119,8 +120,10 @@ $tasks = @(
     @{
         Name        = 'Run-Performance-Garmin-DeepSync'
         Desc        = 'deep resync wellness ย้อน 45 วัน + ตรวจ schema drift (เดือนละครั้ง วันที่ 1)'
-        Exe         = 'cmd.exe'
-        Script      = Join-Path $garmin 'garmin-deepsync-auto.bat'
+        # เคยเปิดจอดำแล้วโดนปิดกลางคันจริง (2 ส.ค. 69 exit 0xC000013A ค้างที่ Day 1/46)
+        # รอบนี้กินเวลาหลายนาที ยิ่งเปิดค้างยิ่งเสี่ยง → ซ่อนหน้าต่างเหมือนสายอื่น
+        Exe         = 'wscript.exe'
+        Script      = Join-Path $garmin 'garmin-deepsync-hidden.vbs'
         TimeLimit   = 'PT4H'
         OnBattery   = $true
         # Task Scheduler ไม่มี -Monthly ใน cmdlet → ใช้รายสัปดาห์ทุก 4 สัปดาห์แทน

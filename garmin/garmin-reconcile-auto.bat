@@ -10,5 +10,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\prep_log.ps1" -LogP
 echo ==== RECONCILE %date% %time% ====>> "%LOG%"
 ".venv\Scripts\python.exe" scripts\fetch_all.py --days 90 --reconcile >> "%LOG%" 2>&1
 set "SYNC_EXIT=%ERRORLEVEL%"
-if "%SYNC_EXIT%"=="75" exit /b 0
+rem Exit 75 means another sync owns the cross-task lock; skipping is expected. Drop the
+rem start marker when we skip: the watchdog reads a marker with no matching status as
+rem "started and never finished", and a skipped round is not a dead one.
+if "%SYNC_EXIT%"=="75" goto skipped
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\notify_sync.ps1" -SyncExit %SYNC_EXIT% -Lane reconcile -StartMarker "sync_reconcile_run_start.txt" >> "%LOG%" 2>&1
+exit /b 0
+
+:skipped
+del /q "data\sync_reconcile_run_start.txt" >nul 2>&1
+exit /b 0

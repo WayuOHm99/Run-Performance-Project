@@ -12,8 +12,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\prep_log.ps1" -LogP
 echo ---- WELLNESS %date% %time% ---->> "%LOG%"
 ".venv\Scripts\python.exe" scripts\fetch_all.py --days 0 --wellness-fast --max-workers 3 --lock-timeout 0 >> "%LOG%" 2>&1
 set "SYNC_EXIT=%ERRORLEVEL%"
-rem Exit 75 means another sync owns the cross-task lock; skipping is expected.
-if "%SYNC_EXIT%"=="75" exit /b 0
+rem Exit 75 means another sync owns the cross-task lock; skipping is expected. Drop the
+rem start marker when we skip: the watchdog reads a marker with no matching status as
+rem "started and never finished", and a skipped round is not a dead one.
+if "%SYNC_EXIT%"=="75" goto skipped
 rem -CheckStale: this lane runs every 30 min, so it doubles as the watchdog that warns
-rem when any other lane (full / fast) has silently stopped producing rounds.
+rem when any other lane (full / fast / wellness / reconcile / deep) has silently stopped
+rem producing rounds, or started a round that never finished.
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\notify_sync.ps1" -SyncExit %SYNC_EXIT% -Lane wellness -StartMarker "sync_wellness_run_start.txt" -CheckStale >> "%LOG%" 2>&1
+exit /b 0
+
+:skipped
+del /q "data\sync_wellness_run_start.txt" >nul 2>&1
+rem Still run the watchdog on a skipped round. This lane is the system heartbeat, and a
+rem long-running lane hogging sync.lock is exactly when something is wrong - the watchdog
+rem must not go quiet at the same time. -StaleOnly because there is no round result here.
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\notify_sync.ps1" -StaleOnly -CheckStale >> "%LOG%" 2>&1
+exit /b 0
