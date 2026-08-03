@@ -31,7 +31,7 @@ Garmin Connect API  →  garmin\data\garmin.db  →  Streamlit Dashboard
 - **ตัดออกแล้ว (3 ส.ค. 69):** ระบบรับรูป/ข้อความจากกลุ่ม LINE (`sync_line.py` + Supabase Edge Function `line-webhook` + Task `Run-Performance-LineSync`), การเขียนข้อมูลขึ้น **Notion** ทั้งหมด, และเครื่องมือ CLI ที่พิมพ์ผลบน terminal (`day.py`, `04_weekly_review.py`)
 - **ห้ามต่อปลายทางใหม่โดยไม่ถาม** — ไม่ push ขึ้น Notion / ไม่ยิงเข้า LINE / ไม่เขียนขึ้นคลาวด์ใดๆ ถ้าอยากได้มุมมองใหม่ **ให้เพิ่มเป็นแท็บ/กราฟใน dashboard แทน**
 - **`garmin.db` = source of truth ของตัวเลขทั้งหมด** ส่วนค่าที่คนต้องตัดสิน (โซนซ้อม, LTHR, ผลเทสแลบ) อยู่ในไฟล์นี้และใน `dashboard.py` (`LTHR_BY_SLUG`)
-- **`platform\` และ `docs\app\` ไม่เกี่ยวกับระบบนี้** — เป็นงานแอปมือถือคนละสายที่พักไว้ **ห้ามแตะ**
+- **แยกงานแอปมือถือออกไปแล้ว (3 ส.ค. 69):** `platform\` + `docs\app\` ย้ายไปเป็น repo ของตัวเองที่ `D:\RunPerf-Platform` (GitHub: `WayuOHm99/RunPerformance-Platform`) พร้อมประวัติ git ครบ 98 commit — **repo นี้เหลือแค่ระบบ Garmin อย่างเดียว** ถ้าผู้จัดการทีมถามเรื่องแอปมือถือ ให้เปิดอีก repo ไม่ต้องสร้างใหม่ที่นี่
 
 ## นักกีฬาทั้ง 3 คน
 
@@ -53,7 +53,6 @@ D:\Run-Performance-Project\
   docs\                   ← คู่มือใช้งาน + เช็คลิสต์ตรวจข้อมูล
   run_dashboard.bat       ← เปิด dashboard
   athletes\ , team_data\  ← คลังเก่าจากยุค LINE (แช่ไว้อ่านอย่างเดียว ไม่มีอะไรมาเติมแล้ว)
-  platform\ , docs\app\   ← งานแอปมือถือคนละสาย — ห้ามแตะ
 ```
 
 ## โมดูล Garmin — ตัวเลขจาก API ตรง

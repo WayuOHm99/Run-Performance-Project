@@ -1,58 +1,19 @@
 {
   "claudeCode.initialPermissionMode": "plan",
-  "editor.codeActionsOnSave": {
-    "source.fixAll.eslint": "explicit"
-  },
-  "eslint.workingDirectories": [
-    {
-      "directory": "platform/apps/mobile",
-      "changeProcessCWD": true
-    }
-  ],
   "explorer.confirmDelete": true,
   "files.eol": "\n",
   "files.exclude": {
-    "**/.expo": true,
-    "**/dist": true,
-    "**/node_modules": true
+    "**/__pycache__": true
   },
   "files.watcherExclude": {
-    "**/.expo/**": true,
-    "**/dist/**": true,
-    "**/node_modules/**": true
+    "**/__pycache__/**": true,
+    "garmin/.venv/**": true,
+    "garmin/data/**": true
   },
   "git.confirmSync": true,
   "git.enableSmartCommit": false,
   "search.exclude": {
-    "**/.expo": true,
-    "**/dist": true,
-    "**/node_modules": true
-  },
-  "terminal.integrated.cwd": "${workspaceFolder}/platform",
-  "typescript.enablePromptUseWorkspaceTsdk": true,
-  "typescript.tsdk": "platform/apps/mobile/node_modules/typescript/lib",
-  "[javascript]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.formatOnSave": true
-  },
-  "[json]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.formatOnSave": true
-  },
-  "[jsonc]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.formatOnSave": true
-  },
-  "[markdown]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.formatOnSave": true
-  },
-  "[typescript]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.formatOnSave": true
-  },
-  "[typescriptreact]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.formatOnSave": true
+    "**/__pycache__": true,
+    "garmin/.venv": true
   }
 }

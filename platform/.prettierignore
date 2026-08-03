@@ -1,5 +1,0 @@
-# Generated local Supabase runtime state.
-# Git ignores these through supabase/.gitignore, but Prettier reads only
-# top-level ignore files, so they must be repeated here.
-supabase/.temp/
-supabase/.branches/

@@ -2,10 +2,7 @@
   "recommendations": [
     "anthropic.claude-code",
     "davidanson.vscode-markdownlint",
-    "dbaeumer.vscode-eslint",
-    "esbenp.prettier-vscode",
-    "expo.vscode-expo-tools",
-    "google.geminicodeassist",
+    "ms-python.python",
     "openai.chatgpt"
   ],
   "unwantedRecommendations": ["ritwickdey.liveserver"]
