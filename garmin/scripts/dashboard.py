@@ -179,12 +179,13 @@ RUN_TYPES = ("running", "track_running", "trail_running", "treadmill_running")
 
 # LTHR จากผลเทสเป็นทางการ — ตารางนักกีฬาใน CLAUDE.md คือที่เก็บผลเทส อัปเดตทั้งสองที่ให้ตรงกัน
 # tong: 5K TT 14 ก.ค. 69 | dan: VCR30 8 ก.ค. 69
-# p'kao: เทสแลบ Lactate ไม่มีค่า HR → ใช้ Garmin LT จากนาฬิกา (184 bpm, 16 ก.ค. 69) แทนค่าเดา 89%
-LTHR_BY_SLUG = {"tong": 171, "dan": 178, "p'kao": 184}
+# p'kao: เทสแลบ Lactate ไม่มีค่า HR → ใช้ Garmin LT จากนาฬิกา แทนค่าเดา 89%
+#        อัปเดต 4 ส.ค. 69: นาฬิกาตรวจ LT ใหม่ 31 ก.ค. = HR 181 / pace 4:41 (เดิม 16 ก.ค. HR 184 / 5:04)
+LTHR_BY_SLUG = {"tong": 171, "dan": 178, "p'kao": 181}
 LTHR_SOURCE_BY_SLUG = {
     "tong": "จากผลเทสล่าสุด (5K TT 14 ก.ค.)",
     "dan": "จากผลเทสล่าสุด (VCR30 8 ก.ค.)",
-    "p'kao": "จาก Garmin LT ล่าสุด 16 ก.ค. (เทสแลบไม่มีค่า HR)",
+    "p'kao": "จาก Garmin LT ล่าสุด 31 ก.ค. (เทสแลบไม่มีค่า HR)",
 }
 
 # ขอบเขตโซนตาม %LTHR (Friel): เบา Z1-2 <= 89%, กลาง Z3 90-93%, หนัก Z4-5 >= 94%
@@ -678,10 +679,12 @@ with tab_team:
     # fast wellness 21:08 ผ่าน จะกลบแถบแดงหายไปทั้งที่ปัญหายังอยู่
     _LANE_LABEL = {"full": "เต็ม (08:00/21:00)", "fast": "กิจกรรม (ทุก 15 นาที)",
                    "wellness": "wellness (ทุก 30 นาที)", "reconcile": "reconcile (รายสัปดาห์)",
-                   "deep": "deep resync (รายเดือน)"}
+                   "deep": "deep resync (รายเดือน)", "backup": "สำรองข้อมูล (22:00)"}
     _reason_txt = {"token": "token เสีย → รัน เพิ่มนักกีฬา.bat",
                    "network": "เน็ต/เซิร์ฟเวอร์มีปัญหา",
-                   "timeout": "ค้างเกินเวลา"}
+                   "timeout": "ค้างเกินเวลา",
+                   "db": "สำเนา garmin.db ไม่สำเร็จ → เปิด C:\\Backup\\backup-log.txt",
+                   "robocopy": "robocopy mirror มีปัญหา → เปิด C:\\Backup\\backup-log.txt"}
     _lane_dir = DB_PATH.parent / "sync_lane"
     _lane_files = sorted(_lane_dir.glob("*.json")) if _lane_dir.exists() else []
     # ไฟล์รวมแบบเดิม = fallback ให้ระบบที่ยังไม่ได้รัน sync รอบใหม่หลังอัพเกรด
@@ -707,7 +710,8 @@ with tab_team:
                        + " | ".join(r["warnings"]))
         # สายที่ "เงียบหายไป" อันตรายกว่าสายที่ล้มเหลว เพราะไม่มีอะไรฟ้อง — กาไว้ให้เห็นตรงนี้
         # (เพดานเดียวกับ watchdog ใน notify_sync.ps1: คาบเดินจริง + เผื่อรอบที่ข้ามเพราะ lock)
-        _limit_min = {"full": 900, "fast": 75, "wellness": 90}.get(_sync.get("lane", ""))
+        _limit_min = {"full": 900, "fast": 75, "wellness": 90,
+                      "backup": 1800}.get(_sync.get("lane", ""))
         _age_min = None
         try:
             _age_min = (datetime.datetime.now()

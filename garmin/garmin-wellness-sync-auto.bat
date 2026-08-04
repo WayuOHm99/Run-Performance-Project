@@ -10,7 +10,13 @@ rem Own log file per lane - a shared log made concurrent lanes drop whole rounds
 set "LOG=C:\Backup\garmin-sync-wellness.log"
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\prep_log.ps1" -LogPath "%LOG%" -Marker "data\sync_wellness_run_start.txt"
 echo ---- WELLNESS %date% %time% ---->> "%LOG%"
-".venv\Scripts\python.exe" scripts\fetch_all.py --days 0 --wellness-fast --max-workers 3 --lock-timeout 0 >> "%LOG%" 2>&1
+rem lock-timeout 240 (was 0): waiting beats throwing the round away. Triggers are spread
+rem across the hour, but when the PC wakes from sleep Windows fires every missed trigger
+rem at once - on 2026-08-04 the full sync and this lane both fired at 08:14, this one lost
+rem the lock, and the team's body battery / HRV sat 9 hours stale until the next round.
+rem 4 min is safe here: rounds are 30 min apart, the task limit is 20 min, and a round
+rem that still cannot get the lock exits 75 and skips exactly as before.
+".venv\Scripts\python.exe" scripts\fetch_all.py --days 0 --wellness-fast --max-workers 3 --lock-timeout 240 >> "%LOG%" 2>&1
 set "SYNC_EXIT=%ERRORLEVEL%"
 rem Exit 75 means another sync owns the cross-task lock; skipping is expected. Drop the
 rem start marker when we skip: the watchdog reads a marker with no matching status as

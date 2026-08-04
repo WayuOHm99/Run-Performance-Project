@@ -13,7 +13,7 @@
 # ถ้า run_at ของสายเก่ากว่าเวลาเริ่มรอบ = fetch_all ไม่ได้เขียน (ไม่ได้รัน/ตายก่อน).
 #
 # -CheckStale (สาย wellness เรียก ทุก 30 นาที = จังหวะเต้นของระบบ): เฝ้าดูทุกสาย
-# (full/fast/wellness/reconcile/deep) ว่า "เงียบหายไป" หรือ "เริ่มรอบแล้วไม่จบ" ไหม —
+# (full/fast/wellness/reconcile/deep/backup) ว่า "เงียบหายไป" หรือ "เริ่มรอบแล้วไม่จบ" ไหม —
 # สายตายเงียบคือปัญหาที่เจ็บที่สุด เพราะไม่มีอะไรเตือนเลย ยิ่งสายที่นาน ๆ เดินที
 # (reconcile รายสัปดาห์ / deep ทุก 4 สัปดาห์) ยิ่งไม่มีใครสังเกต
 #
@@ -109,11 +109,12 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
 # สายนาน ๆ ครั้งก็ต้องเฝ้าด้วย — ยิ่งห่างยิ่งไม่มีใครสังเกตว่ามันตายไปแล้ว (deepsync
 # 2 ส.ค. 69 ตายตั้งแต่นาทีแรก ไม่มีอะไรเตือนเลย รอบถัดไปคืออีก 4 สัปดาห์)
 $STALE_LIMIT_MIN = [ordered]@{ full = 900; fast = 75; wellness = 90
-                               reconcile = 12240; deep = 44640 }
+                               reconcile = 12240; deep = 44640; backup = 1800 }
 $STALE_LABEL = @{ full = "sync เต็ม (08:00/21:00)"; fast = "กิจกรรม (ทุก 15 นาที)";
                   wellness = "wellness (ทุก 30 นาที)";
                   reconcile = "เช็คกิจกรรมถูกลบ (ทุกอาทิตย์)";
-                  deep = "deep resync (ทุก 4 สัปดาห์)" }
+                  deep = "deep resync (ทุก 4 สัปดาห์)";
+                  backup = "สำรองข้อมูล (ทุกคืน 22:00)" }
 # start-marker ของแต่ละสาย — .bat เขียนก่อนเริ่มรอบ และลบทิ้งเองเมื่อข้ามรอบ (exit 75)
 # marker ที่ค้างอยู่โดยไม่มีสถานะของรอบนั้นตามมา = รอบนั้น "เริ่มแล้วไม่จบ" ซึ่งเป็นรูที่
 # ใหญ่ที่สุดของระบบเตือน: รอบที่โดนฆ่ากลางทางเตือนตัวเองไม่ได้เลย เพราะ .bat ไม่ได้เดิน
@@ -121,9 +122,10 @@ $STALE_LABEL = @{ full = "sync เต็ม (08:00/21:00)"; fast = "กิจก
 $STALE_MARKER = @{ full = "sync_run_start.txt"; fast = "sync_fast_run_start.txt";
                    wellness = "sync_wellness_run_start.txt";
                    reconcile = "sync_reconcile_run_start.txt";
-                   deep = "sync_deep_run_start.txt" }
+                   deep = "sync_deep_run_start.txt";
+                   backup = "sync_backup_run_start.txt" }
 # เผื่อเวลาที่รอบหนึ่งใช้จริง ก่อนจะสรุปว่า "ตายกลางคัน" ไม่ใช่ "กำลังรันอยู่ตอนนี้"
-$RUN_GRACE_MIN = @{ full = 30; fast = 10; wellness = 10; reconcile = 60; deep = 90 }
+$RUN_GRACE_MIN = @{ full = 30; fast = 10; wellness = 10; reconcile = 60; deep = 90; backup = 60 }
 $STALE_COOLDOWN_MIN = 360     # เตือนซ้ำได้ทุก 6 ชม. พอให้รู้ตัวโดยไม่รำคาญ
 
 function Format-Age([int]$Minutes) {

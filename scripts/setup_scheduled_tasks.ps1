@@ -85,11 +85,13 @@ $tasks = @(
     },
     @{
         Name        = 'Run-Performance-Backup'
-        Desc        = 'สำรองโฟลเดอร์โปรเจกต์ไป C:\Backup ทุกวัน 22:00'
-        Exe         = 'cmd.exe'
-        Script      = Join-Path $scripts 'สำรองข้อมูล.bat'
-        ExtraArgs   = 'auto'         # โหมด auto = ไม่ pause รอกด Enter
-        TimeLimit   = 'PT72H'
+        Desc        = 'สำรองโฟลเดอร์โปรเจกต์ + snapshot garmin.db ไป C:\Backup ทุกวัน 22:00'
+        # ต้องไม่มีหน้าต่างเหมือนสายอื่น — งานนี้เป็นงานสุดท้ายที่ยังเปิดจอดำ แล้วก็โดนจริง
+        # (3 ส.ค. 69 22:00 ตายกลางทาง exit 0xC000013A เงียบสนิท) ทั้งที่ถือสำเนาเดียว
+        # ของ garmin.db อยู่ — .vbs ส่ง argument auto ให้ .bat เองแล้ว
+        Exe         = 'wscript.exe'
+        Script      = Join-Path $scripts 'backup-hidden.vbs'
+        TimeLimit   = 'PT4H'         # เดิม 72 ชม. = งานที่ค้างจะกอดยาวข้ามคืนถัดไป
         OnBattery   = $false         # backup ใหญ่ ไม่ต้องรันตอนใช้แบต
         Triggers    = { @(New-ScheduledTaskTrigger -Daily -At '22:00') }
         Optional    = $false
