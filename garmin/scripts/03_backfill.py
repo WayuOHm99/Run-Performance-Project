@@ -566,8 +566,15 @@ def _parse_training_status(training_status):
 
 
 def _parse_max_metrics(max_metrics):
-    """payload เป็น list ต่อ device — เอาตัวแรกที่มีค่า generic."""
-    out = {"vo2max_trend": None, "fitness_age": None}
+    """payload เป็น list ต่อ device — เอาตัวแรกที่มีค่า generic.
+
+    **ห้ามอ่าน fitness_age จากตรงนี้** (เอาออก 4 ส.ค. 69): `generic` มีคีย์ `fitnessAge`
+    อยู่จริงแต่ Garmin คืน `None` เสมอทั้ง 3 คน — ค่าจริงอยู่คนละ endpoint
+    (`get_fitnessage_data()` → แดน 18.0 / พี่เก้า 22.1) ซึ่ง `fetch_and_insert_extras`
+    เป็นคนดึง. ถ้าปล่อยคีย์นี้ไว้ในทางรายวัน มันจะเขียน None ทับของที่ extras เพิ่งเก็บ
+    ทุกรอบ — บั๊กแบบเดียวกับที่เคยล้าง lactate_threshold ย้อนหลังทิ้ง (3 ส.ค. 69)
+    """
+    out = {"vo2max_trend": None}
     items = max_metrics if isinstance(max_metrics, list) else [max_metrics]
     for item in items:
         if not isinstance(item, dict):
@@ -576,8 +583,6 @@ def _parse_max_metrics(max_metrics):
         if isinstance(generic, dict):
             out["vo2max_trend"] = (generic.get("vo2MaxPreciseValue")
                                    or generic.get("vo2MaxValue"))
-            if out["fitness_age"] is None:
-                out["fitness_age"] = generic.get("fitnessAge")
             if out["vo2max_trend"] is not None:
                 break
     return out
@@ -819,6 +824,27 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
                            WHERE athlete_id = ? AND calendar_date = ?""",
                         (lt_hr, lt_pace, athlete_id, lt_date))
             print(f"   ✅ LT ล่าสุด ({lt_date}): HR {lt_hr}, pace {lt_pace} นาที/กม.")
+    conn.commit()
+    time.sleep(0.3)
+
+    # ── Fitness Age (คนละ endpoint กับ maxmetrics — เจอ 4 ส.ค. 69) ──
+    # `maxmetrics.generic.fitnessAge` มีคีย์แต่เป็น None เสมอทั้ง 3 คน ค่าจริงต้องเรียก
+    # endpoint นี้ (แดน 18.0 / พี่เก้า 22.1) ส่วนต้นตอบ {"invalidReason":"USER_UNDER_AGE"}
+    # = Garmin ไม่คำนวณให้คนอายุน้อย ซึ่งไม่ใช่ความผิดพลาด ปล่อย NULL ไว้ถูกแล้ว
+    fa = safe_call(garmin.get_fitnessage_data, end_date.isoformat())
+    if isinstance(fa, dict):
+        if fa.get("invalidReason"):
+            print(f"   ℹ️  Fitness Age: Garmin ไม่คำนวณให้ ({fa['invalidReason']})")
+        elif isinstance(fa.get("fitnessAge"), (int, float)):
+            fa_date = end_date.isoformat()
+            cur.execute(
+                "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
+                (athlete_id, fa_date))
+            cur.execute("""UPDATE fact_daily_wellness SET fitness_age = ?
+                           WHERE athlete_id = ? AND calendar_date = ?""",
+                        (round(float(fa["fitnessAge"]), 1), athlete_id, fa_date))
+            print(f"   ✅ Fitness Age ({fa_date}): {round(float(fa['fitnessAge']), 1)} "
+                  f"(อายุจริง {fa.get('chronologicalAge')})")
     conn.commit()
     time.sleep(0.3)
 

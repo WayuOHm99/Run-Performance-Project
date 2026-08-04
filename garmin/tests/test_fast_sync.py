@@ -347,10 +347,13 @@ class FastWellnessTests(unittest.TestCase):
                 garmin, conn, 1, backfill.date(2030, 1, 2), backfill.date(2030, 1, 2)
             )
 
+        # fitness_age ไม่อยู่ในชุดนี้แล้ว (4 ส.ค. 69) — maxmetrics คืน fitnessAge = None
+        # เสมอ ค่าจริงมาจาก get_fitnessage_data() ที่ fetch_extras เป็นคนดึง
+        # ดูเทสถัดไปที่คุมว่ารอบรายวันต้องไม่เขียนทับคอลัมน์นี้
         row = conn.execute(
             """SELECT resting_hr, hrv_status, sleep_score, deep_sleep_sec, acute_load,
                       avg_waking_respiration, avg_sleep_respiration, training_status,
-                      vo2max_trend, fitness_age, endurance_score, hill_score_strength
+                      vo2max_trend, endurance_score, hill_score_strength
                FROM fact_daily_wellness WHERE athlete_id = 1 AND calendar_date = ?""",
             (self.DAY,),
         ).fetchone()
@@ -358,7 +361,7 @@ class FastWellnessTests(unittest.TestCase):
         self.assertEqual(
             row,
             (48.0, "BALANCED", 82.0, 4000.0, 420.0, 14.0, 13.0, "PRODUCTIVE",
-             52.5, 24.0, 6100.0, 50.0),
+             52.5, 6100.0, 50.0),
         )
 
     def test_full_wellness_keeps_columns_the_daily_fetch_does_not_own(self):
@@ -391,6 +394,31 @@ class FastWellnessTests(unittest.TestCase):
         self.assertEqual(row[:4], (184.0, 5.04, 48.0, 82.0))
         # ยังต้องเลื่อน fetched_at ให้ด้วย — dashboard ใช้ค่านี้ตัดสินความสดของข้อมูล
         self.assertNotEqual(row[4], "2020-01-01 00:00:00")
+
+    def test_full_wellness_does_not_wipe_fitness_age(self):
+        # fitness_age ย้ายมาเป็นของ fetch_extras (4 ส.ค. 69) เพราะ maxmetrics คืน None เสมอ
+        # → รอบ wellness รายวันต้องไม่แตะคอลัมน์นี้ ไม่งั้นจะซ้ำรอยบั๊ก LT: extras เขียน
+        # ค่าให้วันล่าสุด แล้วรอบรายวันถัดไปเขียน None ทับ = ไม่มีวันเห็นค่าบน dashboard
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_daily_wellness (athlete_id, calendar_date, fitness_age, fetched_at)
+               VALUES (1, ?, 22.1, '2020-01-01 00:00:00')""",
+            (self.DAY,),
+        )
+        garmin = SyntheticWellnessGarmin()
+
+        with mock.patch.object(backfill.time, "sleep"):
+            backfill.fetch_and_insert_wellness(
+                garmin, conn, 1, backfill.date(2030, 1, 2), backfill.date(2030, 1, 2)
+            )
+
+        row = conn.execute(
+            """SELECT fitness_age, resting_hr FROM fact_daily_wellness
+               WHERE athlete_id = 1 AND calendar_date = ?""",
+            (self.DAY,),
+        ).fetchone()
+        self.assertEqual(row, (22.1, 48.0))
 
 
 class FetchAllOrchestrationTests(unittest.TestCase):

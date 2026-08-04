@@ -1310,13 +1310,18 @@ with tab_progress:
     # ---------------- VO2max trend ----------------
     vo2 = (wellness_df.dropna(subset=["vo2max_trend"])
            if "vo2max_trend" in wellness_df else wellness_df.iloc[0:0])
+    # Fitness Age อ่านจาก wellness_df เต็ม ไม่ใช่จาก vo2 ที่กรอง vo2max_trend มาแล้ว —
+    # คนละ endpoint กัน (extras เขียน fitness_age ให้วันล่าสุดวันเดียว ส่วน vo2max_trend
+    # ขึ้นเฉพาะวันที่มีวิ่ง outdoor) ถ้าอ่านจาก vo2 ค่าจะหายทุกครั้งที่วันล่าสุดไม่ได้วิ่ง
+    _fit_age = (wellness_df["fitness_age"].dropna()
+                if "fitness_age" in wellness_df else pd.Series(dtype=float))
     if not vo2.empty:
         first_v, last_v = vo2["vo2max_trend"].iloc[0], vo2["vo2max_trend"].iloc[-1]
         with st.container(horizontal=True):
             st.metric("VO2max ล่าสุด (Garmin)", f"{last_v:.1f}",
                       delta=f"{last_v - first_v:+.1f} เทียบต้นช่วง", border=True)
-            if "fitness_age" in vo2 and vo2["fitness_age"].notna().any():
-                st.metric("Fitness Age", fmt_num(vo2["fitness_age"].dropna().iloc[-1]), border=True)
+            if not _fit_age.empty:
+                st.metric("Fitness Age", fmt_num(_fit_age.iloc[-1]), border=True)
         fig_vo2 = px.line(vo2, x="calendar_date", y="vo2max_trend", markers=True,
                           labels={"vo2max_trend": "VO2max", "calendar_date": "วันที่"},
                           title="แนวโน้ม VO2max (ค่าประเมินรายวันของ Garmin)")
