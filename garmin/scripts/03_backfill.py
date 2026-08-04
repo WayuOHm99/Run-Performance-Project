@@ -30,6 +30,59 @@ STATUS_DIR = PROJECT_ROOT / "data" / "sync_status"
 socket.setdefaulttimeout(30)
 
 
+# คำที่ยืนยันว่า "ปัญหาอยู่ที่สิทธิ์จริง ๆ" — มีแค่กลุ่มนี้เท่านั้นที่ควรสั่งให้ไปขอ token ใหม่
+_AUTH_MARKERS = (
+    "401", "403", "unauthorized", "forbidden", "invalid_grant", "invalid grant",
+    "invalid_token", "invalid token", "token expired", "expired token",
+    "refresh token", "re-authenticate", "reauthenticate", "login required",
+    "bad credentials", "invalid credentials", "mfa", "consent",
+)
+
+
+def classify_login_error(exc: BaseException) -> str:
+    """ตัดสินว่า login ล้มเพราะ 'token' หรือ 'network' — อ่านทั้ง exception chain
+
+    ทำไมต้องไล่ chain: garminconnect ห่อทุกอย่างที่ทำให้ดึงโปรไฟล์ไม่ได้เป็น
+    GarminConnectAuthenticationError("Failed to retrieve social profile") ซึ่ง
+    "อ่านแล้วเหมือน token เสีย" ทั้งที่ตัวจริงอยู่ใน __cause__ — เจอจริง 4 ส.ค. 69:
+    ข้างในคือ **HTTP 521 Web server is down** (Cloudflare บอกเองว่า retryable,
+    retry_after 120) แต่ระบบเราไปเด้ง toast ว่า "TOKEN ใช้ไม่ได้ → รัน เพิ่มนักกีฬา.bat"
+    = ไล่ผู้จัดการทีมไปขอ token ใหม่ทั้งที่ token ปกติดีและ Garmin แค่ล่มชั่วคราว
+
+    ตั้งใจ default เป็น "network": เดาผิดเป็น network เสียแค่รอรอบหน้าที่ลองใหม่เอง
+    (และยังมี toast + แถบแดงบน dashboard เตือนอยู่ดี) แต่เดาผิดเป็น token
+    = สั่งให้คนไปกรอกรหัสผ่าน Garmin ของนักกีฬาใหม่โดยไม่จำเป็น
+    """
+    parts = []
+    seen = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(str(cur))
+        resp = getattr(cur, "response", None)
+        if resp is not None:
+            parts.append(str(getattr(resp, "status_code", "")))
+            parts.append(str(getattr(resp, "text", ""))[:500])
+        cur = cur.__cause__ or cur.__context__
+    blob = " ".join(parts).lower()
+
+    # เจอสัญญาณ 5xx/429/retryable ก่อน = ฝั่งเซิร์ฟเวอร์ ไม่ใช่สิทธิ์ของเรา
+    # (เช็คก่อน auth marker เพราะตัวห่อชั้นนอกมักพูดเหมือนปัญหา auth)
+    transient = (
+        "429", "too many requests", "rate limit", "retryable", "retry_after",
+        "500", "502", "503", "504", "521", "522", "523", "524",
+        "web server is down", "origin_down", "bad gateway", "service unavailable",
+        "gateway timeout", "cloudflare", "internal server error",
+        "timed out", "timeout", "connection", "resolve", "getaddrinfo",
+        "unreachable", "temporary failure", "ssl",
+    )
+    if any(s in blob for s in transient):
+        return "network"
+    if any(s in blob for s in _AUTH_MARKERS):
+        return "token"
+    return "network"
+
+
 def get_athlete_id(conn: sqlite3.Connection, slug: str) -> int:
     """Get or create athlete, return athlete_id."""
     cur = conn.cursor()
@@ -966,21 +1019,16 @@ def main():
     try:
         garmin.login(str(token_dir))
     except Exception as e:
-        # แยกให้ชัดว่า "token เสีย" หรือ "เน็ตล่ม" — token เสียจะพังเงียบทุกรอบจนกว่าจะขอใหม่
-        # จึงต้องแจ้งแบบเจาะจง (exit 2) ให้ fetch_all/toast บอกได้ทันทีว่าต้องรัน เพิ่มนักกีฬา.bat
-        err = str(e).lower()
-        is_network = any(s in err for s in (
-            "timed out", "timeout", "connection", "resolve", "getaddrinfo",
-            "unreachable", "temporary failure"))
-        if is_network:
-            print(f"❌ Login ล้มเหลวจากปัญหาเน็ต/เซิร์ฟเวอร์: {e}")
-            print("   ไม่ใช่ปัญหา token — รอบถัดไปจะลองใหม่เอง")
-            write_status(args.athlete, ok=False, reason="network", error=str(e))
-            sys.exit(1)
-        print(f"❌ TOKEN ใช้ไม่ได้ (หมดอายุ/ถูก revoke): {e}")
-        print(f"   → รัน garmin\\เพิ่มนักกีฬา.bat เพื่อขอ token ใหม่ของ '{args.athlete}'")
-        write_status(args.athlete, ok=False, reason="token", error=str(e))
-        sys.exit(2)
+        if classify_login_error(e) == "token":
+            print(f"❌ TOKEN ใช้ไม่ได้ (หมดอายุ/ถูก revoke): {e}")
+            print(f"   → รัน garmin\\เพิ่มนักกีฬา.bat เพื่อขอ token ใหม่ของ '{args.athlete}'")
+            write_status(args.athlete, ok=False, reason="token", error=str(e))
+            sys.exit(2)
+        print(f"❌ Login ล้มเหลวจากปัญหาเน็ต/เซิร์ฟเวอร์: {e}")
+        print("   ไม่ใช่ปัญหา token — รอบถัดไปจะลองใหม่เอง")
+        print("   (ถ้าขึ้นแบบนี้ติดกันหลายวัน ค่อยลองรัน เพิ่มนักกีฬา.bat)")
+        write_status(args.athlete, ok=False, reason="network", error=str(e))
+        sys.exit(1)
 
     full_name = garmin.get_full_name()
     print(f"✅ Logged in as: {full_name}")

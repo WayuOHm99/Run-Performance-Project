@@ -522,5 +522,55 @@ class CatchUpSlotTests(unittest.TestCase):
         lock.assert_not_called()
 
 
+class LoginErrorClassificationTest(unittest.TestCase):
+    """"token เสีย" ต้องแปลว่าสิทธิ์พังจริง ๆ เท่านั้น
+
+    เดาผิดเป็น token = ส่งผู้จัดการทีมไปขอรหัสผ่าน Garmin ของนักกีฬามากรอกใหม่
+    โดยไม่จำเป็น ส่วนเดาผิดเป็น network เสียแค่รอรอบหน้า (ยังมี toast เตือนอยู่ดี)
+    """
+
+    def test_garmin_origin_down_is_not_a_token_problem(self):
+        # เคสจริง 4 ส.ค. 69: garminconnect ห่อ HTTP 521 ไว้ใต้ AuthenticationError
+        # ที่ข้อความอ่านแล้วเหมือน token เสีย → ระบบเคยสั่งให้ไปขอ token ใหม่ฟรี ๆ
+        cause = RuntimeError(
+            "API Error 521 - {'title': 'Error 521: Web server is down', "
+            "'error_name': 'origin_down', 'retryable': True, 'retry_after': 120}"
+        )
+        outer = RuntimeError("Failed to retrieve social profile")
+        outer.__cause__ = cause
+        self.assertEqual(backfill.classify_login_error(outer), "network")
+
+    def test_bare_social_profile_error_defaults_to_network(self):
+        # ไม่มีเบาะแสอะไรเลย → เลือกทางที่เสียหายน้อยกว่า
+        self.assertEqual(
+            backfill.classify_login_error(RuntimeError("Failed to retrieve social profile")),
+            "network",
+        )
+
+    def test_rate_limit_is_network(self):
+        self.assertEqual(
+            backfill.classify_login_error(RuntimeError("API Error 429 - Too Many Requests")),
+            "network",
+        )
+
+    def test_real_auth_failure_is_still_token(self):
+        for msg in ("401 Unauthorized", "invalid_grant: refresh token expired",
+                    "403 Forbidden", "Bad credentials"):
+            with self.subTest(msg=msg):
+                self.assertEqual(backfill.classify_login_error(RuntimeError(msg)), "token")
+
+    def test_network_outage_is_network(self):
+        self.assertEqual(
+            backfill.classify_login_error(OSError("getaddrinfo failed")), "network"
+        )
+
+    def test_walks_a_cycle_without_hanging(self):
+        a = RuntimeError("outer")
+        b = RuntimeError("401 Unauthorized")
+        a.__cause__ = b
+        b.__context__ = a          # วนกลับ — ต้องไม่ค้าง
+        self.assertEqual(backfill.classify_login_error(a), "token")
+
+
 if __name__ == "__main__":
     unittest.main()
