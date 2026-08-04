@@ -522,6 +522,33 @@ class CatchUpSlotTests(unittest.TestCase):
         lock.assert_not_called()
 
 
+class SentinelValueTest(unittest.TestCase):
+    """-1 ของ Garmin = "ไม่มีข้อมูล" ห้ามเก็บเป็นค่าที่วัดได้ (dashboard เอาไปเฉลี่ยตรง ๆ)"""
+
+    def test_negative_stress_becomes_null(self):
+        parsed = backfill._parse_stats({"averageStressLevel": -1, "maxStressLevel": -1})
+        self.assertIsNone(parsed["stress_avg"])
+        self.assertIsNone(parsed["max_stress"])
+
+    def test_real_values_survive(self):
+        parsed = backfill._parse_stats({
+            "averageStressLevel": 31, "restingHeartRate": 51, "totalSteps": 10692,
+        })
+        self.assertEqual(parsed["stress_avg"], 31)
+        self.assertEqual(parsed["resting_hr"], 51)
+        self.assertEqual(parsed["steps"], 10692)
+
+    def test_zero_is_a_real_value_not_a_sentinel(self):
+        # ก้าว 0 / แคลอรี 0 ของวันที่เพิ่งเริ่มเป็นค่าจริง ต้องไม่ถูกตัดทิ้ง
+        parsed = backfill._parse_stats({"totalSteps": 0, "activeKilocalories": 0})
+        self.assertEqual(parsed["steps"], 0)
+        self.assertEqual(parsed["active_kilocalories"], 0)
+
+    def test_missing_keys_stay_none(self):
+        parsed = backfill._parse_stats({})
+        self.assertIsNone(parsed["stress_avg"])
+
+
 class LoginErrorClassificationTest(unittest.TestCase):
     """"token เสีย" ต้องแปลว่าสิทธิ์พังจริง ๆ เท่านั้น
 

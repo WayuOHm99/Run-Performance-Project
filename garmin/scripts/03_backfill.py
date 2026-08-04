@@ -435,10 +435,25 @@ def reconcile_only(garmin, conn, athlete_id, start_date, end_date):
 # (อัปเดตเฉพาะฟิลด์ที่ขยับระหว่างวัน) — คีย์ของ dict = ชื่อคอลัมน์ใน fact_daily_wellness
 
 
+def _drop_sentinel(value):
+    """Garmin ส่ง -1 แปลว่า "วันนั้นไม่มีข้อมูล" ไม่ใช่ค่าที่วัดได้ — ต้องเก็บเป็น NULL
+
+    เจอจริง 4 ส.ค. 69: `stress_avg = -1` หลุดเข้า DB 13 แถว (พี่เก้า 4 ส.ค. + ต้องอีก 12 วัน)
+    แล้ว dashboard เอาไปหาค่าเฉลี่ยตรง ๆ (`wellness_df["stress_avg"].mean()`) → ตัวเลข
+    "Stress เฉลี่ย" ต่ำกว่าความจริง และกราฟ stress มีขาลงไปแตะ -1 ทั้งที่แค่ไม่มีข้อมูล
+
+    ทุกคอลัมน์ใน _parse_stats เป็นค่าที่ติดลบไม่ได้ทางกายภาพ (HR/ก้าว/แคลอรี/ชั้น/
+    หายใจ/body battery/stress) จึงตัดค่าติดลบทิ้งได้ทั้งชุดอย่างปลอดภัย
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value < 0:
+        return None
+    return value
+
+
 def _parse_stats(stats):
     """RHR / steps / stress / kcal / floors / body battery ละเอียด / respiration ตื่น."""
     def _s(*keys):
-        return safe_get(stats, *keys) if stats else None
+        return _drop_sentinel(safe_get(stats, *keys) if stats else None)
     return {
         "resting_hr": _s("restingHeartRate"),
         "steps": _s("totalSteps"),
