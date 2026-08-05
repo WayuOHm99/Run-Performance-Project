@@ -198,3 +198,29 @@ if ($DryRun) { Write-Host "(โหมด -DryRun ไม่ได้แตะข�
 Write-Host ""
 Write-Host "ดูผล:  Get-ScheduledTask -TaskName 'Run-Performance-*' | Format-Table TaskName,State"
 Write-Host ""
+
+# ---------------- ตรวจ event log ของ Task Scheduler ----------------
+# ทำไมต้องเช็ค: Windows ปิด log นี้มาจากโรงงาน ผลคือเวลา task "ไม่ยิง" เราไม่มีทางรู้
+# เหตุผลเลย — ต้องเดาจากหลักฐานแวดล้อม (เจอจริง 5 ส.ค. 69 ตอนไล่ว่าทำไม backup
+# รอบ 22:00 หายไปทั้งคืน สุดท้ายเจอว่าเป็นเงื่อนไขแบต แต่กว่าจะเจอต้องไล่ log สายอื่น
+# เทียบเวลาเอง). เปิดไว้แล้ว Windows จะบันทึกเหตุผลให้ตรง ๆ เช่น
+#   ID 332 = ไม่รันเพราะเงื่อนไข (แบต/idle/เน็ต)  ID 111 = ถูกสั่งจบ  ID 101 = start ไม่สำเร็จ
+# เช็คเฉย ๆ ไม่แก้ให้ เพราะการเปิดต้องใช้สิทธิ์ Administrator แต่สคริปต์นี้ตั้งใจให้รัน
+# แบบ user ธรรมดาได้ (task เป็นของ user เอง) — ไม่ยอมแลกความง่ายตรงนั้นไปกับ log
+$logName = 'Microsoft-Windows-TaskScheduler/Operational'
+try {
+    $logOn = (Get-WinEvent -ListLog $logName -ErrorAction Stop).IsEnabled
+    if ($logOn) {
+        Write-Host "event log ของ Task Scheduler: เปิดอยู่ ✔" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "event log ของ Task Scheduler: ปิดอยู่ — task ที่ไม่ยิงจะไม่มีเหตุผลให้ไล่" -ForegroundColor Yellow
+        Write-Host "  เปิดด้วย (ต้อง Run as Administrator ครั้งเดียว):" -ForegroundColor Yellow
+        Write-Host "  wevtutil sl $logName /e:true /rt:false /ms:20971520"
+    }
+}
+catch {
+    # อ่าน log ไม่ได้ไม่ควรทำให้สคริปต์ตั้ง task ล้ม — งานหลักจบไปแล้วด้วยซ้ำ
+    Write-Host "event log ของ Task Scheduler: ตรวจไม่ได้ ($($_.Exception.Message))" -ForegroundColor DarkGray
+}
+Write-Host ""
