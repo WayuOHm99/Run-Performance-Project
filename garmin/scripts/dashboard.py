@@ -293,6 +293,9 @@ def pace_axis_ticks(pace_series):
 # ข้อมูลลง DB แล้วแต่หน้าจอยังค้างของเก่าโดยไม่มีเหตุผล — 2 นาทีพอให้ query ไม่ถี่เกิน
 CACHE_TTL_SEC = 120
 AUTO_REFRESH_SEC = 60
+# แถบเหลือง sanity check โชว์เฉพาะรอบที่ยัง "สด" — เกิน 24 ชม. ถือเป็นประวัติ ย้ายลงกล่องพับ
+# (24 ชม. ครอบสาย full ที่รันวันละ 2 รอบไว้พอดี ส่วนสายถี่กว่านั้นสดอยู่แล้ว)
+SANITY_WARN_FRESH_MIN = 24 * 60
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -691,6 +694,7 @@ with tab_team:
     if not _lane_files and (DB_PATH.parent / "sync_status.json").exists():
         _lane_files = [DB_PATH.parent / "sync_status.json"]
     _lane_lines = []
+    _old_warn_lines = []
     for _f in _lane_files:
         try:
             _sync = json.loads(_f.read_text(encoding="utf-8"))
@@ -701,27 +705,39 @@ with tab_team:
         _when = _sync["run_at"][:16].replace("T", " ")
         _fail = [r for r in _sync["results"] if not r["ok"]]
         _warn = [r for r in _sync["results"] if r["ok"] and r.get("warnings")]
-        if _fail:
-            st.error(f"❌ sync {_label} รอบ {_when} ล้มเหลว: "
-                     + " · ".join(f"**{r['slug']}** ({_reason_txt.get(r['reason'], 'ดู log')})"
-                                  for r in _fail))
-        for r in _warn:
-            st.warning(f"🧐 **{r['slug']}** — sanity check (sync {_label} รอบ {_when}): "
-                       + " | ".join(r["warnings"]))
-        # สายที่ "เงียบหายไป" อันตรายกว่าสายที่ล้มเหลว เพราะไม่มีอะไรฟ้อง — กาไว้ให้เห็นตรงนี้
-        # (เพดานเดียวกับ watchdog ใน notify_sync.ps1: คาบเดินจริง + เผื่อรอบที่ข้ามเพราะ lock)
-        _limit_min = {"full": 900, "fast": 75, "wellness": 90,
-                      "backup": 1800}.get(_sync.get("lane", ""))
         _age_min = None
         try:
             _age_min = (datetime.datetime.now()
                         - datetime.datetime.fromisoformat(_sync["run_at"])).total_seconds() / 60
         except Exception:
             pass
+        if _fail:
+            st.error(f"❌ sync {_label} รอบ {_when} ล้มเหลว: "
+                     + " · ".join(f"**{r['slug']}** ({_reason_txt.get(r['reason'], 'ดู log')})"
+                                  for r in _fail))
+        # sanity warning = สภาพข้อมูล "ณ รอบนั้น" ไม่ใช่สถานะปัจจุบัน — รอบที่เก่ากว่า 1 วัน
+        # คือประวัติศาสตร์ ไม่ใช่งานของวันนี้ ต้องลดชั้นลงกล่องพับ ไม่งั้นสายที่รันนาน ๆ ที
+        # (deep รายเดือน / reconcile รายสัปดาห์) แปะแถบเหลืองค้างหน้าจอเป็นสัปดาห์จนคนเลิกอ่าน
+        _stale_warn = _age_min is not None and _age_min > SANITY_WARN_FRESH_MIN
+        for r in _warn:
+            _msg = (f"🧐 **{r['slug']}** — sanity check (sync {_label} รอบ {_when}): "
+                    + " | ".join(r["warnings"]))
+            if _stale_warn:
+                _old_warn_lines.append(_msg)
+            else:
+                st.warning(_msg)
+        # สายที่ "เงียบหายไป" อันตรายกว่าสายที่ล้มเหลว เพราะไม่มีอะไรฟ้อง — กาไว้ให้เห็นตรงนี้
+        # (เพดานเดียวกับ watchdog ใน notify_sync.ps1: คาบเดินจริง + เผื่อรอบที่ข้ามเพราะ lock)
+        _limit_min = {"full": 900, "fast": 75, "wellness": 90,
+                      "backup": 1800}.get(_sync.get("lane", ""))
         _quiet = _limit_min is not None and _age_min is not None and _age_min > _limit_min
         _mark = "❌" if _fail else ("⏰" if _quiet else "✅")
         _lane_lines.append(f"{_mark} {_label}: {_when}"
                            + (f" (เงียบมา {_age_min / 60:.1f} ชม.)" if _quiet else ""))
+    if _old_warn_lines:
+        with st.expander(f"🧐 ผลตรวจ sanity จากรอบเก่า ({len(_old_warn_lines)} รายการ)"):
+            for _line in _old_warn_lines:
+                st.markdown("- " + _line)
     if _lane_lines:
         # st.caption ไม่รับ HTML — ใช้ตัวคั่นธรรมดา ไม่ใช่ &nbsp; แบบบรรทัด st.markdown ด้านบน
         st.caption("รอบ sync ล่าสุดของแต่ละสายงาน — " + "  ·  ".join(_lane_lines))

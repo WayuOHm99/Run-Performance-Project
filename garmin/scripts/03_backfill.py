@@ -970,6 +970,13 @@ def write_status(slug, ok, reason="ok", error=None,
     tmp.replace(STATUS_DIR / f"{slug}.json")
 
 
+# วัน wellness ที่ว่าง "เตือนแล้วต้องทำอะไรได้" — เกิน 14 วันไปแล้วตามเก็บไม่ได้
+# (นาฬิกาเก็บข้อมูลรายวันย้อนหลังได้ไม่กี่สัปดาห์ ส่วนวันที่ไม่ได้ใส่นาฬิกาก็ว่างถาวรอยู่ดี)
+# ไม่มีเพดานนี้ = สายที่มองย้อนไกล (deep 45 วัน / reconcile 90 วัน) ขุดวันเดิมมาเตือนซ้ำทุกรอบ
+WELLNESS_GAP_WARN_DAYS = 14
+WELLNESS_GAP_DAYS_LISTED = 6      # วันที่ว่างเยอะ ๆ ไม่ต้องไล่ทั้งหมด — สรุปท้ายพอ
+
+
 def sanity_check(conn, athlete_id, start_date, end_date, *,
                  include_wellness=True, include_activities=True):
     """ตรวจความสมบูรณ์ของข้อมูลช่วงที่เพิ่งดึง — คืน list ข้อความเตือน (ว่าง = ปกติ).
@@ -997,18 +1004,24 @@ def sanity_check(conn, athlete_id, start_date, end_date, *,
                 elif hr is None:
                     warns.append(f"วิ่ง {day} ไม่มี HR — เช็คนาฬิกา/สายวัด (id {act_id})")
 
-    # 2) วัน wellness ที่ว่างทั้งแถว เฉพาะวันที่จบไปแล้ว — วันนี้ยังไม่จบวัน ค่าอาจยังไม่มา ไม่นับ
+    # 2) วัน wellness ที่ว่างทั้งแถว เฉพาะวันที่จบไปแล้วและยังอยู่ในหน้าต่างที่ตามเก็บทัน
     #    (ปกติ = นักกีฬายังไม่เปิดแอป Garmin ให้นาฬิกา sync ขึ้น cloud — ตามคนได้ตรงจุด)
+    #    วันนี้ยังไม่จบวัน ค่าอาจยังไม่มา ไม่นับ / เก่าเกิน WELLNESS_GAP_WARN_DAYS ก็ไม่นับ
+    #    เพราะเตือนแล้วทำอะไรไม่ได้ กลายเป็นแถบเหลืองค้างหน้า dashboard จนคนเลิกอ่านคำเตือน
     if include_wellness:
         rows = conn.execute(
             """SELECT calendar_date FROM fact_daily_wellness
                WHERE athlete_id = ? AND calendar_date BETWEEN ? AND ?
                  AND calendar_date < date('now', 'localtime')
+                 AND calendar_date >= date('now', 'localtime', ?)
                  AND resting_hr IS NULL AND sleep_score IS NULL AND body_battery_high IS NULL
                ORDER BY calendar_date""",
-            (athlete_id, str(start_date), str(end_date))).fetchall()
+            (athlete_id, str(start_date), str(end_date),
+             f"-{WELLNESS_GAP_WARN_DAYS} days")).fetchall()
         if rows:
-            days = ", ".join(r[0] for r in rows)
+            days = ", ".join(r[0] for r in rows[:WELLNESS_GAP_DAYS_LISTED])
+            if len(rows) > WELLNESS_GAP_DAYS_LISTED:
+                days += f" และอีก {len(rows) - WELLNESS_GAP_DAYS_LISTED} วัน"
             warns.append(f"wellness ว่างทั้งวัน: {days} — นักกีฬาอาจยังไม่ได้ sync นาฬิกาเข้าแอป")
 
     return warns

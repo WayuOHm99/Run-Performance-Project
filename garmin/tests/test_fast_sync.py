@@ -627,5 +627,52 @@ class LoginErrorClassificationTest(unittest.TestCase):
         self.assertEqual(backfill.classify_login_error(a), "token")
 
 
+WELLNESS_GAP_OLD_DAYS = backfill.WELLNESS_GAP_WARN_DAYS + 3
+
+
+class SanityWellnessGapTests(unittest.TestCase):
+    """วัน wellness ว่างเตือนได้เฉพาะช่วงที่ยังตามเก็บทัน — ไม่งั้น deep resync (45 วัน)
+    ขุดวันเดิมเมื่อเดือนก่อนมาแปะแถบเหลืองค้างหน้า dashboard ทุกรอบ (เจอจริง 3 ส.ค. 69: tong)."""
+
+    def _db_with_empty_days(self, days):
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+        for day in days:
+            conn.execute(
+                "INSERT INTO fact_daily_wellness (athlete_id, calendar_date, steps)"
+                " VALUES (1, ?, 0)",
+                (day.isoformat(),),
+            )
+        return conn
+
+    def _check(self, conn, start, end):
+        return backfill.sanity_check(conn, 1, start, end,
+                                     include_activities=False, include_wellness=True)
+
+    def test_recent_empty_day_still_warns(self):
+        today = backfill.date.today()
+        gap = today - backfill.timedelta(days=2)
+        warns = self._check(self._db_with_empty_days([gap]),
+                            today - backfill.timedelta(days=45), today)
+        self.assertEqual(len(warns), 1)
+        self.assertIn(gap.isoformat(), warns[0])
+
+    def test_old_empty_day_is_not_worth_a_warning(self):
+        today = backfill.date.today()
+        gap = today - backfill.timedelta(days=WELLNESS_GAP_OLD_DAYS)
+        warns = self._check(self._db_with_empty_days([gap]),
+                            today - backfill.timedelta(days=45), today)
+        self.assertEqual(warns, [])
+
+    def test_long_gap_list_is_summarised(self):
+        today = backfill.date.today()
+        days = [today - backfill.timedelta(days=n) for n in range(1, 11)]
+        warns = self._check(self._db_with_empty_days(days),
+                            today - backfill.timedelta(days=45), today)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("และอีก", warns[0])
+        self.assertLessEqual(warns[0].count("-"), 2 * backfill.WELLNESS_GAP_DAYS_LISTED)
+
+
 if __name__ == "__main__":
     unittest.main()
