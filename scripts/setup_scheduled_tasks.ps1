@@ -92,7 +92,15 @@ $tasks = @(
         Exe         = 'wscript.exe'
         Script      = Join-Path $scripts 'backup-hidden.vbs'
         TimeLimit   = 'PT4H'         # เดิม 72 ชม. = งานที่ค้างจะกอดยาวข้ามคืนถัดไป
-        OnBattery   = $false         # backup ใหญ่ ไม่ต้องรันตอนใช้แบต
+        # ⚠️ ต้องเป็น $true — เครื่องนี้เป็นโน้ตบุ๊ก (5 ส.ค. 69)
+        #   เดิมตั้ง $false ด้วยเหตุผล "backup ใหญ่ ไม่ต้องรันตอนใช้แบต" ผลคือ Windows
+        #   ได้สิทธิ์ทั้ง **ไม่เริ่ม** (DisallowStartIfOnBatteries) และ **ฆ่ากลางคัน**
+        #   (StopIfGoingOnBatteries) — เงียบสนิททั้งสองแบบ ไม่มี marker ไม่มี toast
+        #   เจอจริง 4 ส.ค. 22:00: เครื่องตื่นอยู่ (full sync log 22:00:02) แต่เสียบสายไม่อยู่
+        #   → backup ไม่เริ่มเลย และ StartWhenAvailable ตอนตื่นเช้าก็ถูกบล็อกด้วยเหตุผล
+        #   เดียวกัน = หายทั้งคืน ทั้งที่งานนี้ถือ**สำเนาเดียว**ของ garmin.db
+        #   งานจริงเบามาก (mirror ~41MB + sqlite snapshot) ไม่คุ้มกับการยอมเสียสำเนา
+        OnBattery   = $true
         Triggers    = { @(New-ScheduledTaskTrigger -Daily -At '22:00') }
         Optional    = $false
     },
