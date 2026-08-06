@@ -112,12 +112,19 @@ $tasks = @(
         Script      = Join-Path $garmin 'garmin-reconcile-hidden.vbs'
         TimeLimit   = 'PT2H'
         OnBattery   = $true
-        Triggers    = { @(New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '09:30') }
+        # ตรึง anchor เป็นวันอาทิตย์เหมือน DeepSync — รายสัปดาห์ (WeeksInterval 1) อาการ
+        # ยังไม่ออกเพราะทุกอาทิตย์เป็นรอบอยู่แล้ว แต่ถ้าวันหลังเปลี่ยนเป็นทุก 2/4 สัปดาห์
+        # แล้ว anchor ยังเป็นวันที่รันสคริปต์ จะเจอบั๊กเดียวกับที่ DeepSync เพิ่งเจอ
+        Triggers    = {
+            $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '09:30'
+            $trigger.StartBoundary = '2026-08-09T09:30:00'
+            $trigger
+        }
         Optional    = $true
     },
     @{
         Name        = 'Run-Performance-Garmin-DeepSync'
-        Desc        = 'deep resync wellness ย้อน 45 วัน + ตรวจ schema drift (เดือนละครั้ง วันที่ 1)'
+        Desc        = 'deep resync wellness ย้อน 45 วัน + ตรวจ schema drift (ทุก 4 สัปดาห์ วันอาทิตย์ เวลา 10:30)'
         # เคยเปิดจอดำแล้วโดนปิดกลางคันจริง (2 ส.ค. 69 exit 0xC000013A ค้างที่ Day 1/46)
         # รอบนี้กินเวลาหลายนาที ยิ่งเปิดค้างยิ่งเสี่ยง → ซ่อนหน้าต่างเหมือนสายอื่น
         Exe         = 'wscript.exe'
@@ -125,10 +132,55 @@ $tasks = @(
         TimeLimit   = 'PT4H'
         OnBattery   = $true
         # Task Scheduler ไม่มี -Monthly ใน cmdlet → ใช้รายสัปดาห์ทุก 4 สัปดาห์แทน
-        Triggers    = { @(New-ScheduledTaskTrigger -Weekly -WeeksInterval 4 -DaysOfWeek Sunday -At '10:30') }
+        #
+        # ⚠️ ต้องตรึง StartBoundary เองเป็น "วันอาทิตย์" (แก้ 6 ส.ค. 69)
+        #   New-ScheduledTaskTrigger ตั้ง StartBoundary = **วันที่บังเอิญรันสคริปต์นี้**
+        #   แล้วเปลี่ยนแค่เวลา → รันวันจันทร์ที่ 3 ส.ค. ได้ anchor เป็นวันจันทร์ ทั้งที่
+        #   trigger สั่งวันอาทิตย์ ผลคือ Windows คำนวณรอบถัดไปเป็น 9 ส.ค. (ห่าง 1 สัปดาห์)
+        #   ไม่ใช่ 31 ส.ค. ตามเจตนา "ทุก 4 สัปดาห์" — และ cadence จะเลื่อนทุกครั้งที่มีคน
+        #   รันสคริปต์นี้ซ้ำ ซึ่งขัดกับที่ตั้งใจให้ไฟล์นี้ idempotent
+        #   anchor 2 ส.ค. 69 = วันอาทิตย์จริง และเป็นรอบ deepsync อัตโนมัติรอบล่าสุด
+        #   → นับ 4 สัปดาห์ต่อได้พอดีเป็น 30 ส.ค. โดยไม่เลื่อนออกจากจังหวะเดิม
+        Triggers    = {
+            $trigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 4 -DaysOfWeek Sunday -At '10:30'
+            $trigger.StartBoundary = '2026-08-02T10:30:00'
+            $trigger
+        }
         Optional    = $true
     }
 )
+
+# ---------------- ตรวจ anchor ของ trigger รายสัปดาห์ ----------------
+# ทำไมต้องมี: New-ScheduledTaskTrigger ตั้ง StartBoundary เป็น "วันที่รันสคริปต์นี้"
+# ถ้าวันนั้นไม่ใช่วันที่ระบุใน -DaysOfWeek การนับ WeeksInterval จะยึดจากวันสุ่ม
+# → cadence เพี้ยนเงียบ ๆ (เจอจริง 6 ส.ค. 69: DeepSync ตั้ง "ทุก 4 สัปดาห์ วันอาทิตย์"
+# แต่ Windows คำนวณรอบถัดไปห่างแค่ 1 สัปดาห์ เพราะ anchor เป็นวันจันทร์)
+# อาการนี้มองจากในสคริปต์ไม่เห็นเลย ต้องไป export XML ถึงจะรู้ → ให้สคริปต์ตรวจเองแทน
+function Test-WeeklyTriggerAnchor {
+    param($Triggers)
+
+    $problems = @()
+    foreach ($tr in $Triggers) {
+        # trigger รายสัปดาห์เท่านั้น (รายวัน/-Once ไม่มี DaysOfWeek หรือเป็น 0)
+        $dowProp = $tr.PSObject.Properties['DaysOfWeek']
+        if (-not $dowProp -or -not $dowProp.Value) { continue }
+        if (-not $tr.StartBoundary) { continue }
+
+        $mask   = [int]$dowProp.Value          # bitmask: อาทิตย์=1, จันทร์=2, ... เสาร์=64
+        $anchor = [datetime]$tr.StartBoundary
+        $bit    = [int][math]::Pow(2, [int]$anchor.DayOfWeek)
+
+        if (($mask -band $bit) -eq 0) {
+            $wanted = @('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday') |
+                      Where-Object { $mask -band [int][math]::Pow(2, [array]::IndexOf(
+                          @('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'), $_)) }
+            $problems += ("StartBoundary {0} เป็นวัน{1} แต่ trigger สั่งวัน {2} — " -f
+                            $anchor.ToString('yyyy-MM-dd HH:mm'), $anchor.DayOfWeek, ($wanted -join '/')) +
+                         "การนับ WeeksInterval จะยึดจากวันที่ผิด ทำให้รอบเพี้ยน"
+        }
+    }
+    return $problems
+}
 
 # ---------------- ลงทะเบียน ----------------
 
@@ -162,6 +214,26 @@ foreach ($t in $tasks) {
     Write-Host "         $($t.Exe) $argument"
     Write-Host "         $($t.Desc)" -ForegroundColor DarkGray
 
+    # สร้าง trigger ก่อนแล้วตรวจ anchor — ต้องกันตั้งแต่ก่อนลงทะเบียน เพราะพอลงไปแล้ว
+    # อาการจะเงียบสนิท (task ขึ้น Ready ปกติ แค่ยิงผิดจังหวะ) กว่าจะรู้ต้อง export XML ดู
+    $triggers = & $t.Triggers
+    $anchorProblems = Test-WeeklyTriggerAnchor $triggers
+    if ($anchorProblems) {
+        foreach ($p in $anchorProblems) {
+            Write-Host "         [anchor ผิด] $p" -ForegroundColor Red
+        }
+        Write-Host "         → ไม่ลงทะเบียน task นี้ (แก้ StartBoundary ในนิยาม task ก่อน)" -ForegroundColor Red
+        $failed++
+        continue
+    }
+    foreach ($tr in $triggers) {
+        if ($tr.PSObject.Properties['DaysOfWeek'] -and $tr.DaysOfWeek) {
+            Write-Host ("         anchor: {0} (ทุก {1} สัปดาห์)" -f `
+                        ([datetime]$tr.StartBoundary).ToString('yyyy-MM-dd HH:mm dddd'),
+                        $(if ($tr.WeeksInterval) { $tr.WeeksInterval } else { 1 })) -ForegroundColor DarkGray
+        }
+    }
+
     if ($DryRun) { $ok++; continue }
 
     try {
@@ -181,7 +253,7 @@ foreach ($t in $tasks) {
                         -DontStopIfGoingOnBatteries:$t.OnBattery
 
         Register-ScheduledTask -TaskName $t.Name -Description $t.Desc `
-            -Action $action -Trigger (& $t.Triggers) `
+            -Action $action -Trigger $triggers `
             -Principal $principal -Settings $settings -Force | Out-Null
 
         $ok++
