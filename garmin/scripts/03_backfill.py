@@ -19,10 +19,32 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "garmin.db"
+# ⚠️ path ที่เขียนได้ต้องแตกจาก DATA_DIR ที่เดียว (เหมือน fetch_all.py) — เทสจะได้ย้าย
+# ทั้งชุดไป temp dir ได้ด้วยคำสั่งเดียว ไม่ใช่ไล่ patch ทีละตัวแล้วลืมตัวใดตัวหนึ่ง
+# ไฟล์นี้ถือ garmin.db ซึ่งเป็นสำเนาเดียวของข้อมูลสุขภาพทั้งทีม — เขียนพลาดแปลว่าข้อมูลจริงเสีย
+DATA_DIR = PROJECT_ROOT / "data"
+DB_PATH = DATA_DIR / "garmin.db"
 # สถานะรายคนของรอบ sync ล่าสุด — fetch_all.py อ่านไปรวมเป็น data/sync_status.json
 # เพื่อให้ toast/dashboard บอกได้ว่าใครพังเพราะอะไร (token/เน็ต) และข้อมูลมีจุดน่าสงสัยไหม
-STATUS_DIR = PROJECT_ROOT / "data" / "sync_status"
+STATUS_DIR = DATA_DIR / "sync_status"
+
+
+def use_data_dir(path) -> Path:
+    """ชี้ DB + ไฟล์สถานะไปโฟลเดอร์ใหม่ คืนโฟลเดอร์เดิม (จุดฉีดจุดเดียวของไฟล์นี้).
+
+    fetch_all เรียก 03_backfill เป็น subprocess พร้อม os.environ ทั้งก้อน →
+    ตั้ง GARMIN_DATA_DIR ที่ตัวแม่แล้วลูกย้ายตามเอง ไม่มีใครหลุดไปเขียนของจริง
+    """
+    global DATA_DIR, DB_PATH, STATUS_DIR
+    previous = DATA_DIR
+    DATA_DIR = Path(path)
+    DB_PATH = DATA_DIR / "garmin.db"
+    STATUS_DIR = DATA_DIR / "sync_status"
+    return previous
+
+
+if os.environ.get("GARMIN_DATA_DIR"):
+    use_data_dir(os.environ["GARMIN_DATA_DIR"])
 
 # กันการเชื่อมต่อค้างไม่รู้จบ: เคยเจอ SSL recv ค้างจน Task แขวนข้ามวัน (21 ก.ค. 69)
 # requests/urllib3 ไม่ตั้ง timeout เอง → ตั้ง default ให้ทุก socket แทน

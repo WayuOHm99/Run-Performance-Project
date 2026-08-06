@@ -40,12 +40,40 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent      # D:\Run-Performance\
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 TOKENS_DIR = PROJECT_ROOT / "tokens"
 BACKFILL = SCRIPTS_DIR / "03_backfill.py"
-STATUS_DIR = PROJECT_ROOT / "data" / "sync_status"          # สถานะรายคน (03_backfill เขียน)
-STATUS_FILE = PROJECT_ROOT / "data" / "sync_status.json"    # สถานะรวมรอบล่าสุด (ไฟล์นี้เขียน)
-LOCK_FILE = PROJECT_ROOT / "data" / "sync.lock"
+
+# ⚠️ ทุก path ที่ "เขียนได้" ต้องแตกจาก DATA_DIR ที่เดียว และย้ายได้ด้วย use_data_dir()
+# เคยพังจริง 6 ส.ค. 69: เทส orchestration patch แค่ STATUS_FILE แต่ลืม LANE_STATUS_DIR
+# → รัน unittest แล้วเขียนทับ data/sync_lane/fast.json ของจริงด้วยนักกีฬาปลอม
+# (athlete-a/b/c) แล้ว dashboard ก็โชว์ตามนั้นจนกว่ารอบ sync ถัดไปจะมาทับกลับ
+# ทางแก้คือไม่ให้เทสต้อง "จำว่ามีกี่ path" — ย้าย DATA_DIR ทีเดียวแล้วย้ายครบทั้งชุด
+DATA_DIR = PROJECT_ROOT / "data"
+STATUS_DIR = DATA_DIR / "sync_status"          # สถานะรายคน (03_backfill เขียน)
+STATUS_FILE = DATA_DIR / "sync_status.json"    # สถานะรวมรอบล่าสุด (ไฟล์นี้เขียน)
+LOCK_FILE = DATA_DIR / "sync.lock"
 # สถานะรอบล่าสุด "แยกตามสายงาน" — จำเป็นตั้งแต่มีหลายสาย (full/fast/wellness) เพราะทุกสาย
 # เขียน sync_status.json ทับกัน: full sync 21:00 ล้มแล้ว wellness 21:08 ผ่าน จะกลบร่องรอยหมด
-LANE_STATUS_DIR = PROJECT_ROOT / "data" / "sync_lane"
+LANE_STATUS_DIR = DATA_DIR / "sync_lane"
+
+
+def use_data_dir(path) -> Path:
+    """ชี้ไฟล์สถานะ "ทั้งชุด" ไปโฟลเดอร์ใหม่ แล้วคืนโฟลเดอร์เดิม (ไว้คืนค่าทีหลัง).
+
+    จุดฉีดจุดเดียวของโมดูลนี้ — เพิ่มไฟล์สถานะใหม่เมื่อไหร่ให้แตกจาก DATA_DIR
+    แล้วมันจะถูกย้ายตามเองโดยที่เทสไม่ต้องรู้ว่ามีไฟล์อะไรเพิ่มมา
+    """
+    global DATA_DIR, STATUS_DIR, STATUS_FILE, LOCK_FILE, LANE_STATUS_DIR
+    previous = DATA_DIR
+    DATA_DIR = Path(path)
+    STATUS_DIR = DATA_DIR / "sync_status"
+    STATUS_FILE = DATA_DIR / "sync_status.json"
+    LOCK_FILE = DATA_DIR / "sync.lock"
+    LANE_STATUS_DIR = DATA_DIR / "sync_lane"
+    return previous
+
+
+# ให้ย้ายทั้งชุดจากข้างนอกได้โดยไม่ต้องแก้โค้ด (เทส/รันซ้อมมือบนสำเนา DB)
+if os.environ.get("GARMIN_DATA_DIR"):
+    use_data_dir(os.environ["GARMIN_DATA_DIR"])
 # เพดานเวลาต่อคน: สายถี่ต้องยอมแพ้เร็ว ไม่งั้นคนที่ค้างจะกอด sync.lock ไว้จนสายอื่นอดทั้งชั่วโมง
 # (Task ของสายถี่ถูก Windows ฆ่าที่ 10/20 นาทีอยู่แล้ว — ตัดเองก่อนดีกว่าโดนฆ่ากลางเขียน DB)
 ATHLETE_TIMEOUT_SEC = {"fast": 240, "wellness": 300}

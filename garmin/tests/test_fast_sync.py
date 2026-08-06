@@ -30,6 +30,26 @@ backfill = load_script("garmin_backfill_under_test", "03_backfill.py")
 schema = load_script("garmin_schema_under_test", "02_init_schema.py")
 fetch_all = load_script("garmin_fetch_all_under_test", "fetch_all.py")
 
+# โฟลเดอร์ข้อมูลจริงของเครื่องนี้ — ห้ามมีเทสตัวไหนแตะ ใช้เทียบใน ProductionDataIsolationTests
+PRODUCTION_DATA_DIR = GARMIN_ROOT / "data"
+
+
+class IsolatedDataDirMixin:
+    """ชี้ไฟล์สถานะ/DB ของโมดูลที่กำลังเทสไปที่ temp dir ตลอดอายุเคส.
+
+    เทสที่เรียก fetch_all.main() หรือ backfill.write_status() ต้อง mixin ตัวนี้เสมอ —
+    ไม่ใช่ไล่ patch ทีละ path เพราะวิธีนั้นพังมาแล้ว (ลืม LANE_STATUS_DIR ตัวเดียว
+    ก็เขียนทับ data/sync_lane/fast.json ของจริงด้วยนักกีฬาปลอม แล้ว dashboard โชว์ตามนั้น)
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.data_dir = Path(tempfile.mkdtemp(prefix="garmin-data-"))
+        self.addCleanup(shutil.rmtree, self.data_dir, True)
+        for module in (fetch_all, backfill):
+            previous = module.use_data_dir(self.data_dir)
+            self.addCleanup(module.use_data_dir, previous)
+
 
 def create_activity_db():
     conn = sqlite3.connect(":memory:")
@@ -423,7 +443,7 @@ class FastWellnessTests(unittest.TestCase):
         self.assertEqual(row, (22.1, 48.0))
 
 
-class FetchAllOrchestrationTests(unittest.TestCase):
+class FetchAllOrchestrationTests(IsolatedDataDirMixin, unittest.TestCase):
     def test_main_uses_bounded_concurrency_and_keeps_status_order(self):
         athletes = ["athlete-a", "athlete-b", "athlete-c"]
         active = 0
@@ -447,13 +467,6 @@ class FetchAllOrchestrationTests(unittest.TestCase):
         def fake_lock(_timeout):
             yield True
 
-        captured = {}
-        status_path = mock.MagicMock()
-        temp_status_path = mock.MagicMock()
-        status_path.with_suffix.return_value = temp_status_path
-        temp_status_path.write_text.side_effect = (
-            lambda text, **_kwargs: captured.update(text=text)
-        )
         argv = [
             "fetch_all.py",
             "--days",
@@ -466,13 +479,20 @@ class FetchAllOrchestrationTests(unittest.TestCase):
             mock.patch.object(fetch_all, "list_athletes", return_value=athletes),
             mock.patch.object(fetch_all, "run_athlete", side_effect=fake_run),
             mock.patch.object(fetch_all, "run_lock", side_effect=fake_lock),
-            mock.patch.object(fetch_all, "STATUS_FILE", status_path),
             mock.patch.object(sys, "argv", argv),
             self.assertRaises(SystemExit) as exited,
         ):
             fetch_all.main()
 
-        payload = fetch_all.json.loads(captured["text"])
+        # อ่านไฟล์ที่เขียนจริงใน temp dir แทนการดัก write_text ด้วย MagicMock —
+        # mock ตัวเดียวปิดตาเทสจากไฟล์ปลายทางอีกตัว (สายงาน) ที่หลุดไปเขียนของจริง
+        payload = fetch_all.json.loads(
+            fetch_all.STATUS_FILE.read_text(encoding="utf-8")
+        )
+        lane_payload = fetch_all.json.loads(
+            (fetch_all.LANE_STATUS_DIR / "fast.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(lane_payload, payload)
         self.assertEqual(exited.exception.code, 0)
         self.assertEqual(max_active, 2)
         self.assertEqual(
@@ -483,21 +503,16 @@ class FetchAllOrchestrationTests(unittest.TestCase):
         self.assertEqual(set(timeouts), {fetch_all.ATHLETE_TIMEOUT_SEC["fast"]})
 
 
-class CatchUpSlotTests(unittest.TestCase):
+class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
     """--catch-up-slots: Task ยิงทุกชั่วโมง แต่ต้องทำงานจริงแค่ช่องละครั้ง."""
 
     def setUp(self):
-        self.lane_dir = Path(
-            tempfile.mkdtemp(prefix="lane-", dir=None)
-        )
-        self.addCleanup(shutil.rmtree, self.lane_dir, True)
-        patcher = mock.patch.object(fetch_all, "LANE_STATUS_DIR", self.lane_dir)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        super().setUp()
         self.slots = fetch_all.parse_slots("08:00,21:00")
 
     def write_lane(self, run_at):
-        (self.lane_dir / "full.json").write_text(
+        fetch_all.LANE_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        (fetch_all.LANE_STATUS_DIR / "full.json").write_text(
             fetch_all.json.dumps({"run_at": run_at.isoformat(timespec="seconds")}),
             encoding="utf-8",
         )
@@ -764,6 +779,105 @@ class SanityWellnessGapTests(unittest.TestCase):
         self.assertEqual(len(warns), 1)
         self.assertIn("และอีก", warns[0])
         self.assertLessEqual(warns[0].count("-"), 2 * backfill.WELLNESS_GAP_DAYS_LISTED)
+
+
+class ProductionDataIsolationTests(IsolatedDataDirMixin, unittest.TestCase):
+    """รัน unittest แล้วต้องไม่แตะ garmin/data ของจริงเลยสักไฟล์.
+
+    ทำไมไม่เทียบ hash ก่อน/หลังตรง ๆ: เครื่องนี้มี Scheduled Task เขียนไฟล์พวกนี้อยู่จริง
+    ทุก 15 นาที (fast) / 30 นาที (wellness) — เทียบ byte จะแดงเพราะ sync ของจริงเดินคาบเกี่ยว
+    ไม่ใช่เพราะเทสรั่ว. จึงจับ "ลายนิ้วมือของเทส" แทน: slug สังเคราะห์ที่มีแต่ในเทสเท่านั้น
+    ต้องไม่โผล่ในไฟล์จริงสักไฟล์ — เงื่อนไขนี้ deterministic และตรงกับอาการที่เคยเกิดจริง
+    (6 ส.ค. 69: data/sync_lane/fast.json ของจริงกลายเป็น athlete-a/b/c)
+    """
+
+    SENTINEL = "zz-synthetic-athlete-do-not-persist"
+
+    # path ที่อ่านอย่างเดียว — อยู่นอก DATA_DIR ได้ ที่เหลือต้องแตกจาก DATA_DIR ทั้งหมด
+    READ_ONLY_PATHS = {"PROJECT_ROOT", "SCRIPTS_DIR", "TOKENS_DIR", "BACKFILL"}
+
+    @staticmethod
+    def production_files():
+        """ไฟล์สถานะจริงที่เทสอาจเผลอไปเขียน (ข้าม garmin.db/-wal/sync.lock ที่ sync
+        ของจริงอาจถือ handle อยู่ — เปิดอ่านตอนนั้นจะโดน PermissionError บน Windows
+        แล้วเทสแดงเพราะเรื่องที่ไม่เกี่ยวกับการรั่ว. DB ถูกคุ้มครองด้วยเทสโครงสร้างแทน)"""
+        if not PRODUCTION_DATA_DIR.exists():
+            return []
+        return sorted(
+            p for p in PRODUCTION_DATA_DIR.rglob("*")
+            if p.is_file() and p.suffix in {".json", ".txt"}
+        )
+
+    @staticmethod
+    def read_safe(path):
+        try:
+            return path.read_bytes()
+        except OSError:      # sync ของจริงถือไฟล์อยู่พอดี — ไม่ใช่หลักฐานการรั่ว
+            return None
+
+    def test_isolation_is_actually_engaged(self):
+        # ถ้า mixin หยุดทำงานเงียบ ๆ เทสอื่นจะไปเขียนของจริงโดยไม่มีใครรู้
+        for module in (fetch_all, backfill):
+            with self.subTest(module=module.__name__):
+                self.assertEqual(module.DATA_DIR, self.data_dir)
+                self.assertNotEqual(module.DATA_DIR, PRODUCTION_DATA_DIR)
+
+    def test_every_writable_path_derives_from_the_data_dir(self):
+        # กันกรณีเพิ่มไฟล์สถานะใหม่แล้วลืมให้มันแตกจาก DATA_DIR — ตัวที่หลุดจะรอดการ
+        # isolate ทั้งหมดแล้วไปเขียนของจริงเวลารันเทส เหมือนที่ LANE_STATUS_DIR เคยเป็น
+        for module in (fetch_all, backfill):
+            for name in dir(module):
+                if name in self.READ_ONLY_PATHS or name.startswith("_"):
+                    continue
+                value = getattr(module, name)
+                if not isinstance(value, Path):
+                    continue
+                with self.subTest(module=module.__name__, constant=name):
+                    self.assertEqual(
+                        value.parts[: len(self.data_dir.parts)],
+                        self.data_dir.parts,
+                        f"{module.__name__}.{name} ไม่ได้แตกจาก DATA_DIR "
+                        f"→ เทสจะเขียนทับของจริงที่ {value}",
+                    )
+
+    def test_a_full_orchestration_round_leaves_production_untouched(self):
+        before = {p: self.read_safe(p) for p in self.production_files()}
+
+        @contextmanager
+        def fake_lock(_timeout):
+            yield True
+
+        def fake_run(slug, *_args, **_kwargs):
+            return {"slug": slug, "ok": True, "reason": "ok", "warnings": []}
+
+        argv = ["fetch_all.py", "--days", "0", "--activities-only"]
+        with (
+            mock.patch.object(fetch_all, "list_athletes", return_value=[self.SENTINEL]),
+            mock.patch.object(fetch_all, "run_athlete", side_effect=fake_run),
+            mock.patch.object(fetch_all, "run_lock", side_effect=fake_lock),
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaises(SystemExit),
+        ):
+            fetch_all.main()
+
+        # รอบนี้เขียนจริง (ไม่ใช่ no-op ที่ผ่านเทสฟรี ๆ) แต่เขียนลง temp dir เท่านั้น
+        self.assertIn(self.SENTINEL, fetch_all.STATUS_FILE.read_text(encoding="utf-8"))
+        self.assertTrue((fetch_all.LANE_STATUS_DIR / "fast.json").exists())
+
+        for path in self.production_files():
+            after = self.read_safe(path)
+            if after is None:
+                continue
+            with self.subTest(path=path.name):
+                self.assertNotIn(
+                    self.SENTINEL,
+                    after.decode("utf-8", errors="ignore"),
+                    f"เทสรั่วไปเขียน {path}",
+                )
+                # ไฟล์ที่มีอยู่ก่อนต้องไม่ถูกแตะ (ไฟล์ที่ sync จริงเพิ่งเขียนระหว่างเทส
+                # จะไม่อยู่ใน before — ข้ามไป เพราะนั่นคือของจริงไม่ใช่ฝีมือเทส)
+                if before.get(path) is not None:
+                    self.assertEqual(before[path], after)
 
 
 if __name__ == "__main__":
