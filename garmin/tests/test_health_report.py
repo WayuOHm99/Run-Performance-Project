@@ -1,0 +1,507 @@
+"""เทส health_report.py — ทุกเคสใช้ temp directory + ข้อมูลสังเคราะห์ล้วน ห้ามแตะ
+garmin/data ของจริง ยกเว้น LaneLimitConsistencyRealFilesTest ที่ตั้งใจอ่าน (read-only)
+dashboard.py / notify_sync.ps1 จริงของโปรเจกต์ เพื่อพิสูจน์ว่าค่าที่ deploy จริงตรงกัน
+(ตามข้อยกเว้นที่อนุญาตไว้)"""
+
+import importlib.util
+import io
+import json
+import shutil
+import sqlite3
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
+
+GARMIN_ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_script(name, filename):
+    spec = importlib.util.spec_from_file_location(name, GARMIN_ROOT / "scripts" / filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+hr = load_script("garmin_health_report_under_test", "health_report.py")
+
+PRODUCTION_DATA_DIR = GARMIN_ROOT / "data"
+
+
+class IsolatedHealthDirMixin:
+    """ชี้ DATA_DIR/BACKUP_DIR ของ health_report ไป temp dir ตลอดอายุเคส — ไม่มีเคสไหน
+    แตะ garmin/data หรือ C:\\Backup ของจริงเลย"""
+
+    def setUp(self):
+        super().setUp()
+        self.data_dir = Path(tempfile.mkdtemp(prefix="health-data-"))
+        self.backup_dir = Path(tempfile.mkdtemp(prefix="health-backup-"))
+        self.addCleanup(shutil.rmtree, self.data_dir, True)
+        self.addCleanup(shutil.rmtree, self.backup_dir, True)
+        prev_data = hr.use_data_dir(self.data_dir)
+        prev_backup = hr.use_backup_dir(self.backup_dir)
+        self.addCleanup(hr.use_data_dir, prev_data)
+        self.addCleanup(hr.use_backup_dir, prev_backup)
+
+    # ── ตัวช่วยสร้างข้อมูลสังเคราะห์ ──
+
+    def write_lane_status(self, lane, run_at, ok=True, reason="ok", warnings=None):
+        d = self.data_dir / "sync_lane"
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_at": run_at.isoformat(timespec="seconds"),
+            "lane": lane,
+            "results": [{"slug": "synthetic", "ok": ok, "reason": reason, "warnings": warnings or []}],
+        }
+        (d / f"{lane}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def write_marker(self, name, at):
+        (self.data_dir / name).write_text(at.isoformat(), encoding="utf-8")
+
+    def write_raw_marker(self, name, raw_text):
+        (self.data_dir / name).write_text(raw_text, encoding="utf-8")
+
+    def write_raw_lane(self, lane, raw_run_at, ok=True, reason="ok"):
+        d = self.data_dir / "sync_lane"
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {"run_at": raw_run_at, "lane": lane,
+                   "results": [{"slug": "synthetic", "ok": ok, "reason": reason, "warnings": []}]}
+        (d / f"{lane}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def find(findings, prefix):
+    return [f for f in findings if f.check.startswith(prefix)]
+
+
+class ScheduledTaskChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def test_task_reports_error_when_lane_status_says_failed(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        self.write_lane_status("fast", now - timedelta(minutes=5), ok=False, reason="token")
+
+        def provider(task_name):
+            return "TaskName: \\Run-Performance-Garmin-Fast\nLast Run Time: 8/6/2026 11:55:00 AM\nLast Result: 1\n"
+
+        findings = hr.check_scheduled_tasks(provider=provider, now=now)
+        fast = [f for f in findings if f.check == "scheduled_task:Run-Performance-Garmin-Fast"]
+        self.assertEqual(len(fast), 1)
+        self.assertEqual(fast[0].level, hr.ERROR)
+        self.assertIn("token", fast[0].message)
+
+    def test_task_never_run_is_warning_not_error(self):
+        def provider(task_name):
+            return "TaskName: \\Run-Performance-Garmin-DeepSync\nLast Run Time: N/A\nLast Result: N/A\n"
+
+        findings = hr.check_scheduled_tasks(provider=provider)
+        deep = [f for f in findings if f.check == "scheduled_task:Run-Performance-Garmin-DeepSync"]
+        self.assertEqual(len(deep), 1)
+        self.assertEqual(deep[0].level, hr.WARNING)
+        self.assertIn("ยังไม่เคยรัน", deep[0].message)
+
+    def test_task_ok_when_last_result_zero_and_lane_ok(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        self.write_lane_status("wellness", now - timedelta(minutes=2), ok=True)
+
+        def provider(task_name):
+            return "Last Run Time: 8/6/2026 11:58:00 AM\nLast Result: 0\n"
+
+        findings = hr.check_scheduled_tasks(provider=provider, now=now)
+        wellness = [f for f in findings if f.check == "scheduled_task:Run-Performance-Garmin-Wellness"]
+        self.assertEqual(wellness[0].level, hr.OK)
+
+    def test_non_windows_provider_is_skipped_not_broken(self):
+        # จำลอง "เครื่องนี้ไม่ใช่ Windows" แบบตายตัว ไม่ผูกกับ OS จริงที่รันเทส —
+        # ต้องได้ผลเดียวกันไม่ว่าเทสจะถูกรันบน Linux (sandbox/CI) หรือ Windows (production)
+        with mock.patch.object(hr.os, "name", "posix"):
+            with self.assertRaises(hr.SchtasksUnavailable):
+                hr.default_schtasks_provider("Run-Performance-Garmin-Fast")
+
+            findings = hr.check_scheduled_tasks(provider=hr.default_schtasks_provider)
+        self.assertEqual(len(findings), len(hr.SCHEDULED_TASKS))
+        for f in findings:
+            self.assertEqual(f.level, hr.WARNING, msg=f.message)
+            self.assertIn("skipped", f.message)
+            self.assertNotEqual(f.level, hr.ERROR)
+
+
+class LaneFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def test_stale_lane_is_error(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        # เกินเพดาน fast (75 นาที) ไปมาก
+        self.write_lane_status("fast", now - timedelta(hours=5))
+        findings = hr.check_lane_freshness(now=now)
+        fast = find(findings, "lane_freshness:fast")
+        self.assertEqual(fast[0].level, hr.ERROR)
+
+    def test_fresh_lane_is_ok(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        self.write_lane_status("wellness", now - timedelta(minutes=5))
+        findings = hr.check_lane_freshness(now=now)
+        wellness = find(findings, "lane_freshness:wellness")
+        self.assertEqual(wellness[0].level, hr.OK)
+
+    def test_missing_lane_status_is_warning(self):
+        findings = hr.check_lane_freshness()
+        deep = find(findings, "lane_freshness:deep")
+        self.assertEqual(deep[0].level, hr.WARNING)
+
+
+class UnfinishedRunTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def test_started_and_never_finished_is_error(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        # marker เริ่มไว้นานเกิน grace ของ full (30 นาที) แต่ไม่มีสถานะของรอบนั้นตามมา
+        self.write_marker("sync_run_start.txt", now - timedelta(minutes=90))
+        findings = hr.check_unfinished_runs(now=now)
+        full = find(findings, "unfinished_run:full")
+        self.assertEqual(len(full), 1)
+        self.assertEqual(full[0].level, hr.ERROR)
+
+    def test_started_and_finished_reports_nothing_for_that_lane(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        started = now - timedelta(minutes=5)
+        self.write_marker("sync_run_start.txt", started)
+        self.write_lane_status("full", started + timedelta(minutes=2))
+        findings = hr.check_unfinished_runs(now=now)
+        full = find(findings, "unfinished_run:full")
+        self.assertEqual(full, [])
+
+    def test_still_within_grace_is_ok(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        self.write_marker("sync_fast_run_start.txt", now - timedelta(minutes=2))  # grace fast = 10
+        findings = hr.check_unfinished_runs(now=now)
+        fast = find(findings, "unfinished_run:fast")
+        self.assertEqual(fast[0].level, hr.OK)
+
+    def test_no_markers_at_all_reports_single_ok(self):
+        findings = hr.check_unfinished_runs()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].level, hr.OK)
+
+
+class DbIntegrityTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def test_missing_db_is_error(self):
+        findings = hr.check_db_integrity()
+        self.assertEqual(findings[0].level, hr.ERROR)
+        self.assertIn("ไม่พบไฟล์ DB", findings[0].message)
+
+    def test_healthy_db_is_ok(self):
+        conn = sqlite3.connect(str(hr.DB_PATH))
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT INTO t (v) VALUES ('x')")
+        conn.commit()
+        conn.close()
+
+        findings = hr.check_db_integrity()
+        self.assertEqual(findings[0].level, hr.OK)
+        self.assertIn("quick_check", findings[0].message)
+
+    def test_corrupted_db_is_error(self):
+        hr.DB_PATH.write_bytes(b"this is not a sqlite database file at all")
+        findings = hr.check_db_integrity()
+        self.assertEqual(findings[0].level, hr.ERROR)
+
+    def test_never_writes_to_the_db(self):
+        conn = sqlite3.connect(str(hr.DB_PATH))
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        before = hr.DB_PATH.read_bytes()
+
+        hr.check_db_integrity()
+
+        after = hr.DB_PATH.read_bytes()
+        self.assertEqual(before, after, "check_db_integrity ห้ามแก้ไฟล์ DB แม้แต่ไบต์เดียว")
+
+
+class BackupChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
+    @staticmethod
+    def _write_valid_sqlite(path, pad_bytes=20_000):
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+        conn.execute("INSERT INTO t (v) VALUES (?)", ("x" * pad_bytes,))
+        conn.commit()
+        conn.close()
+
+    def test_no_backup_files_is_error(self):
+        findings = hr.check_backup()
+        daily = find(findings, "backup:daily_files")
+        self.assertEqual(daily[0].level, hr.ERROR)
+
+    def test_missing_backup_dir_is_warning_not_error(self):
+        shutil.rmtree(self.backup_dir)
+        findings = hr.check_backup()
+        daily = find(findings, "backup:daily_files")
+        self.assertEqual(daily[0].level, hr.WARNING)
+
+    def test_old_backup_file_is_flagged(self):
+        f = self.backup_dir / "garmin-20260701.db"
+        self._write_valid_sqlite(f)
+        old_time = (datetime.now() - timedelta(hours=100)).timestamp()
+        import os as _os
+        _os.utime(f, (old_time, old_time))
+
+        findings = hr.check_backup()
+        daily = find(findings, "backup:daily_files")
+        self.assertEqual(daily[0].level, hr.ERROR)
+        self.assertIn("เก่ามาก", daily[0].message)
+
+    def test_fresh_reasonable_backup_is_ok(self):
+        f = self.backup_dir / "garmin-20260806.db"
+        self._write_valid_sqlite(f)
+        findings = hr.check_backup()
+        daily = find(findings, "backup:daily_files")
+        self.assertEqual(daily[0].level, hr.OK)
+        self.assertIn("quick_check", daily[0].message)
+
+    def test_tiny_backup_file_is_error(self):
+        f = self.backup_dir / "garmin-20260806.db"
+        f.write_bytes(b"x")  # เล็กกว่า BACKUP_MIN_BYTES มาก — เปิดเป็น sqlite ไม่ได้ด้วยซ้ำ
+        findings = hr.check_backup()
+        daily = find(findings, "backup:daily_files")
+        self.assertEqual(daily[0].level, hr.ERROR)
+
+    def test_corrupted_backup_file_is_error_even_when_size_looks_fine(self):
+        # ข้อกำหนดสำคัญ: ห้ามใช้ขนาดไฟล์ตัดสินเพียงอย่างเดียว — ไฟล์ที่ขนาดดูปกติ
+        # (เกิน BACKUP_MIN_BYTES) แต่เนื้อหาไม่ใช่ sqlite ที่ใช้งานได้ ต้องโดน ERROR จาก quick_check
+        f = self.backup_dir / "garmin-20260806.db"
+        f.write_bytes(b"garbage-not-sqlite-" * 1000)  # ~19KB มากกว่า BACKUP_MIN_BYTES แต่ใช้งานไม่ได้
+        self.assertGreater(f.stat().st_size, hr.BACKUP_MIN_BYTES)
+        findings = hr.check_backup()
+        daily = find(findings, "backup:daily_files")
+        self.assertEqual(daily[0].level, hr.ERROR)
+        self.assertIn("เปิด/ตรวจสอบไม่ผ่าน", daily[0].message)
+
+    def test_lane_reported_failure_is_error(self):
+        self.write_lane_status("backup", datetime.now(), ok=False, reason="robocopy")
+        findings = hr.check_backup()
+        lane = find(findings, "backup:lane_status")
+        self.assertEqual(lane[0].level, hr.ERROR)
+
+
+class DiskSpaceTests(unittest.TestCase):
+    def _fake_usage(self, total_gb, free_gb):
+        total = int(total_gb * 1024 ** 3)
+        free = int(free_gb * 1024 ** 3)
+        return lambda path: type("Usage", (), {"total": total, "used": total - free, "free": free})()
+
+    def test_low_disk_space_is_error(self):
+        findings = hr.check_disk_space(disk_usage=self._fake_usage(500, 1))
+        self.assertEqual(findings[0].level, hr.ERROR)
+
+    def test_warning_band(self):
+        # 7 GB / 100 GB = 7% ว่าง: พ้นเกณฑ์ ERROR (2 GB / 3%) แต่ยังต่ำกว่าเกณฑ์ WARNING (5 GB / 10%)
+        findings = hr.check_disk_space(disk_usage=self._fake_usage(100, 7))
+        self.assertEqual(findings[0].level, hr.WARNING)
+
+    def test_plenty_of_space_is_ok(self):
+        findings = hr.check_disk_space(disk_usage=self._fake_usage(500, 300))
+        self.assertEqual(findings[0].level, hr.OK)
+
+    def test_disk_usage_error_is_warning_not_crash(self):
+        def boom(path):
+            raise OSError("no such drive")
+        findings = hr.check_disk_space(disk_usage=boom)
+        self.assertEqual(findings[0].level, hr.WARNING)
+
+
+class DatetimeNormalizationTests(IsolatedHealthDirMixin, unittest.TestCase):
+    """เทส regression ของบั๊กจริงที่พังบน Windows: 'can't compare offset-naive and
+    offset-aware datetimes' ใน check_unfinished_runs() — marker เขียนโดย PowerShell
+    (Get-Date).ToString("o") ซึ่งมี timezone offset (aware) ส่วน run_at ใน sync_lane
+    เขียนโดย Python datetime.now().isoformat() ซึ่งเป็น naive"""
+
+    def test_started_aware_run_at_naive_does_not_crash(self):
+        # started_at แบบมี offset (รูปแบบจริงจาก prep_log.ps1), run_at แบบ naive
+        # (รูปแบบจริงจาก fetch_all.py) — คู่นี้คือคู่ที่ crash จริงบน Windows
+        self.write_raw_marker("sync_run_start.txt", "2026-08-06T08:14:22.123456+07:00")
+        self.write_raw_lane("full", "2026-08-06T09:30:00")
+        try:
+            findings = hr.check_unfinished_runs(now=datetime(2026, 8, 6, 10, 0, 0))
+        except TypeError as e:
+            self.fail(f"check_unfinished_runs ต้องไม่ crash เมื่อ marker/lane คนละแบบ aware/naive: {e}")
+        self.assertIsInstance(findings, list)
+
+    def test_started_naive_run_at_aware_does_not_crash(self):
+        self.write_raw_marker("sync_fast_run_start.txt", "2026-08-06T08:00:00")
+        self.write_raw_lane("fast", "2026-08-06T08:05:00+00:00")
+        try:
+            findings = hr.check_unfinished_runs(now=datetime(2026, 8, 6, 9, 0, 0))
+        except TypeError as e:
+            self.fail(f"check_unfinished_runs ต้องไม่ crash เมื่อ marker/lane คนละแบบ aware/naive: {e}")
+        self.assertIsInstance(findings, list)
+
+    def test_both_aware_different_timezones_compares_correctly(self):
+        # started_at 09:00 ที่ +07:00 (ไทย) = 02:00 UTC | run_at 03:00 ที่ +00:00 (UTC)
+        # = หลัง started_at 1 ชม. จริง ๆ (ไม่ใช่แค่ตัวเลขนาฬิกาบังเอิญมากกว่ากัน) -> ต้องถือว่า "จบแล้ว"
+        self.write_raw_marker("sync_wellness_run_start.txt", "2026-08-06T09:00:00+07:00")
+        self.write_raw_lane("wellness", "2026-08-06T03:00:00+00:00")
+        findings = hr.check_unfinished_runs(now=datetime(2026, 8, 6, 10, 0, 0, tzinfo=timezone.utc))
+        wellness = [f for f in findings if f.check.startswith("unfinished_run:wellness")]
+        self.assertEqual(wellness, [], "เทียบข้ามโซนเวลาแล้วต้องรู้ว่ารอบจบแล้ว ไม่ใช่ยังไม่จบ")
+
+    def test_both_aware_different_timezones_still_unfinished_when_truly_unfinished(self):
+        # started_at 09:00+07:00 = 02:00 UTC | run_at ก่อนหน้านั้นจริง (01:00 UTC) = ยังไม่จบจริง
+        self.write_raw_marker("sync_deep_run_start.txt", "2026-08-06T09:00:00+07:00")
+        self.write_raw_lane("deep", "2026-08-06T01:00:00+00:00")
+        findings = hr.check_unfinished_runs(
+            now=datetime(2026, 8, 6, 12, 0, 0, tzinfo=timezone.utc))  # เกิน grace (90 นาที) ของ deep
+        deep = [f for f in findings if f.check.startswith("unfinished_run:deep")]
+        self.assertEqual(len(deep), 1)
+        self.assertEqual(deep[0].level, hr.ERROR)
+
+    def test_both_naive_still_works_as_before(self):
+        self.write_raw_marker("sync_reconcile_run_start.txt", "2026-08-06T08:00:00")
+        self.write_raw_lane("reconcile", "2026-08-06T08:05:00")
+        findings = hr.check_unfinished_runs(now=datetime(2026, 8, 6, 9, 0, 0))
+        reconcile = [f for f in findings if f.check.startswith("unfinished_run:reconcile")]
+        self.assertEqual(reconcile, [], "naive คู่กันเหมือนเดิม (ตีความโซนเดียวกัน) ต้องยังทำงานถูกเหมือนก่อนแก้")
+
+    def test_unparseable_marker_reports_finding_not_crash(self):
+        self.write_raw_marker("sync_backup_run_start.txt", "not-a-real-timestamp")
+        try:
+            findings = hr.check_unfinished_runs()
+        except Exception as e:
+            self.fail(f"marker พังต้องได้ finding ไม่ใช่ exception: {e}")
+        backup = [f for f in findings if f.check.startswith("unfinished_run:backup")]
+        self.assertEqual(len(backup), 1)
+        self.assertEqual(backup[0].level, hr.WARNING)
+        self.assertIn("อ่านรูปแบบเวลาไม่ได้", backup[0].message)
+
+    def test_unparseable_lane_run_at_reports_finding_not_crash(self):
+        self.write_raw_lane("fast", "definitely-not-a-timestamp")
+        try:
+            findings = hr.check_lane_freshness()
+        except Exception as e:
+            self.fail(f"run_at พังต้องได้ finding ไม่ใช่ exception: {e}")
+        fast = [f for f in findings if f.check == "lane_freshness:fast"]
+        self.assertEqual(fast[0].level, hr.WARNING)
+        self.assertIn("รูปแบบเวลาอ่านไม่ได้", fast[0].message)
+
+
+class LaneLimitConsistencyTests(unittest.TestCase):
+    def _write(self, tmp, name, content):
+        p = Path(tmp) / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_mismatched_limits_is_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dash = self._write(tmp, "dashboard.py", (
+                'LANE_STALE_LIMIT_MIN = {\n'
+                '    "full": 900, "fast": 75, "wellness": 90,\n'
+                '    "reconcile": 12240, "deep": 44640, "backup": 1800,\n'
+                '}\n'
+            ))
+            # backup ไม่ตรงกันโดยตั้งใจ (1800 vs 999)
+            watch = self._write(tmp, "notify_sync.ps1", (
+                '$STALE_LIMIT_MIN = [ordered]@{ full = 900; fast = 75; wellness = 90\n'
+                '                               reconcile = 12240; deep = 44640; backup = 999 }\n'
+            ))
+            findings = hr.check_lane_limit_consistency(dashboard_path=dash, watchdog_path=watch)
+            self.assertEqual(findings[0].level, hr.ERROR)
+            self.assertIn("ไม่ตรงกัน", findings[0].message)
+
+    def test_missing_lane_is_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dash = self._write(tmp, "dashboard.py", (
+                'LANE_STALE_LIMIT_MIN = {"full": 900, "fast": 75}\n'
+            ))
+            watch = self._write(tmp, "notify_sync.ps1", (
+                '$STALE_LIMIT_MIN = [ordered]@{ full = 900; fast = 75 }\n'
+            ))
+            findings = hr.check_lane_limit_consistency(dashboard_path=dash, watchdog_path=watch)
+            self.assertEqual(findings[0].level, hr.ERROR)
+            self.assertIn("ไม่ครบ 6 สาย", findings[0].message)
+
+
+class LaneLimitConsistencyRealFilesTest(unittest.TestCase):
+    """ข้อยกเว้นเดียวที่อ่านไฟล์จริงของโปรเจกต์ — อ่าน source code อย่างเดียว (ast/regex)
+    ไม่แตะ garmin/data และไม่เขียนอะไรทั้งสิ้น พิสูจน์ว่าของที่ deploy จริงยังตรงกัน"""
+
+    def test_real_dashboard_and_watchdog_agree(self):
+        findings = hr.check_lane_limit_consistency()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].level, hr.OK, msg=findings[0].message)
+
+
+class ReportOutputTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def test_exit_code_zero_when_no_error(self):
+        fixed = [hr.Finding("x", hr.OK, "fine"), hr.Finding("y", hr.WARNING, "meh")]
+        with mock.patch.object(hr, "run_all_checks", return_value=fixed):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = hr.main([])
+        self.assertEqual(code, 0)
+
+    def test_exit_code_one_when_any_error(self):
+        fixed = [hr.Finding("x", hr.OK, "fine"), hr.Finding("y", hr.ERROR, "broken")]
+        with mock.patch.object(hr, "run_all_checks", return_value=fixed):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = hr.main([])
+        self.assertEqual(code, 1)
+
+    def test_text_output_contains_all_findings(self):
+        fixed = [hr.Finding("checkA", hr.OK, "hello"), hr.Finding("checkB", hr.ERROR, "boom")]
+        with mock.patch.object(hr, "run_all_checks", return_value=fixed):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                hr.main([])
+        out = buf.getvalue()
+        self.assertIn("checkA", out)
+        self.assertIn("checkB", out)
+        self.assertIn("OK", out)
+        self.assertIn("ERROR", out)
+
+    def test_json_output_is_valid_and_matches_findings(self):
+        fixed = [hr.Finding("checkA", hr.OK, "hello"), hr.Finding("checkB", hr.WARNING, "meh")]
+        with mock.patch.object(hr, "run_all_checks", return_value=fixed):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = hr.main(["--json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(len(payload["findings"]), 2)
+        self.assertEqual(payload["summary"]["ok"], 1)
+        self.assertEqual(payload["summary"]["warning"], 1)
+        self.assertEqual(payload["summary"]["error"], 0)
+        self.assertEqual(payload["findings"][1]["check"], "checkB")
+
+
+class ProductionDataIsolationTests(unittest.TestCase):
+    """สัญญาว่าเทสในไฟล์นี้ไม่มีตัวไหนแตะ garmin/data ของจริงเลย"""
+
+    def test_full_suite_never_touches_the_real_data_dir(self):
+        if PRODUCTION_DATA_DIR.exists():
+            before = sorted(p.relative_to(PRODUCTION_DATA_DIR) for p in PRODUCTION_DATA_DIR.rglob("*"))
+        else:
+            before = None
+
+        # รันเช็คทั้งหมดหนึ่งรอบด้วย DATA_DIR/BACKUP_DIR ที่ชี้ temp dir (ตาม mixin ปกติ)
+        data_dir = Path(tempfile.mkdtemp(prefix="health-data-"))
+        backup_dir = Path(tempfile.mkdtemp(prefix="health-backup-"))
+        try:
+            prev_data = hr.use_data_dir(data_dir)
+            prev_backup = hr.use_backup_dir(backup_dir)
+            try:
+                hr.run_all_checks(schtasks_provider=lambda name: (_ for _ in ()).throw(
+                    hr.SchtasksUnavailable("test")))
+            finally:
+                hr.use_data_dir(prev_data)
+                hr.use_backup_dir(prev_backup)
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+        if before is None:
+            self.assertFalse(PRODUCTION_DATA_DIR.exists(),
+                              "health_report ต้องไม่สร้างโฟลเดอร์ garmin/data ขึ้นมาใหม่")
+        else:
+            after = sorted(p.relative_to(PRODUCTION_DATA_DIR) for p in PRODUCTION_DATA_DIR.rglob("*"))
+            self.assertEqual(before, after, "garmin/data ของจริงถูกแตะระหว่างรันเทส!")
+
+
+if __name__ == "__main__":
+    unittest.main()
