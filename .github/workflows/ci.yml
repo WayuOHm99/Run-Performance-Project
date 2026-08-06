@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (unittest + py_compile + isolation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: garmin
+    env:
+      GARMIN_DATA_DIR: ${{ github.workspace }}/garmin-data-ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.11.19"
+
+      - name: Sync dependencies (frozen — no re-resolve)
+        run: uv sync --frozen
+
+      - name: Prepare isolated GARMIN_DATA_DIR
+        run: mkdir -p "$GARMIN_DATA_DIR"
+
+      - name: Plant canary file in garmin/data (isolation baseline)
+        run: |
+          mkdir -p data
+          echo "ci-canary-${{ github.run_id }}-${{ github.run_attempt }}" > data/ci-canary.txt
+          echo "CANARY_HASH=$(sha256sum data/ci-canary.txt | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Run unittest suite (expect 37/37)
+        run: uv run --frozen python -m unittest discover -s tests -v
+
+      - name: Verify garmin/data canary untouched
+        run: |
+          AFTER_HASH=$(sha256sum data/ci-canary.txt | cut -d' ' -f1)
+          if [ "$AFTER_HASH" != "$CANARY_HASH" ]; then
+            echo "::error::garmin/data/ci-canary.txt changed during the test run — a test wrote to the production data path instead of GARMIN_DATA_DIR."
+            exit 1
+          fi
+          echo "Canary unchanged ($AFTER_HASH) — garmin/data was not written to."
+
+      - name: Verify no other files appeared in garmin/data
+        run: |
+          EXTRA=$(find data -type f ! -name ci-canary.txt)
+          if [ -n "$EXTRA" ]; then
+            echo "::error::Unexpected files found in garmin/data after the test run:"
+            echo "$EXTRA"
+            exit 1
+          fi
+          echo "No extra files in garmin/data — isolation confirmed."
+
+      - name: Verify no synthetic test slugs leaked into garmin/data
+        run: |
+          if grep -rlE "athlete-a|athlete-b|athlete-c|zz-synthetic-athlete-do-not-persist" data/ 2>/dev/null; then
+            echo "::error::A synthetic test athlete slug was found inside garmin/data — tests are not isolated from production data."
+            exit 1
+          fi
+          echo "No synthetic slugs found in garmin/data."
+
+      - name: py_compile all project Python files
+        run: uv run --frozen python -m compileall -q scripts share tests
+
+      - name: Clean up canary
+        if: always()
+        run: rm -f data/ci-canary.txt
