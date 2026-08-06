@@ -1,4 +1,6 @@
+import ast
 import importlib.util
+import re
 import shutil
 import sqlite3
 import sys
@@ -7,7 +9,7 @@ import threading
 import time
 import unittest
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -548,6 +550,96 @@ class CatchUpSlotTests(unittest.TestCase):
             fetch_all.main()
         self.assertEqual(exited.exception.code, 75)
         lock.assert_not_called()
+
+    def test_slot_missed_overnight_is_still_pending_the_next_morning(self):
+        # เครื่องหลับ 15:00 → ข้ามช่อง 21:00 ทั้งคืน → ตื่น 08:14 วันรุ่งขึ้น
+        # ต้องเห็นช่อง 21:00 ของเมื่อวานว่า "ค้าง" ด้วย ไม่ใช่เห็นแค่ช่อง 08:00 ของวันนี้
+        now = datetime(2030, 5, 6, 8, 14)
+        self.write_lane(datetime(2030, 5, 5, 8, 14, 34))
+        self.assertEqual(
+            fetch_all.pending_slots("full", self.slots, now),
+            [datetime(2030, 5, 5, 21, 0), datetime(2030, 5, 6, 8, 0)],
+        )
+        self.assertIsNone(fetch_all.slot_already_done("full", self.slots, now))
+
+    def test_one_round_clears_every_slot_it_caught_up(self):
+        # รอบตามเก็บรอบเดียวครอบทุกช่องที่ค้าง (--days ดึงย้อนคลุมอยู่แล้ว) — รอบถัดไป
+        # ของ Task รายชั่วโมงต้องไม่รันช่องเดิมซ้ำ ไม่งั้นกลายเป็นยิง API ฟรีทุกชั่วโมง
+        self.write_lane(datetime(2030, 5, 6, 8, 14, 20))
+        for hour in (9, 12, 20):
+            now = datetime(2030, 5, 6, hour, 0)
+            self.assertEqual(fetch_all.pending_slots("full", self.slots, now), [])
+            self.assertEqual(
+                fetch_all.slot_already_done("full", self.slots, now),
+                datetime(2030, 5, 6, 8, 0),
+            )
+
+    def test_catch_up_never_reaches_further_back_than_the_lookback_window(self):
+        # เครื่องปิดยาว 5 วัน — ตามเก็บได้แค่ช่องในหน้าต่าง 48 ชม. ที่เหลือหมดอายุแล้ว
+        # (ข้อมูลของช่องเก่ากว่านั้นเป็นงานของ deep resync ไม่ใช่ full sync รอบเดียว)
+        now = datetime(2030, 5, 6, 9, 0)
+        self.write_lane(datetime(2030, 5, 1, 8, 5))
+        pending = fetch_all.pending_slots("full", self.slots, now)
+        self.assertEqual(
+            pending,
+            [datetime(2030, 5, 4, 21, 0), datetime(2030, 5, 5, 8, 0),
+             datetime(2030, 5, 5, 21, 0), datetime(2030, 5, 6, 8, 0)],
+        )
+        self.assertGreaterEqual(min(pending), now - timedelta(hours=48))
+        self.assertIsNone(fetch_all.slot_already_done("full", self.slots, now))
+
+    def test_a_slot_that_has_not_arrived_yet_is_not_pending(self):
+        # 20:00 ยังไม่ถึงช่อง 21:00 — ห้ามนับเป็นค้างแล้วรันดักหน้า
+        now = datetime(2030, 5, 6, 20, 0)
+        self.write_lane(datetime(2030, 5, 6, 8, 14))
+        self.assertEqual(fetch_all.pending_slots("full", self.slots, now), [])
+        self.assertEqual(
+            fetch_all.slot_already_done("full", self.slots, now),
+            datetime(2030, 5, 6, 8, 0),
+        )
+
+
+class LaneStaleLimitTests(unittest.TestCase):
+    """เพดาน "สายเงียบเกินคาบ" ของ dashboard ต้องตรงกับ watchdog เป๊ะ.
+
+    dashboard.py import ตรง ๆ ไม่ได้ (มันรัน streamlit ทั้งไฟล์) จึงอ่านค่าคงที่จาก
+    source ด้วย ast แทน — สิ่งที่ต้องคุ้มครองคือ "ตัวเลขสองที่ตรงกัน" ไม่ใช่ตัวโค้ด
+    """
+
+    EXPECTED_LANES = {"full", "fast", "wellness", "reconcile", "deep", "backup"}
+
+    @staticmethod
+    def dashboard_constant(name):
+        tree = ast.parse((GARMIN_ROOT / "scripts" / "dashboard.py")
+                         .read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                return ast.literal_eval(node.value)
+        raise AssertionError(f"ไม่พบค่าคงที่ {name} ใน dashboard.py")
+
+    @staticmethod
+    def watchdog_limits():
+        src = (GARMIN_ROOT / "scripts" / "notify_sync.ps1").read_text(encoding="utf-8-sig")
+        block = re.search(r"\$STALE_LIMIT_MIN\s*=\s*\[ordered\]@\{(.+?)\}", src, re.S)
+        assert block, "ไม่พบ $STALE_LIMIT_MIN ใน notify_sync.ps1"
+        return {k: int(v) for k, v in re.findall(r"(\w+)\s*=\s*(\d+)", block.group(1))}
+
+    def test_dashboard_and_watchdog_agree_on_every_lane(self):
+        # สายที่หล่นจาก dashboard จะโชว์ ✅ ค้างตลอดกาลแม้ตายไปแล้ว — เดิมหล่น
+        # reconcile/deep ซึ่งนาน ๆ เดินที = สายที่ตายเงียบแล้วสังเกตยากที่สุด
+        dash = self.dashboard_constant("LANE_STALE_LIMIT_MIN")
+        self.assertEqual(set(dash), self.EXPECTED_LANES)
+        self.assertEqual(dash, self.watchdog_limits())
+
+    def test_every_lane_has_a_label_on_the_team_tab(self):
+        # มีเพดานแต่ไม่มีป้าย = แถบขึ้นเป็นชื่อไฟล์ดิบ อ่านไม่รู้เรื่องตอนที่ต้องรีบที่สุด
+        labels = re.search(r"_LANE_LABEL = \{(.+?)\}",
+                           (GARMIN_ROOT / "scripts" / "dashboard.py")
+                           .read_text(encoding="utf-8"), re.S)
+        self.assertIsNotNone(labels)
+        named = set(re.findall(r'"(\w+)":', labels.group(1)))
+        self.assertEqual(named, self.EXPECTED_LANES)
 
 
 class SentinelValueTest(unittest.TestCase):

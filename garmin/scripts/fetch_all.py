@@ -50,6 +50,10 @@ LANE_STATUS_DIR = PROJECT_ROOT / "data" / "sync_lane"
 # (Task ของสายถี่ถูก Windows ฆ่าที่ 10/20 นาทีอยู่แล้ว — ตัดเองก่อนดีกว่าโดนฆ่ากลางเขียน DB)
 ATHLETE_TIMEOUT_SEC = {"fast": 240, "wellness": 300}
 DEFAULT_ATHLETE_TIMEOUT_SEC = 1200
+# หน้าต่างตามเก็บช่องเวลาย้อนหลังของ --catch-up-slots: ช่องที่ค้างเกิน 48 ชม. ถือว่าหมดอายุ
+# ข้อมูลของช่องนั้นถูกรอบถัดไปกวาดครอบไปแล้วด้วย --days อยู่ดี ตามเก็บย้อนไกลกว่านี้ไม่ได้อะไร
+# เพิ่ม แถมทำให้ log อ่านไม่รู้เรื่อง (เครื่องปิดยาว 2 สัปดาห์แล้วโชว์ช่องค้าง 28 ช่อง)
+CATCH_UP_LOOKBACK_HOURS = 48
 
 
 @contextmanager
@@ -129,26 +133,51 @@ def parse_slots(raw: str) -> list[dtime]:
     return sorted(slots)
 
 
-def slot_already_done(lane: str, slots: list[dtime], now: datetime) -> datetime | None:
-    """เช็คว่า "ช่องเวลาล่าสุดที่ผ่านมาแล้ว" มีรอบ sync ของสายนี้เดินไปแล้วหรือยัง.
+def passed_slots(slots: list[dtime], now: datetime,
+                 lookback_hours: int = CATCH_UP_LOOKBACK_HOURS) -> list[datetime]:
+    """ช่องเวลาที่ "ผ่านมาแล้ว" ทั้งหมดในหน้าต่างตามเก็บ เรียงเก่า→ใหม่.
+
+    ต้องกวาดหลายวัน ไม่ใช่แค่ของวันนี้ — เครื่องหลับข้ามคืนแล้วตื่นสายวันรุ่งขึ้น
+    ช่องที่ค้างอยู่คือช่องของ "เมื่อวาน" ซึ่งมองไม่เห็นเลยถ้าดูแค่ปฏิทินวันนี้
+    """
+    earliest = now - timedelta(hours=lookback_hours)
+    out = []
+    day = earliest.date()
+    while day <= now.date():
+        out.extend(datetime.combine(day, s) for s in slots)
+        day += timedelta(days=1)
+    return sorted(c for c in out if earliest <= c <= now)
+
+
+def pending_slots(lane: str, slots: list[dtime], now: datetime,
+                  lookback_hours: int = CATCH_UP_LOOKBACK_HOURS) -> list[datetime]:
+    """ช่องที่ยัง "ค้าง" = ผ่านมาแล้วแต่ไม่มีรอบของสายนี้เดินหลังจากนั้น.
 
     ใช้ทำ catch-up: ตั้ง Task ให้ยิงทุกชั่วโมงได้เลย แล้วให้ตัวนี้ตัดสินว่ารอบไหนของจริง
     → เครื่องหลับตอน 08:00 แล้วตื่น 09:40 ก็ยังได้ full sync ของช่อง 08:00 ไม่ข้ามทั้งวัน
     (พึ่ง StartWhenAvailable ของ Windows อย่างเดียวไม่พอ — ยิงครั้งเดียว พลาดแล้วพลาดเลย)
-    คืนเวลาช่องล่าสุดถ้าทำไปแล้ว (= ข้ามรอบนี้), คืน None ถ้ายังไม่ได้ทำ (= ต้องรัน)
+
+    "ทำสำเร็จแล้ว" ตัดสินจาก run_at ของสาย: รอบที่เดินหลังช่องไหน = ครอบช่องนั้นไปแล้ว
+    (รอบเดียวครอบได้หลายช่องที่ค้าง เพราะ --days ดึงย้อนคลุมอยู่แล้ว — ไล่รันทีละช่อง
+    คือยิง API ซ้ำฟรี) จึงไม่มีทางรันช่องเดิมซ้ำสองครั้ง
     """
-    today = now.date()
-    candidates = [datetime.combine(today, s) for s in slots]
-    passed = [c for c in candidates if c <= now]
-    # ยังไม่ถึงช่องแรกของวันนี้ → ช่องล่าสุดคือช่องสุดท้ายของเมื่อวาน
-    boundary = passed[-1] if passed else datetime.combine(
-        today - timedelta(days=1), slots[-1])
+    candidates = passed_slots(slots, now, lookback_hours)
     try:
         data = json.loads((LANE_STATUS_DIR / f"{lane}.json").read_text(encoding="utf-8"))
         last_run = datetime.fromisoformat(data["run_at"])
     except Exception:
-        return None       # ไม่เคยรัน/ไฟล์เสีย → ถือว่ายังไม่ได้ทำ ให้รันเลย
-    return boundary if last_run >= boundary else None
+        # ไม่เคยรัน/ไฟล์เสีย → ถือว่าค้างทั้งหมด ให้รันเลย
+        return candidates or [now]
+    return [c for c in candidates if c > last_run]
+
+
+def slot_already_done(lane: str, slots: list[dtime], now: datetime,
+                      lookback_hours: int = CATCH_UP_LOOKBACK_HOURS) -> datetime | None:
+    """คืนเวลาช่องล่าสุดถ้าไม่มีช่องค้างแล้ว (= ข้ามรอบนี้), คืน None ถ้ายังมีค้าง (= ต้องรัน)."""
+    if pending_slots(lane, slots, now, lookback_hours):
+        return None
+    candidates = passed_slots(slots, now, lookback_hours)
+    return candidates[-1] if candidates else None
 
 
 def run_athlete(slug, args, passthrough, run_started, timeout_sec):
@@ -245,12 +274,20 @@ def main():
         print("⚠️  ไม่พบ token ใน tokens/ — ยังไม่มีใครให้ดึง")
         sys.exit(0)
 
-    # เช็คก่อนแย่ง lock: ถ้าช่องเวลาล่าสุดมีรอบเดินไปแล้ว รอบนี้เป็นรอบส่วนเกินของ Task รายชั่วโมง
+    # เช็คก่อนแย่ง lock: ถ้าไม่มีช่องเวลาไหนค้าง รอบนี้เป็นรอบส่วนเกินของ Task รายชั่วโมง
     if slots is not None:
-        done_at = slot_already_done(lane, slots, datetime.now())
-        if done_at:
+        now = datetime.now()
+        pending = pending_slots(lane, slots, now)
+        if not pending:
+            done_at = passed_slots(slots, now)[-1]
             print(f"⏭️  ช่อง {done_at:%H:%M} ({done_at:%d/%m}) sync ไปแล้ว — ข้ามรอบนี้")
             sys.exit(75)
+        # บอกให้ชัดว่ารอบนี้กำลังตามเก็บของค้าง ไม่ใช่รอบตามตารางปกติ — ไม่งั้นเวลาไล่ log
+        # ย้อนหลังจะแยกไม่ออกว่า "ช่อง 21:00 หายไปไหน" กับ "ช่อง 21:00 ถูกกวาดรวมมาแล้ว"
+        if len(pending) > 1 or pending[0].date() != now.date():
+            print("⏰ ตามเก็บช่องที่ค้างไว้: "
+                  + ", ".join(f"{p:%d/%m %H:%M}" for p in pending)
+                  + " — รอบนี้รอบเดียวครอบให้ทั้งหมด")
 
     with run_lock(args.lock_timeout) as acquired:
         if not acquired:

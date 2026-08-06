@@ -297,6 +297,16 @@ AUTO_REFRESH_SEC = 60
 # (24 ชม. ครอบสาย full ที่รันวันละ 2 รอบไว้พอดี ส่วนสายถี่กว่านั้นสดอยู่แล้ว)
 SANITY_WARN_FRESH_MIN = 24 * 60
 
+# เพดาน "สายนี้เงียบเกินคาบ" ต่อสายงาน (นาที) = คาบเดินจริง + เผื่อรอบที่ข้ามเพราะ lock
+# ⚠️ ต้องมีครบทุกสายและตรงกับ $STALE_LIMIT_MIN ใน scripts\notify_sync.ps1 — สายที่ตกหล่น
+# จะโชว์ ✅ ค้างตลอดกาลแม้ตายไปแล้ว (เดิมหล่น reconcile/deep ซึ่งเป็นสองสายที่อันตรายที่สุด
+# เพราะนาน ๆ เดินที ตายแล้วไม่มีใครสังเกตได้เป็นสัปดาห์ — เคสเดียวกับ deepsync 2 ส.ค. 69)
+# toast เตือนได้ก็จริงแต่มันหายไปกับตา ส่วนหน้านี้คือที่เดียวที่ย้อนดูได้ทีหลัง
+LANE_STALE_LIMIT_MIN = {
+    "full": 900, "fast": 75, "wellness": 90,
+    "reconcile": 12240, "deep": 44640, "backup": 1800,
+}
+
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_athletes():
@@ -727,9 +737,8 @@ with tab_team:
             else:
                 st.warning(_msg)
         # สายที่ "เงียบหายไป" อันตรายกว่าสายที่ล้มเหลว เพราะไม่มีอะไรฟ้อง — กาไว้ให้เห็นตรงนี้
-        # (เพดานเดียวกับ watchdog ใน notify_sync.ps1: คาบเดินจริง + เผื่อรอบที่ข้ามเพราะ lock)
-        _limit_min = {"full": 900, "fast": 75, "wellness": 90,
-                      "backup": 1800}.get(_sync.get("lane", ""))
+        # (เพดานเดียวกับ watchdog ใน notify_sync.ps1 — ดู LANE_STALE_LIMIT_MIN ด้านบน)
+        _limit_min = LANE_STALE_LIMIT_MIN.get(_sync.get("lane", ""))
         _quiet = _limit_min is not None and _age_min is not None and _age_min > _limit_min
         _mark = "❌" if _fail else ("⏰" if _quiet else "✅")
         _lane_lines.append(f"{_mark} {_label}: {_when}"
