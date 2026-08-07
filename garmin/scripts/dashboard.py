@@ -463,6 +463,26 @@ def load_last_data_dates(athlete_id):
     return la, lw
 
 
+WELLNESS_STALE_DAYS = 3  # ตั้งแต่กี่วันขึ้นไปถือว่า "ค้างจริง" ต้องไปไล่หาสาเหตุ
+
+
+def wellness_freshness(days):
+    """ป้ายความสดของ wellness รายคน — days = จำนวนวันนับจากข้อมูลล่าสุด (None = ไม่มีเลย)
+
+    ข้อมูลค้าง ≠ ระบบพัง: ข้อมูลหยุดที่เมื่อวานส่วนใหญ่แปลว่าต้นทางฝั่ง Garmin ยังไม่ sync
+    มา (🟠 รอ) ลำพังแค่นี้ยังไม่ใช่หลักฐานว่าสายงานฝั่งเราล้ม — ปัญหาจริงของ pipeline
+    มีแถบสายงานด้านล่างจับแยกให้อยู่แล้ว
+    เดิมเมื่อวานขึ้น 🟢 เหมือนวันนี้ ทำให้โค้ชอ่านตัวเลขของเมื่อวานเป็นสถานะวันนี้
+    """
+    if days is None:
+        return "🔴", "ไม่มีข้อมูล"
+    if days == 0:
+        return "🟢", "ข้อมูลอัปเดตแล้ว — วันนี้"
+    last = "เมื่อวาน" if days == 1 else f"{days} วันก่อน"
+    icon = "🟠" if days < WELLNESS_STALE_DAYS else "🔴"
+    return icon, f"รอ Garmin sync — ข้อมูลล่าสุด: {last}"
+
+
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_observed_max_hr(athlete_id):
     """HR สูงสุดที่เคยบันทึก — ใช้ประมาณ LTHR เมื่อยังไม่มีผลเทส"""
@@ -670,15 +690,12 @@ with tab_team:
     fresh_parts, stale_names = [], []
     for _, ath in athletes_df.iterrows():
         _, lw = load_last_data_dates(ath["athlete_id"])
-        if lw:
-            days = (today - datetime.date.fromisoformat(lw)).days
-            icon = "🟢" if days <= 1 else ("🟡" if days == 2 else "🔴")
-            txt = "วันนี้" if days == 0 else ("เมื่อวาน" if days == 1 else f"{days} วันก่อน")
-            if days >= 3:
-                stale_names.append(f"{ath['display_name']} ({days} วัน)")
-        else:
-            icon, txt = "🔴", "ไม่มีข้อมูล"
+        days = (today - datetime.date.fromisoformat(lw)).days if lw else None
+        icon, txt = wellness_freshness(days)
+        if days is None:
             stale_names.append(f"{ath['display_name']} (ไม่มีข้อมูล)")
+        elif days >= WELLNESS_STALE_DAYS:
+            stale_names.append(f"{ath['display_name']} ({days} วัน)")
         fresh_parts.append(f"{icon} **{ath['display_name']}**: {txt}")
     st.markdown("**🔄 sync ล่าสุด (wellness):** &nbsp; " + " &nbsp;·&nbsp; ".join(fresh_parts))
     if stale_names:
