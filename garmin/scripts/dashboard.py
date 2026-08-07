@@ -1598,8 +1598,13 @@ with tab_splits:
                     fig_z.update_layout(showlegend=False)
                     st.plotly_chart(fig_z, width="stretch")
 
+            # ⚠️ ห้ามกรอง splits ตามความยาวรอบ (แก้ 7 ส.ค. 69) — แถวใน fact_activity_split
+            # คือ "lap ที่นาฬิกาบันทึก" ไม่ใช่ "ทุก 1 กม." เซสชัน interval สั้น ๆ จึงมีรอบ
+            # หลักสิบเมตรเป็นเรื่องปกติ. ตัวกรอง `distance_m >= 100` เดิมลบทั้งเซสชันทิ้ง
+            # แล้วหน้าเว็บขึ้น "ยังไม่ได้ดึง splits" ทั้งที่ดึงมาครบ (ต้อง activity 23885677442:
+            # 0.85 กม. 12 รอบ 12–92 ม. — รวม 6 เซสชันใน DB ที่โดนแบบเดียวกัน)
+            # → ข้อความ "ยังไม่ได้ดึง" ต้องผูกกับ "load_splits ไม่คืนแถวเลย" เท่านั้น
             splits = load_splits(chosen_id)
-            splits = splits[splits["distance_m"] >= 100]
 
             if splits.empty:
                 st.info("ยังไม่ได้ดึง splits — fast sync จะลองเติมให้อัตโนมัติในรอบถัดไป "
@@ -1647,13 +1652,13 @@ with tab_splits:
                     x=x_labels, y=splits["avg_pace_min_km"], mode="lines+markers",
                     line=dict(color=C_BLUE, width=2), marker=dict(size=8), name="เพซ",
                     customdata=list(zip(pace_txt, dist_km)),
-                    hovertemplate="กม.ที่ %{x} (%{customdata[1]} กม.)<br>เพซ %{customdata[0]} /กม.<extra></extra>",
+                    hovertemplate="รอบที่ %{x} (%{customdata[1]} กม.)<br>เพซ %{customdata[0]} /กม.<extra></extra>",
                 ), row=1, col=1)
                 if splits["avg_hr"].notna().any():
                     fig_sp.add_trace(go.Scatter(
                         x=x_labels, y=splits["avg_hr"], mode="lines+markers",
                         line=dict(color=C_RED, width=2), marker=dict(size=8), name="HR เฉลี่ย",
-                        hovertemplate="กม.ที่ %{x}<br>HR %{y:.0f} bpm<extra></extra>",
+                        hovertemplate="รอบที่ %{x}<br>HR %{y:.0f} bpm<extra></extra>",
                     ), row=2, col=1)
 
                 pace_clean = splits["avg_pace_min_km"].dropna()
@@ -1664,13 +1669,13 @@ with tab_splits:
                 fig_sp.update_yaxes(title_text="เพซ (นาที/กม.)", autorange="reversed",
                                     row=1, col=1, **pace_axis_kwargs)
                 fig_sp.update_yaxes(title_text="HR (bpm)", row=2, col=1)
-                fig_sp.update_xaxes(title_text="กิโลเมตรที่", row=2, col=1)
-                fig_sp.update_layout(title="เพซและ HR รายกิโลเมตร (เพซ: ยิ่งสูง = ยิ่งเร็ว)",
+                fig_sp.update_xaxes(title_text="รอบที่ (Split)", row=2, col=1)
+                fig_sp.update_layout(title="เพซและ HR ราย Split (เพซ: ยิ่งสูง = ยิ่งเร็ว)",
                                      showlegend=True, hovermode="x unified",
                                      legend=dict(orientation="h", yanchor="bottom", y=1.02))
                 st.plotly_chart(fig_sp, width="stretch")
 
-                # --- กราฟ Cadence + Power + Elevation รายกิโลเมตร ---
+                # --- กราฟ Cadence + Power + Elevation ราย Split ---
                 extra_rows = []
                 if splits["avg_cadence"].notna().any():
                     extra_rows.append(("avg_cadence", "Cadence (spm)", C_GREEN))
@@ -1688,17 +1693,17 @@ with tab_splits:
                         fig_extra.add_trace(go.Bar(
                             x=x_labels, y=splits[col], name=title,
                             marker_color=color,
-                            hovertemplate=f"กม.ที่ %{{x}}<br>{title}: %{{y:.0f}}<extra></extra>",
+                            hovertemplate=f"รอบที่ %{{x}}<br>{title}: %{{y:.0f}}<extra></extra>",
                         ), row=i, col=1)
-                    fig_extra.update_xaxes(title_text="กิโลเมตรที่", row=len(extra_rows), col=1)
-                    fig_extra.update_layout(showlegend=False, title="Cadence และ Elevation รายกิโลเมตร")
+                    fig_extra.update_xaxes(title_text="รอบที่ (Split)", row=len(extra_rows), col=1)
+                    fig_extra.update_layout(showlegend=False, title="Cadence และ Elevation ราย Split")
                     st.plotly_chart(fig_extra, width="stretch")
 
                 # --- ตาราง splits รายรอบ เต็ม (แสดงตรง ไม่ซ่อนใน expander) ---
                 st.subheader("📊 ตาราง Splits (ผลต่อรอบ)")
                 num0 = st.column_config.NumberColumn(format="%.0f")
                 table_data = {
-                    "กม.ที่": splits["split_num"].astype(int),
+                    "รอบที่": splits["split_num"].astype(int),
                     "ระยะ (km)": dist_km,
                     "เพซ": pace_txt,
                     "HR เฉลี่ย": splits["avg_hr"],
