@@ -403,6 +403,18 @@ def athlete_has_load(athlete_id):
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
+def athlete_has_training_readiness(athlete_id):
+    """นาฬิกาเคยส่ง Training Readiness ไหม — ใช้แยก "รุ่นไม่รองรับ" จาก "วันนี้ยังไม่ sync"""
+    conn = sqlite3.connect(DB_PATH)
+    n = conn.execute(
+        "SELECT COUNT(*) FROM fact_daily_wellness "
+        "WHERE athlete_id = ? AND training_readiness IS NOT NULL",
+        (athlete_id,)).fetchone()[0]
+    conn.close()
+    return n > 0
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC)
 def load_daily_load(athlete_id, start_date, end_date):
     """ผลรวม Garmin training_load รายวัน — ทุกกิจกรรม (รวม cross-training: HIIT/เวท/มวย)"""
     conn = sqlite3.connect(DB_PATH)
@@ -504,6 +516,16 @@ def load_splits(activity_id):
         if col not in ("intensity_type",):  # text
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+def prepare_session_candidates(activity_df):
+    """กิจกรรมทุกเซสชันที่ Garmin บันทึก สำหรับหน้าเจาะลึก
+
+    ห้ามกรองด้วยระยะขั้นต่ำ: warm-up/cool-down และ interval ของ Tong มีทั้งเซสชัน
+    สั้นกว่า 500 ม. แต่มี splits ที่ถูกต้องครบถ้วน ส่วนกิจกรรมระยะ 0 ก็ยังมีตัวเลข
+    เวลา/HR/Training Load ที่ควรดูได้ แม้ไม่มี splits ก็ตาม
+    """
+    return activity_df.sort_values("start_time_local", ascending=False)
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -975,6 +997,8 @@ with tab_today:
         else today_wellness
     )
     wellness_today = real_today_wellness.iloc[-1] if not real_today_wellness.empty else None
+    readiness_supported = athlete_has_training_readiness(athlete_id)
+    training_load_supported = athlete_has_load(athlete_id)
 
     if wellness_today is None:
         st.info(
@@ -1026,10 +1050,39 @@ with tab_today:
             )
             st.metric(
                 "ความพร้อมซ้อม",
-                fmt_num(wellness_today.get("training_readiness")),
-                delta=fmt_text(wellness_today.get("readiness_level")).replace("_", " "),
+                (fmt_num(wellness_today.get("training_readiness"))
+                 if readiness_supported else "นาฬิกาไม่ส่ง"),
+                delta=(fmt_text(wellness_today.get("readiness_level")).replace("_", " ")
+                       if readiness_supported else None),
                 delta_color="off",
+                help=("Garmin Training Readiness ขึ้นกับรุ่นนาฬิกา; ถ้ารุ่นไม่ส่ง "
+                      "Dashboard ยังประเมินโหลดด้วย ACWR ของระบบเอง"),
                 border=True,
+            )
+
+        pending_today = []
+        for label, column in (("Sleep", "sleep_score"), ("HRV", "hrv_last_night")):
+            if pd.isna(wellness_today.get(column)):
+                pending_today.append(label)
+        if readiness_supported and pd.isna(wellness_today.get("training_readiness")):
+            pending_today.append("Training Readiness")
+        if pending_today:
+            st.caption(
+                "ฐานข้อมูลจาก Garmin ยังไม่มีค่า " + ", ".join(pending_today)
+                + " ของวันนี้ ระบบจะลองเติมให้อัตโนมัติในรอบ sync ถัดไป; "
+                  "Dashboard ไม่สร้างค่าคาดเดามาอุดช่องว่าง (ดูสถานะสาย sync ได้ในแท็บทีม)"
+            )
+
+        unsupported = []
+        if not readiness_supported:
+            unsupported.append("Training Readiness/Status")
+        if not training_load_supported:
+            unsupported.append("Garmin Training Load")
+        if unsupported:
+            st.caption(
+                "ค่าที่ไม่ขึ้นไม่ใช่ข้อมูลตกหล่นระหว่าง sync — นาฬิกาของนักกีฬาคนนี้ไม่ส่ง "
+                + ", ".join(unsupported)
+                + "; Dashboard ใช้ข้อมูลที่มีจริงและคำนวณ ACWR จากระยะวิ่งแทน"
             )
 
     st.subheader("กิจกรรมวันนี้")
@@ -1103,11 +1156,17 @@ with tab_health:
                              markers=True)
         st.plotly_chart(fig_health, width="stretch")
 
-        fig_stress = px.line(wellness_df, x="calendar_date", y=["stress_avg", "training_readiness"],
+        stress_series = ["stress_avg"]
+        if wellness_df["training_readiness"].notna().any():
+            stress_series.append("training_readiness")
+        fig_stress = px.line(wellness_df, x="calendar_date", y=stress_series,
                              labels={"value": "ระดับ (Score)", "calendar_date": "วันที่", "variable": "Metric"},
-                             title="ระดับความเครียด (Stress) และความพร้อมซ้อม (Readiness)",
+                             title=("ระดับความเครียด (Stress) และความพร้อมซ้อม (Readiness)"
+                                    if len(stress_series) > 1 else "ระดับความเครียด (Stress)"),
                              markers=True)
         st.plotly_chart(fig_stress, width="stretch")
+        if len(stress_series) == 1:
+            st.caption("Training Readiness เป็นความสามารถตามรุ่นนาฬิกา; รุ่นนี้ไม่ส่งค่า จึงไม่วาดเส้นว่าง")
 
         # --- เมตริกเสริมที่นาฬิกาเก็บ (หายใจ/floors/kcal) ---
         extra = []
@@ -1490,17 +1549,21 @@ with tab_splits:
     if activity_df.empty:
         st.info("ไม่มีกิจกรรมในช่วงเวลานี้")
     else:
-        candidates = activity_df[activity_df["distance_m"] > 500].sort_values("start_time_local", ascending=False)
+        # แสดงทุกกิจกรรม — ตัวกรอง >500 ม. เดิมซ่อน warm-up/cool-down ของ Tong ทั้งเซสชัน
+        # ทั้งที่ fact_activity_split มีข้อมูลครบ และทำให้ดูเหมือนระบบ sync มาไม่ครบ
+        candidates = prepare_session_candidates(activity_df)
         if candidates.empty:
-            st.info("ไม่มีกิจกรรมที่มีระยะทางพอสำหรับดู splits — กิจกรรมระยะ 0 เช่น "
-                    "indoor cardio หรือ HIIT ไม่มี splits โดยตั้งใจ")
+            st.info("ไม่มีกิจกรรมในช่วงเวลานี้")
         else:
-            label_map = {
-                int(r["activity_id"]): (f"{r['start_time_local']:%d %b %Y %H:%M} · "
-                                        f"{fmt_text(r['activity_name'], fmt_text(r['activity_type'], 'กิจกรรม'))} · "
-                                        f"{r['distance_km']:.2f} km")
-                for _, r in candidates.iterrows()
-            }
+            label_map = {}
+            for _, r in candidates.iterrows():
+                distance_label = (f"{r['distance_km']:.2f} km"
+                                  if pd.notna(r.get("distance_km")) else "ไม่มีระยะทาง")
+                label_map[int(r["activity_id"])] = (
+                    f"{r['start_time_local']:%d %b %Y %H:%M} · "
+                    f"{fmt_text(r['activity_name'], fmt_text(r['activity_type'], 'กิจกรรม'))} · "
+                    f"{distance_label}"
+                )
             chosen_id = st.selectbox(
                 "กิจกรรมที่ต้องการวิเคราะห์",
                 options=list(label_map.keys()),
@@ -1607,8 +1670,12 @@ with tab_splits:
             splits = load_splits(chosen_id)
 
             if splits.empty:
-                st.info("ยังไม่ได้ดึง splits — fast sync จะลองเติมให้อัตโนมัติในรอบถัดไป "
-                        "และ full sync 21:00 จะตรวจซ้ำ")
+                if pd.isna(arow.get("distance_m")) or arow.get("distance_m") <= 0:
+                    st.info("กิจกรรมนี้ไม่มีระยะทางจาก Garmin จึงไม่มี splits โดยปกติ "
+                            "แต่ตัวเลขเวลา, HR และ Training Load ด้านบนยังแสดงครบตามที่นาฬิกาส่ง")
+                else:
+                    st.info("ยังไม่ได้ดึง splits — fast sync จะลองเติมให้อัตโนมัติในรอบถัดไป "
+                            "และ full sync 21:00 จะตรวจซ้ำ")
             else:
                 # --- วิเคราะห์ครึ่งแรก vs ครึ่งหลัง (จับอาการแผ่วปลาย) ---
                 if len(splits) >= 2:

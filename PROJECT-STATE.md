@@ -49,9 +49,10 @@ Primary goals:
 
 - `0b41023` — Preserve short Garmin splits
   - Garmin watch laps may be shorter than 100 m
-  - Dashboard must not filter valid short laps
+  - Dashboard must not filter valid short laps or hide a whole activity by total distance
+  - Session detail includes every recorded activity; zero-distance activities remain viewable even when splits do not apply
   - Splits UI now treats them as laps/splits, not kilometers
-  - Do not reintroduce a minimum-distance split filter
+  - Do not reintroduce a minimum-distance activity/split filter
 
 ## Current Rules
 - Diagnose root cause before changing code.

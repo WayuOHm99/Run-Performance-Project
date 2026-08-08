@@ -53,6 +53,17 @@ def extract_load_splits(db_path):
     return ns["load_splits"]
 
 
+def extract_session_candidates():
+    """ใช้ฟังก์ชันคัดตัวเลือกจริงจาก dashboard เพื่อกันตัวกรองระยะกลับมาอีก"""
+    tree = ast.parse(DASHBOARD_SRC)
+    picked = [n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "prepare_session_candidates"]
+    assert len(picked) == 1, "ไม่พบ prepare_session_candidates ใน dashboard.py"
+    ns = {}
+    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
+    return ns["prepare_session_candidates"]
+
+
 def extract_prep_block():
     """โค้ดที่แท็บ Splits ทำกับ splits ระหว่าง load_splits() กับ `if splits.empty:`
 
@@ -140,6 +151,35 @@ class ShortSplitDisplayTests(unittest.TestCase):
         # กิจกรรมที่ยังไม่ถูกดึง splits จริง ๆ = แถวว่าง → ข้อความ "ยังไม่ได้ดึง" ถูกต้อง
         splits = run_splits_tab(self.load_splits(self.ACTIVITY_ID + 1))
         self.assertTrue(splits.empty)
+
+
+class SessionCandidateTests(unittest.TestCase):
+    """หน้าเจาะลึกต้องไม่ซ่อนทั้งเซสชันเพียงเพราะระยะสั้นหรือไม่มีระยะ"""
+
+    def test_tab_passes_the_unfiltered_activity_frame_to_candidate_preparation(self):
+        self.assertRegex(
+            DASHBOARD_SRC,
+            r"candidates\s*=\s*prepare_session_candidates\(activity_df\)",
+            "หน้าเจาะลึกไม่ได้ส่ง activity_df ทั้งก้อนเข้าตัวเลือกกิจกรรม",
+        )
+
+    def test_short_and_zero_distance_activities_remain_selectable(self):
+        candidates = extract_session_candidates()(pd.DataFrame({
+            "activity_id": [1, 2, 3, 4, 5],
+            "start_time_local": pd.to_datetime([
+                "2026-08-01 06:00:00",
+                "2026-08-02 06:00:00",
+                "2026-08-03 06:00:00",
+                "2026-08-04 06:00:00",
+                "2026-08-05 06:00:00",
+            ]),
+            # 2/3 คือเคสจริงของ Tong ที่ตัวกรอง >500 ม. เคยซ่อน;
+            # 0/None ต้องยังดูรายละเอียดเวลา/HR/Training Load ของ cross-training ได้
+            "distance_m": [5000.0, 378.39, 202.89, 0.0, None],
+        }))
+
+        self.assertEqual(list(candidates["activity_id"]), [5, 4, 3, 2, 1])
+        self.assertEqual(len(candidates), 5)
 
 
 if __name__ == "__main__":
