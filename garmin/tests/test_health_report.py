@@ -77,6 +77,28 @@ def find(findings, prefix):
 
 
 class ScheduledTaskChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def test_real_provider_decodes_thai_windows_cp874_without_reader_crash(self):
+        raw = (
+            "Last Run Time: 8/9/2026 11:55:00 AM\n"
+            "Last Result: 0\n"
+            "Task To Run: D:\\\\สำรอง\\garmin-sync.bat\n"
+        ).encode("cp874")
+        completed = type(
+            "Completed", (), {"returncode": 0, "stdout": raw, "stderr": b""}
+        )()
+
+        with (
+            mock.patch.object(hr.os, "name", "nt"),
+            mock.patch.object(hr.subprocess, "run", return_value=completed) as run,
+        ):
+            output = hr.default_schtasks_provider("Synthetic-Task")
+
+        self.assertIn("สำรอง", output)
+        self.assertEqual(
+            hr.parse_schtasks_output(output)["last_result"], "0"
+        )
+        self.assertFalse(run.call_args.kwargs["text"])
+
     def test_task_reports_error_when_lane_status_says_failed(self):
         now = datetime(2026, 8, 6, 12, 0, 0)
         self.write_lane_status("fast", now - timedelta(minutes=5), ok=False, reason="token")

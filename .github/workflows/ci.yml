@@ -43,7 +43,7 @@ jobs:
           echo "ci-canary-${{ github.run_id }}-${{ github.run_attempt }}" > data/ci-canary.txt
           echo "CANARY_HASH=$(sha256sum data/ci-canary.txt | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
-      - name: Run unittest suite (expect 37/37)
+      - name: Run unittest suite (discovered dynamically)
         run: uv run --frozen python -m unittest discover -s tests -v
 
       - name: Verify garmin/data canary untouched

@@ -4,6 +4,7 @@ import math
 import sqlite3
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -207,14 +208,338 @@ INTENSITY_COLORS = {"เบา (Z1–2)": C_GREEN, "กลาง (Z3)": C_AMBER,
 
 
 # --- HELPERS ---
-def fmt_num(value, suffix=""):
-    """Format a metric value; show a dash when the data is missing (NaN)."""
-    return f"{value:.1f}{suffix}" if pd.notna(value) else "–"
+def fmt_num(value, suffix="", decimals=None):
+    """Format a metric without showing a misleading ``.0`` for integer values."""
+    if pd.isna(value):
+        return "–"
+    number = float(value)
+    if decimals is None:
+        decimals = 0 if number.is_integer() else 1
+    return f"{number:.{decimals}f}{suffix}"
 
 
 def fmt_text(value, fallback=""):
     """Return clean text without leaking Pandas NaN into the UI."""
     return value.strip() if isinstance(value, str) and value.strip() else fallback
+
+
+def has_any_value(df, columns):
+    """Return True when at least one existing column contains a real value."""
+    if df is None or df.empty:
+        return False
+    existing = [column for column in columns if column in df.columns]
+    return bool(existing) and bool(df[existing].notna().any().any())
+
+
+def available_series(df, label_map):
+    """Return ``[(column, human label), ...]`` only for non-empty chart traces."""
+    if df is None or df.empty:
+        return []
+    return [
+        (column, label)
+        for column, label in label_map.items()
+        if column in df.columns and df[column].notna().any()
+    ]
+
+
+def latest_field(df, column, timestamp_columns=()):
+    """Return the newest non-null value of one field, independently of other fields.
+
+    A daily wellness row is assembled from several Garmin endpoints.  Picking one
+    "latest row" can therefore hide yesterday's valid Sleep/HRV when today's row
+    only contains Body Battery.  This helper deliberately selects each field on
+    its own.  A source timestamp (notably Training Readiness) wins within a day;
+    calendar date and row ``fetched_at`` remain backward-compatible fallbacks.
+    """
+    if (df is None or df.empty or column not in df.columns
+            or "calendar_date" not in df.columns):
+        return None
+    candidates = df[df[column].notna()].copy()
+    if candidates.empty:
+        return None
+
+    candidates["_sort_calendar"] = pd.to_datetime(
+        candidates.get("calendar_date"), errors="coerce", utc=True
+    )
+    candidates["_sort_source"] = pd.Series(
+        pd.NaT, index=candidates.index, dtype="datetime64[ns, UTC]"
+    )
+    candidates["_source_column_used"] = None
+    for name in timestamp_columns:
+        if name not in candidates.columns:
+            continue
+        parsed = pd.to_datetime(candidates[name], errors="coerce", utc=True)
+        fill = candidates["_sort_source"].isna() & parsed.notna()
+        candidates.loc[fill, "_sort_source"] = parsed[fill]
+        candidates.loc[fill, "_source_column_used"] = name
+    if "fetched_at" in candidates.columns:
+        candidates["_sort_fetched"] = pd.to_datetime(
+            candidates["fetched_at"], errors="coerce", utc=True
+        )
+    else:
+        candidates["_sort_fetched"] = pd.NaT
+
+    candidates = candidates.sort_values(
+        ["_sort_calendar", "_sort_source", "_sort_fetched"],
+        na_position="first",
+    )
+    row = candidates.iloc[-1]
+    source_column = row.get("_source_column_used")
+    calendar = pd.to_datetime(row.get("calendar_date"), errors="coerce")
+    fetched = pd.to_datetime(row.get("fetched_at"), errors="coerce", utc=True)
+    source_timestamp = (
+        pd.to_datetime(row.get(source_column), errors="coerce")
+        if source_column else pd.NaT
+    )
+    return {
+        "value": row[column],
+        "date": calendar.date() if pd.notna(calendar) else None,
+        "fetched_at": fetched,
+        "source_timestamp": source_timestamp,
+        "source_column": source_column,
+        "row": row,
+    }
+
+
+def period_metric(df, column, today_date, exclude_partial_today=True,
+                  period_start=None, period_end=None):
+    """Calculate a period mean and expose the true sample denominator.
+
+    Today's daily aggregates (Stress, Body Battery high, kcal, floors, etc.) are
+    partial until local midnight.  They are excluded from averages by default but
+    remain visible in charts and detail tables.
+    """
+    today_date = pd.Timestamp(today_date).date()
+    start = period_start
+    end = period_end
+    if start is None and df is not None and not df.empty and "calendar_date" in df:
+        start_ts = pd.to_datetime(df["calendar_date"], errors="coerce").min()
+        start = start_ts.date() if pd.notna(start_ts) else None
+    if end is None and df is not None and not df.empty and "calendar_date" in df:
+        end_ts = pd.to_datetime(df["calendar_date"], errors="coerce").max()
+        end = end_ts.date() if pd.notna(end_ts) else None
+    start = pd.Timestamp(start).date() if start is not None else None
+    end = pd.Timestamp(end).date() if end is not None else None
+
+    selected_days = ((end - start).days + 1) if start and end and end >= start else 0
+    excluded_today = bool(
+        exclude_partial_today and start and end and start <= today_date <= end
+    )
+    total_days = max(0, selected_days - (1 if excluded_today else 0))
+    if (df is None or df.empty or column not in df.columns
+            or "calendar_date" not in df.columns):
+        return {
+            "mean": float("nan"), "count": 0, "total_days": total_days,
+            "selected_days": selected_days, "excluded_today": excluded_today,
+        }
+
+    values = df[["calendar_date", column]].copy()
+    values["calendar_date"] = pd.to_datetime(values["calendar_date"], errors="coerce").dt.date
+    if start:
+        values = values[values["calendar_date"] >= start]
+    if end:
+        values = values[values["calendar_date"] <= end]
+    if excluded_today:
+        values = values[values["calendar_date"] != today_date]
+    numeric = pd.to_numeric(values[column], errors="coerce").dropna()
+    return {
+        "mean": numeric.mean() if not numeric.empty else float("nan"),
+        "count": int(numeric.count()),
+        "total_days": total_days,
+        "selected_days": selected_days,
+        "excluded_today": excluded_today,
+    }
+
+
+def fmt_recovery_time(minutes):
+    """Format Garmin Recovery Time, whose API/database raw unit is minutes."""
+    if pd.isna(minutes):
+        return "–"
+    total_minutes = max(0, int(round(float(minutes))))
+    hours, remaining = divmod(total_minutes, 60)
+    if hours and remaining:
+        return f"{hours} ชม. {remaining} นาที"
+    if hours:
+        return f"{hours} ชม."
+    return f"{remaining} นาที"
+
+
+def get_recovery_minutes(row):
+    """Read new schema first; legacy ``_hrs`` also contains raw API minutes."""
+    if row is None:
+        return float("nan")
+    new_value = row.get("recovery_time_min")
+    if pd.notna(new_value):
+        return new_value
+    return row.get("recovery_time_hrs", float("nan"))
+
+
+def recovery_minutes_series(df):
+    """Return Recovery Time minutes without dropping calendar rows that are NULL.
+
+    The new column wins per row; the misleadingly named legacy ``_hrs`` column is
+    a raw-minute fallback.  Keeping the original index lets Plotly render a real
+    gap when ``connectgaps=False`` instead of drawing across a missing day.
+    """
+    if df is None:
+        return pd.Series(dtype=float)
+    values = pd.Series(float("nan"), index=df.index, dtype=float)
+    if "recovery_time_min" in df.columns:
+        values = pd.to_numeric(df["recovery_time_min"], errors="coerce")
+    if "recovery_time_hrs" in df.columns:
+        values = values.combine_first(
+            pd.to_numeric(df["recovery_time_hrs"], errors="coerce")
+        )
+    return values
+
+
+def bangkok_date(now_utc=None):
+    """Return the dashboard business date, pinned to Asia/Bangkok."""
+    if now_utc is None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+    elif isinstance(now_utc, pd.Timestamp):
+        now_utc = now_utc.to_pydatetime()
+    if now_utc.tzinfo is None:
+        # Explicit contract for deterministic tests and legacy callers: naive
+        # timestamps supplied here represent UTC, never the host machine zone.
+        now_utc = now_utc.replace(tzinfo=datetime.timezone.utc)
+    return now_utc.astimezone(ZoneInfo("Asia/Bangkok")).date()
+
+
+def to_bangkok_timestamp(value):
+    """Parse a DB UTC timestamp (including legacy naive UTC) as Bangkok time."""
+    stamp = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(stamp):
+        return pd.NaT
+    return stamp.tz_convert(ZoneInfo("Asia/Bangkok"))
+
+
+def device_inventory_labels(records, now_utc=None, stale_days=90):
+    """Format recently seen devices and omit inventory entries stale >90 days."""
+    if now_utc is None:
+        now = pd.Timestamp.now(tz="UTC")
+    else:
+        now = pd.to_datetime(now_utc, errors="coerce", utc=True)
+        if pd.isna(now):
+            now = pd.Timestamp.now(tz="UTC")
+
+    by_name = {}
+    for record in records or []:
+        product_name = record.get("product_display_name")
+        display_name = record.get("display_name")
+        name = next(
+            (value.strip() for value in (product_name, display_name)
+             if isinstance(value, str) and value.strip()),
+            None,
+        )
+        if not name:
+            continue
+        seen = pd.to_datetime(record.get("last_seen_at_utc"), errors="coerce", utc=True)
+        if pd.notna(seen) and (now - seen).total_seconds() > stale_days * 86400:
+            continue
+        previous = by_name.get(name)
+        if previous is None or (pd.notna(seen) and (pd.isna(previous) or seen > previous)):
+            by_name[name] = seen
+
+    labels = []
+    for name, seen in by_name.items():
+        if pd.notna(seen):
+            local_seen = seen.tz_convert(ZoneInfo("Asia/Bangkok"))
+            labels.append(f"{name} (พบล่าสุด {local_seen.strftime('%d/%m/%Y')})")
+        else:
+            labels.append(f"{name} (เคยพบ; ไม่มีเวลา last_seen)")
+    return labels
+
+
+def field_freshness(field_snapshot, today_date):
+    """Human-readable field date/freshness; never imply row freshness per field."""
+    if not field_snapshot or not field_snapshot.get("date"):
+        return "ไม่มีข้อมูล"
+    today_date = pd.Timestamp(today_date).date()
+    value_date = field_snapshot["date"]
+    age = (today_date - value_date).days
+    if age == 0:
+        relative = "วันนี้"
+    elif age == 1:
+        relative = "เมื่อวาน"
+    elif age > 1:
+        relative = f"{age} วันก่อน"
+    else:
+        relative = "วันที่ในอนาคต"
+    return f"{value_date.strftime('%d/%m/%Y')} · {relative}"
+
+
+def field_age_days(field_snapshot, today_date):
+    """Return calendar-day age for a field snapshot, or None when unavailable."""
+    if not field_snapshot or not field_snapshot.get("date"):
+        return None
+    return (pd.Timestamp(today_date).date() - field_snapshot["date"]).days
+
+
+def readiness_when(field_snapshot, today_date):
+    """Prefer the Garmin snapshot timestamp and fall back to the daily date."""
+    if not field_snapshot:
+        return "ไม่มีข้อมูล"
+    stamp = field_snapshot.get("source_timestamp")
+    if pd.notna(stamp):
+        # Local timestamp is preferred by caller.  UTC timestamps retain their
+        # timezone marker rather than being silently presented as Thai local time.
+        suffix = " UTC" if field_snapshot.get("source_column") == "readiness_timestamp_utc" else " น."
+        return f"{stamp.strftime('%d/%m/%Y %H:%M')}{suffix}"
+    return field_freshness(field_snapshot, today_date)
+
+
+def wellness_quality_flags(df):
+    """Flag plausible source anomalies without removing or rewriting raw values."""
+    if df is None or df.empty:
+        return []
+    flags = []
+
+    def _dated_values(mask, column, limit=4):
+        rows = df.loc[mask, ["calendar_date", column]].head(limit)
+        return ", ".join(
+            f"{str(row['calendar_date'])[:10]}={fmt_num(row[column])}"
+            for _, row in rows.iterrows()
+        )
+
+    if "resting_hr" in df:
+        values = pd.to_numeric(df["resting_hr"], errors="coerce")
+        mask = values.notna() & ((values < 30) | (values > 100))
+        if mask.any():
+            flags.append("RHR นอกช่วงตรวจทาน 30–100 bpm: " + _dated_values(mask, "resting_hr"))
+    if {"body_battery_high", "body_battery_low"}.issubset(df.columns):
+        high = pd.to_numeric(df["body_battery_high"], errors="coerce")
+        low = pd.to_numeric(df["body_battery_low"], errors="coerce")
+        mask = ((high.notna() & ~high.between(5, 100))
+                | (low.notna() & ~low.between(5, 100))
+                | (high.notna() & low.notna() & (high < low)))
+        if mask.any():
+            dates = ", ".join(str(value)[:10] for value in df.loc[mask, "calendar_date"].head(4))
+            flags.append(f"Body Battery นอกช่วง 5–100 หรือ high<low: {dates}")
+    if "sleep_duration_sec" in df:
+        duration = pd.to_numeric(df["sleep_duration_sec"], errors="coerce")
+        mask = duration.notna() & (duration > 0) & (duration < 3 * 3600)
+        if mask.any():
+            dates = ", ".join(str(value)[:10] for value in df.loc[mask, "calendar_date"].head(4))
+            flags.append(f"เวลานอนสั้นกว่า 3 ชม. (อาจเป็นการนอนสั้นจริง/บันทึกไม่ครบ): {dates}")
+    return flags
+
+
+def mark_partial_today(fig, today_date, period_start, period_end):
+    """Mark today's still-changing point on a Plotly date chart."""
+    start = pd.Timestamp(period_start).date()
+    end = pd.Timestamp(period_end).date()
+    if start <= today_date <= end:
+        x_value = datetime.datetime.combine(today_date, datetime.time.min)
+        fig.add_shape(
+            type="line", x0=x_value, x1=x_value, y0=0, y1=1,
+            xref="x", yref="paper", line=dict(color="#7a7f87", dash="dot", width=1),
+        )
+        fig.add_annotation(
+            x=x_value, y=1, xref="x", yref="paper", text="วันนี้ · ยังไม่ครบวัน",
+            showarrow=False, xanchor="left", yanchor="bottom", font=dict(size=10, color="#61656d"),
+        )
+    return fig
 
 
 def fmt_pace(pace_min_per_km):
@@ -261,6 +586,22 @@ def acwr_status(ratio):
     if ratio < 0.8:
         return "🔵", "ต่ำกว่าฐาน"
     return "🟢", "ปลอดภัย"
+
+
+def team_status(acwr, flags, has_workload, wellness_core_count, has_any_wellness=None):
+    """Classify team readiness without ever turning missing evidence green."""
+    flags = list(flags or [])
+    if has_any_wellness is None:
+        has_any_wellness = wellness_core_count > 0
+    if not has_workload and not has_any_wellness:
+        return "⚪ ไม่มีข้อมูล"
+    if (pd.notna(acwr) and acwr > 1.5) or len(flags) >= 2:
+        return "🔴 ต้องพัก/ลดโหลด"
+    if len(flags) == 1:
+        return "🟡 เฝ้าระวัง"
+    if pd.isna(acwr) or wellness_core_count < 3:
+        return "⚪ ข้อมูลไม่พอ"
+    return "🟢 พร้อมซ้อม"
 
 
 def compute_acwr(daily, end_date):
@@ -317,8 +658,16 @@ def load_athletes():
 
 
 # คอลัมน์ที่เป็นข้อความ (ที่เหลือ coerce เป็นตัวเลขทั้งหมด กัน object dtype ตอนคอลัมน์ NULL ล้วน)
-_WELLNESS_TEXT = {"calendar_date", "hrv_status", "training_status", "readiness_level",
-                  "readiness_feedback", "fetched_at"}
+_WELLNESS_TEXT = {
+    "calendar_date", "hrv_status", "training_status", "readiness_level",
+    "readiness_feedback", "readiness_feedback_long", "fetched_at",
+    "repair_attempted_at_utc",
+    "readiness_timestamp_utc", "readiness_timestamp_local",
+    "readiness_input_context", "readiness_device_id",
+    "readiness_sleep_factor_feedback", "recovery_time_factor_feedback",
+    "recovery_time_change_phrase", "acwr_factor_feedback",
+    "hrv_factor_feedback", "stress_history_factor_feedback",
+}
 _ACTIVITY_TEXT = {"activity_type", "activity_name", "start_time_local", "start_time_utc",
                   "training_effect_label", "location_name", "fetched_at"}
 
@@ -404,7 +753,7 @@ def athlete_has_load(athlete_id):
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def athlete_has_training_readiness(athlete_id):
-    """นาฬิกาเคยส่ง Training Readiness ไหม — ใช้แยก "รุ่นไม่รองรับ" จาก "วันนี้ยังไม่ sync"""
+    """บัญชีนี้เคยได้รับ Training Readiness หรือไม่ (ไม่ใช้ฟันธงรุ่นนาฬิกา)."""
     conn = sqlite3.connect(DB_PATH)
     n = conn.execute(
         "SELECT COUNT(*) FROM fact_daily_wellness "
@@ -412,6 +761,43 @@ def athlete_has_training_readiness(athlete_id):
         (athlete_id,)).fetchone()[0]
     conn.close()
     return n > 0
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def load_athlete_devices(athlete_id):
+    """Load recently seen device labels when the optional inventory table exists."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dim_athlete_device'"
+        ).fetchone()
+        if not exists:
+            return []
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(dim_athlete_device)").fetchall()
+        }
+        name_columns = [
+            column for column in ("product_display_name", "display_name") if column in columns
+        ]
+        if not name_columns or "athlete_id" not in columns:
+            return []
+        selected_columns = list(name_columns)
+        if "last_seen_at_utc" in columns:
+            selected_columns.append("last_seen_at_utc")
+        select_columns = ", ".join(selected_columns)
+        order = " ORDER BY is_primary_training_device DESC, is_primary_device DESC" \
+            if {"is_primary_training_device", "is_primary_device"}.issubset(columns) else ""
+        rows = conn.execute(
+            f"SELECT {select_columns} FROM dim_athlete_device WHERE athlete_id = ?{order}",
+            (athlete_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    records = []
+    for row in rows:
+        records.append(dict(zip(selected_columns, row)))
+    return device_inventory_labels(records, stale_days=90)
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -597,7 +983,8 @@ def auto_refresh_dashboard():
 
 
 # --- UI START ---
-today = datetime.date.today()
+# Business date is always Thailand time, independent of the server/Windows timezone.
+today = bangkok_date()
 st.title("Run Performance Dashboard")
 st.caption(f"ภาพรวมการฝึกซ้อมและการฟื้นตัว · ข้อมูลวันนี้ {today.strftime('%d/%m/%Y')}")
 
@@ -629,14 +1016,19 @@ with st.sidebar:
     # ต้องกรองแถวที่ยังไม่มีค่าจริง — full sync สร้างแถวของวันใหม่ไว้ก่อนแม้ทุกช่องเป็น NULL
     # ถ้านับแถวเปล่าด้วย บรรทัดนี้จะโชว์ "วันนี้" ตลอดทั้งที่ข้อมูลจริงหยุดไปแล้ว
     # (เกณฑ์เดียวกับ load_last_data_dates — เคยหลอกมาแล้วเคสพี่เก้า 22 ก.ค. 69)
-    # fetched_at เก็บเป็น UTC (datetime('now') ของ SQLite) — ให้ SQLite แปลงเป็นเวลาเครื่องเอง
+    # fetched_at เป็น UTC (ทั้ง ISO Z ใหม่และ legacy naive UTC) — แปลงใน Python เป็น
+    # Asia/Bangkok โดยชัดเจน ห้ามพึ่ง timezone ของเครื่องผ่าน SQLite 'localtime'
     _lw, _lw_fetched = _c.execute(
-        """SELECT MAX(calendar_date), datetime(MAX(fetched_at), 'localtime')
+        """SELECT MAX(calendar_date), MAX(fetched_at)
            FROM fact_daily_wellness
            WHERE resting_hr IS NOT NULL OR sleep_score IS NOT NULL
               OR body_battery_high IS NOT NULL OR hrv_last_night IS NOT NULL""").fetchone()
     _c.close()
-    _lw_txt = f"{_lw} (ดึงล่าสุด {_lw_fetched[11:16]} น.)" if _lw and _lw_fetched else (_lw or "—")
+    _lw_fetched_bkk = to_bangkok_timestamp(_lw_fetched)
+    _lw_txt = (
+        f"{_lw} (ดึงล่าสุด {_lw_fetched_bkk.strftime('%H:%M')} น. เวลาไทย)"
+        if _lw and pd.notna(_lw_fetched_bkk) else (_lw or "—")
+    )
     st.caption(f"ข้อมูลล่าสุด — กิจกรรม: {_la or '—'} · สุขภาพ: {_lw_txt}")
     st.caption("ข้อมูลจะรีเฟรชอัตโนมัติทุก 60 วินาที หรือกดรีเฟรชหลังนาฬิกา sync")
 
@@ -644,6 +1036,10 @@ with st.sidebar:
     selected_name = st.selectbox("นักกีฬา", options=list(athlete_options.keys()), key="selected_athlete")
     athlete_id = athlete_options[selected_name]
     selected_slug = athletes_df.loc[athletes_df["athlete_id"] == athlete_id, "slug"].iloc[0]
+    selected_anchor = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in str(selected_slug).lower()
+    ).strip("-")
 
     st.markdown("**ช่วงข้อมูลสำหรับหน้าวิเคราะห์ย้อนหลัง**")
     history_period = st.segmented_control(
@@ -810,38 +1206,56 @@ with tab_team:
                 chronic_wk = win28["value"].sum() / 4
                 acwr = acute / chronic_wk
 
-        # wellness ล่าสุด + ฐาน 30 วัน
-        w = load_wellness_data(aid, (today - datetime.timedelta(days=30)).isoformat(), today.isoformat())
-        bb = bb_now = sleep = rhr = hrv_ms = ready = float("nan")
+        # Wellness แต่ละ endpoint อาจมาคนละรอบ จึงเลือก "ล่าสุดแยกทีละ field"
+        # แทนการใช้แถวเดียวแล้วทำให้ Sleep/HRV ที่ยังใช้ได้ถูกซ่อนโดย snapshot บางส่วนของวันนี้
+        w = load_wellness_data(
+            aid, (today - datetime.timedelta(days=30)).isoformat(), today.isoformat()
+        )
+        sleep_snap = latest_field(w, "sleep_score")
+        rhr_snap = latest_field(w, "resting_hr")
+        hrv_snap = latest_field(w, "hrv_last_night")
+        bb_high_snap = latest_field(w, "body_battery_high")
+        bb_now_snap = latest_field(w, "bb_most_recent")
+        ready_snap = latest_field(
+            w,
+            "training_readiness",
+            ("readiness_timestamp_local", "readiness_timestamp_utc"),
+        )
+        train_snap = latest_field(w, "training_status")
+
+        # วันนี้แสดงระดับล่าสุดระหว่างวัน; วันก่อนหน้าแสดง high ของวันเพื่อไม่ปนความหมาย
+        bb_display_snap = (
+            bb_now_snap
+            if bb_now_snap and bb_now_snap.get("date") == today
+            else bb_high_snap
+        )
+        bb = bb_high_snap["value"] if bb_high_snap else float("nan")
+        bb_now = bb_display_snap["value"] if bb_display_snap else float("nan")
+        sleep = sleep_snap["value"] if sleep_snap else float("nan")
+        rhr = rhr_snap["value"] if rhr_snap else float("nan")
+        hrv_ms = hrv_snap["value"] if hrv_snap else float("nan")
+        ready = ready_snap["value"] if ready_snap else float("nan")
+        hrv_stat = fmt_text(hrv_snap["row"].get("hrv_status")) if hrv_snap else ""
+        ready_level = fmt_text(ready_snap["row"].get("readiness_level")) if ready_snap else ""
+        train_stat = fmt_text(train_snap["value"]) if train_snap else ""
+
         rhr_delta = float("nan")
-        hrv_stat = train_stat = ready_level = None
-        day_complete = True
-        # "ล่าสุด" = แถวล่าสุดที่มีข้อมูลจริง ไม่ใช่แถวล่าสุดตามปฏิทิน — วันใหม่ถูก insert
-        # เป็น NULL ทั้งแถวได้ถ้านักกีฬายังไม่ sync นาฬิกา (เคสพี่เก้า 22 ก.ค. 69) ถ้าหยิบแถวนั้น
-        # ตรงๆ การ์ดจะว่างหมดและ "ซ่อนธง" ของวันก่อนหน้า (เช่น sleep 52 ที่ควรเตือน)
-        _key_cols = ["resting_hr", "sleep_score", "body_battery_high", "hrv_last_night"]
-        w_data = w[w[_key_cols].notna().any(axis=1)] if not w.empty else w
-        wellness_date = None          # วันที่ของแถว wellness ที่ใช้จริง (ไว้บอกในตารางถ้าไม่ใช่วันนี้)
-        if not w_data.empty:
-            latest = w_data.iloc[-1]
-            wellness_date = datetime.date.fromisoformat(str(latest["calendar_date"])[:10])
-            bb, sleep, rhr = latest["body_battery_high"], latest["sleep_score"], latest["resting_hr"]
-            # ระดับ ณ ตอนนี้ (fast wellness อัปเดตทุก 30 นาที) — ต่างจาก high ที่เป็นยอดของทั้งวัน
-            bb_now = latest["bb_most_recent"]
-            hrv_ms, hrv_stat = latest["hrv_last_night"], latest["hrv_status"]
-            ready = latest["training_readiness"]
-            # อาจเป็น NaN (float) ไม่ใช่ None เมื่อ SQL คืน NULL — เช็คชนิดตรงๆ กัน .split() พัง
-            _ts_raw = latest["training_status"]
-            train_stat = _ts_raw if isinstance(_ts_raw, str) else None
-            _rl_raw = latest["readiness_level"]
-            ready_level = _rl_raw if isinstance(_rl_raw, str) else None
-            baseline = w_data.iloc[:-1]["resting_hr"].dropna()
+        if rhr_snap and "resting_hr" in w:
+            rhr_dates = pd.to_datetime(w["calendar_date"], errors="coerce").dt.date
+            baseline = pd.to_numeric(
+                w.loc[rhr_dates < rhr_snap["date"], "resting_hr"], errors="coerce"
+            ).dropna()
             if pd.notna(rhr) and len(baseline) >= 7:
                 rhr_delta = rhr - baseline.mean()
-            # แถวที่ sync ภายในวันเดียวกัน = ค่ายังไม่ครบวัน (Body Battery จุดสูงสุดยังไม่เกิด)
-            fetched = pd.to_datetime(latest["fetched_at"], errors="coerce")
-            if pd.notna(fetched):
-                day_complete = fetched.date() > datetime.date.fromisoformat(str(latest["calendar_date"])[:10])
+
+        # วันนี้ไม่ใช่วันเต็มเสมอ ไม่ใช้ fetched_at (UTC) มาเทียบกับวันที่ไทย
+        day_complete = bool(bb_high_snap and bb_high_snap.get("date") < today)
+        core_snaps = [bb_display_snap, sleep_snap, rhr_snap, hrv_snap]
+        fresh_core_count = sum(
+            1 for snapshot in core_snaps
+            if field_age_days(snapshot, today) is not None
+            and 0 <= field_age_days(snapshot, today) <= 1
+        )
 
         # ธงเฝ้าระวัง
         flags = []
@@ -849,45 +1263,53 @@ with tab_team:
             flags.append(f"โหลดพุ่ง ACWR {acwr:.2f}")
         elif pd.notna(acwr) and acwr > 1.3:
             flags.append(f"โหลดขาขึ้น ACWR {acwr:.2f}")
-        if pd.notna(bb) and bb < 40 and day_complete:
+        if (pd.notna(bb) and bb < 40 and day_complete
+                and field_age_days(bb_high_snap, today) <= 1):
             flags.append(f"Body Battery ต่ำ ({bb:.0f})")
-        if pd.notna(sleep) and sleep < 60:
+        if pd.notna(sleep) and sleep < 60 and field_age_days(sleep_snap, today) <= 1:
             flags.append(f"นอนแย่ ({sleep:.0f})")
-        if pd.notna(rhr_delta) and rhr_delta >= 5:
+        if (pd.notna(rhr_delta) and rhr_delta >= 5
+                and field_age_days(rhr_snap, today) <= 1):
             flags.append(f"RHR สูงกว่าฐาน +{rhr_delta:.0f}")
-        if hrv_stat in ("LOW", "UNBALANCED"):
+        if (hrv_stat in ("LOW", "UNBALANCED")
+                and field_age_days(hrv_snap, today) <= 1):
             flags.append(f"HRV {hrv_stat}")
-        # training_status ของ Garmin (device-dependent — พี่เก้ามี, ต้อง/แดนเป็น NULL)
+        # Training Status ขึ้นกับอุปกรณ์/บัญชีและ endpoint; ใช้ค่าที่เคยได้รับจริงโดยไม่
+        # เหมารวมกับ respiration หรือสรุปจาก NULL ว่าอุปกรณ์ไม่รองรับ
         # ค่าดิบมี suffix ตัวเลข เช่น STRAINED_1 / UNPRODUCTIVE_5 → ตัดเหลือคำหลักก่อนเทียบ
         _ts_base = (train_stat or "").split("_")[0]
         _ts_flag = {"STRAINED": "ล้าสะสม (Strained)",
                     "OVERREACHING": "โหลดเกินตัว (Overreaching)",
                     "UNPRODUCTIVE": "ซ้อมไม่ขึ้น (Unproductive)"}
-        if _ts_base in _ts_flag:
+        if (_ts_base in _ts_flag and train_snap
+                and field_age_days(train_snap, today) <= 1):
             flags.append(f"Garmin: {_ts_flag[_ts_base]}")
-        # Training Readiness ของ Garmin (device-dependent เช่นกัน — พี่เก้ามี, ต้อง/แดนเป็น NULL)
-        # ค่าอัปเดตระหว่างวันจาก fast wellness แล้ว จึงใช้ตัดสิน "วันนี้ซ้อมหนักได้ไหม" ได้จริง
-        if ready_level in ("POOR", "LOW"):
+        # Training Readiness: ประวัติปัจจุบันมีเฉพาะ P'kao ส่วน Tong/Dan ยังไม่เคยได้รับค่า;
+        # นี่คือสถานะข้อมูล ไม่ใช่ข้อสรุปความสามารถของรุ่นนาฬิกา และค่าอัปเดตได้ระหว่างวัน
+        if (ready_level in ("POOR", "LOW") and ready_snap
+                and field_age_days(ready_snap, today) <= 1):
             flags.append(f"Readiness ต่ำ ({ready:.0f} {ready_level.title()})"
                          if pd.notna(ready) else f"Readiness {ready_level.title()}")
 
-        hard_red = pd.notna(acwr) and acwr > 1.5
-        no_data = daily.empty and w_data.empty
-        if no_data:
-            # ไม่มีทั้ง workload และ wellness เลย — ห้ามตกไปเคส 🟢 "พร้อมซ้อม" ทั้งที่ไม่รู้อะไร
-            # (เกิดได้ตอนเพิ่มนักกีฬาใหม่ที่ยังไม่ backfill หรือ token เสียจนข้อมูลขาดยาว)
-            status = "⚪ ไม่มีข้อมูล"
-        elif hard_red or len(flags) >= 2:
-            status = "🔴 ต้องพัก/ลดโหลด"
-        elif len(flags) == 1:
-            status = "🟡 เฝ้าระวัง"
-        else:
-            status = "🟢 พร้อมซ้อม"
+        # ห้ามเขียวเมื่อ ACWR เป็น NaN หรือ wellness สดมีไม่พอให้ประเมิน
+        status = team_status(
+            acwr, flags, not daily.empty, fresh_core_count,
+            any(snapshot is not None for snapshot in core_snaps),
+        )
 
-        # ค่าบนการ์ดมาจากแถวเก่า (นักกีฬายังไม่ sync นาฬิกา) — บอกวันที่กำกับกันเข้าใจผิดว่าเป็นของวันนี้
-        stale_note = ""
-        if wellness_date is not None and wellness_date < today:
-            stale_note = f" (wellness ล่าสุด {wellness_date.strftime('%d/%m')})"
+        coverage_notes = []
+        if pd.isna(acwr):
+            coverage_notes.append("ACWR ยังไม่มี")
+        if fresh_core_count < 3:
+            coverage_notes.append(f"wellness สด {fresh_core_count}/4 ค่า")
+        freshness_note = " · ".join(
+            f"{label} {snapshot['date'].strftime('%d/%m')}"
+            for label, snapshot in (
+                ("BB", bb_display_snap), ("Sleep", sleep_snap),
+                ("RHR", rhr_snap), ("HRV", hrv_snap), ("Readiness", ready_snap),
+            )
+            if snapshot and snapshot.get("date")
+        ) or "ไม่มี wellness"
 
         emoji, acwr_txt = acwr_status(acwr)
         team_rows.append({
@@ -901,15 +1323,17 @@ with tab_team:
             "โหลด 7 วัน": (f"{acute:.0f} {unit}" if metric == "training_load"
                           else f"{acute:.1f} {unit}") if pd.notna(acute) else "–",
             "เซสชัน 7 วัน": sessions_7d,
-            # วันที่ยังไม่จบ โชว์ระดับ "ตอนนี้" (สดจาก fast wellness) แทนยอดสูงสุดของวันที่ยังไม่เกิด
-            "Body Battery": (bb_now if pd.notna(bb_now) else bb) if not day_complete
-                            else (bb if pd.notna(bb) else None),
+            "Body Battery ตอนนี้/ล่าสุด": bb_now if pd.notna(bb_now) else None,
             "Sleep": sleep if pd.notna(sleep) else None,
             "RHR": rhr if pd.notna(rhr) else None,
             "ΔRHR": f"{rhr_delta:+.0f}" if pd.notna(rhr_delta) else "–",
-            "HRV คืนล่าสุด": f"{hrv_ms:.0f} ms · {hrv_stat}" if pd.notna(hrv_ms) and hrv_stat else "–",
+            "HRV คืนล่าสุด": ((f"{hrv_ms:.0f} ms" + (f" · {hrv_stat}" if hrv_stat else ""))
+                              if pd.notna(hrv_ms) else "–"),
+            "Readiness": ready if pd.notna(ready) else None,
+            "ความสดรายค่า": freshness_note,
             "ธงเฝ้าระวัง": (" | ".join(flags) if flags else "—")
-                           + ("" if day_complete else " (BB = ระดับตอนนี้ ยังไม่ครบวัน)") + stale_note,
+                           + ((" · ข้อมูลไม่พอ: " + ", ".join(coverage_notes))
+                              if status.startswith("⚪") and coverage_notes else ""),
         })
 
     team_df = pd.DataFrame(team_rows)
@@ -919,9 +1343,10 @@ with tab_team:
         "ธงเฝ้าระวัง",
         "ACWR",
         "โหลด 7 วัน",
-        "Body Battery",
+        "Body Battery ตอนนี้/ล่าสุด",
         "Sleep",
         "HRV คืนล่าสุด",
+        "ความสดรายค่า",
     ]
     st.dataframe(
         team_df[team_summary_columns],
@@ -931,10 +1356,10 @@ with tab_team:
             "ACWR": st.column_config.NumberColumn("ACWR", format="%.2f",
                                                   help="โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ 28 วัน — ปลอดภัย 0.8–1.3 | "
                                                        "TL = Garmin training_load (รวม cross-training), km = ระยะวิ่ง"),
-            "Body Battery": st.column_config.NumberColumn(
-                "Body Battery", format="%.0f",
-                help="วันที่จบแล้ว = ยอดสูงสุดของวัน | วันนี้ = ระดับ ณ ตอนนี้ "
-                     "(อัปเดตทุก 30 นาทีจาก fast wellness sync)"),
+            "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
+                "Body Battery ตอนนี้/ล่าสุด", format="%.0f",
+                help="วันนี้ = ระดับล่าสุดระหว่างวัน; ถ้าไม่มีของวันนี้ = high ของวันล่าสุด "
+                     "โดยวันที่จริงอยู่ในคอลัมน์ความสดรายค่า"),
             "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
         },
     )
@@ -946,25 +1371,36 @@ with tab_team:
             column_config={
                 "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
                 "ACWR": st.column_config.NumberColumn("ACWR", format="%.2f"),
-                "Body Battery": st.column_config.NumberColumn("Body Battery", format="%.0f"),
+                "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
+                    "Body Battery ตอนนี้/ล่าสุด", format="%.0f"),
                 "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
                 "RHR": st.column_config.NumberColumn("RHR", format="%.0f"),
+                "Readiness": st.column_config.NumberColumn("Readiness", format="%.0f"),
                 "สถานะซ้อม (Garmin)": st.column_config.TextColumn(
                     "สถานะซ้อม (Garmin)",
                     help="สถานะที่ Garmin คำนวณเองและขึ้นกับรุ่นนาฬิกา"),
             },
         )
 
+    st.caption(
+        "Body Battery ระหว่างวันแสดงเพื่อให้เห็นสภาพล่าสุด แต่ยังไม่ใช้เป็นธงเตือน: "
+        "ค่าต่ำระหว่างวันอาจเกิดจากกิจกรรมตามปกติ; ระบบใช้ Body Battery high ของวันที่จบแล้วแทน"
+    )
+
     with st.expander("เกณฑ์ที่ใช้ประเมิน", icon=":material/info:"):
         st.markdown(r"""
 **สถานะ:** 🔴 ต้องพัก = ACWR>1.5 หรือมีธงอย่างน้อย 2 ข้อ ·
 🟡 เฝ้าระวัง = มีธง 1 ข้อ ·
-🟢 พร้อมซ้อม = ไม่มีธง ·
+🟢 พร้อมซ้อม = ไม่มีธง พร้อมมี ACWR และ wellness สดอย่างน้อย 3/4 ค่า ·
+⚪ ข้อมูลไม่พอ = ACWR ยังเป็นค่าว่างหรือ wellness สดน้อยกว่า 3/4 ค่า ·
 ⚪ ไม่มีข้อมูล = ยังไม่มีทั้ง workload และ wellness
 
 **ธงเฝ้าระวัง:** ACWR>1.3 · Body Battery<40 · Sleep<60 ·
 RHR สูงกว่าฐาน≥+5 · HRV LOW/UNBALANCED ·
-Garmin status Strained/Overreaching/Unproductive
+Training Readiness LOW/POOR · Garmin status Strained/Overreaching/Unproductive
+
+**Body Battery ตอนนี้:** แสดงเป็นบริบทแต่ไม่ใช้เป็นธงระหว่างวัน; ธง BB<40 ใช้กับ
+Body Battery high ของวันที่จบแล้ว เพื่อลดการเตือนจากการลดลงตามปกติระหว่างวัน
 
 _ACWR ใช้ Garmin training\_load รวม cross-training ถ้านาฬิกาให้
 ไม่เช่นนั้นใช้ระยะวิ่ง_
@@ -975,38 +1411,30 @@ _ACWR ใช้ Garmin training\_load รวม cross-training ถ้านา�
 # TAB 1: TODAY — เปิดมาเห็นข้อมูลของวันนี้ทันที
 # =====================================================================
 with tab_today:
-    st.header(f"วันนี้ของ {selected_name}")
+    st.header(f"วันนี้ของ {selected_name}", anchor=f"today-{selected_anchor}")
     st.caption(
-        f"{today.strftime('%d/%m/%Y')} · แสดงเฉพาะข้อมูลวันนี้ "
+        f"{today.strftime('%d/%m/%Y')} · ใช้ค่าของวันนี้เมื่อมี มิฉะนั้นแสดงค่าล่าสุดพร้อมวันที่ "
         "ส่วนสถานะโหลดใช้บริบทสะสม 7–28 วันเพื่อไม่ตัดสินจากวันเดียว"
     )
 
     selected_team = team_df[team_df["นักกีฬา"] == selected_name]
     team_row = selected_team.iloc[0] if not selected_team.empty else None
 
+    recent_wellness = load_wellness_data(
+        athlete_id, (today - datetime.timedelta(days=30)).isoformat(), today.isoformat()
+    )
     today_wellness = load_wellness_data(athlete_id, today.isoformat(), today.isoformat())
     today_activities = load_activity_data(athlete_id, today.isoformat(), today.isoformat())
     if not today_activities.empty:
         today_activities["start_time_local"] = pd.to_datetime(today_activities["start_time_local"])
         today_activities["distance_km"] = today_activities["distance_m"] / 1000
 
-    wellness_keys = ["resting_hr", "sleep_score", "body_battery_high", "hrv_last_night"]
-    real_today_wellness = (
-        today_wellness[today_wellness[wellness_keys].notna().any(axis=1)]
-        if not today_wellness.empty
-        else today_wellness
-    )
-    wellness_today = real_today_wellness.iloc[-1] if not real_today_wellness.empty else None
     readiness_supported = athlete_has_training_readiness(athlete_id)
     training_load_supported = athlete_has_load(athlete_id)
+    device_names = load_athlete_devices(athlete_id)
 
-    if wellness_today is None:
-        st.info(
-            "ยังไม่มีข้อมูลสุขภาพของวันนี้จากนาฬิกา "
-            "หน้าจอจะอัปเดตอัตโนมัติหลัง Garmin sync",
-            icon=":material/sync:",
-        )
-    elif team_row is not None:
+    # สถานะโหลดต้องเตือนแม้ wellness วันนี้ยังไม่มา — ไม่ผูกไว้กับ if/elif เดียวกัน
+    if team_row is not None:
         status_text = str(team_row["สถานะ"])
         flag_text = str(team_row["ธงเฝ้าระวัง"])
         message = f"**{status_text}**"
@@ -1021,69 +1449,112 @@ with tab_today:
         else:
             st.info(message, icon=":material/info:")
 
-    st.subheader("การฟื้นตัววันนี้")
-    if wellness_today is None:
-        st.caption("ยังไม่มีค่าของวันนี้")
+    today_core_present = has_any_value(
+        today_wellness,
+        ["resting_hr", "sleep_score", "body_battery_high", "bb_most_recent", "hrv_last_night"],
+    )
+    if not today_core_present:
+        st.info(
+            "ยังไม่มีข้อมูลสุขภาพของวันนี้จากนาฬิกา "
+            "จึงแสดงค่าล่าสุดที่ยังใช้ได้พร้อมวันที่กำกับด้านล่าง",
+            icon=":material/sync:",
+        )
+
+    bb_now_snap = latest_field(recent_wellness, "bb_most_recent")
+    bb_high_snap = latest_field(recent_wellness, "body_battery_high")
+    if bb_now_snap and (
+        not bb_high_snap or bb_now_snap.get("date") >= bb_high_snap.get("date")
+    ):
+        bb_snap = bb_now_snap
     else:
-        body_battery_now = wellness_today.get("bb_most_recent")
-        if pd.isna(body_battery_now):
-            body_battery_now = wellness_today.get("body_battery_high")
-        with st.container(horizontal=True):
-            st.metric(
-                "Body Battery ตอนนี้",
-                fmt_num(body_battery_now),
-                help="ระดับล่าสุดระหว่างวัน ไม่ใช่ค่าสูงสุดของวันที่ยังไม่จบ",
-                border=True,
-            )
-            st.metric("Sleep score", fmt_num(wellness_today.get("sleep_score")), border=True)
-            st.metric(
-                "Resting HR",
-                fmt_num(wellness_today.get("resting_hr"), " bpm"),
-                border=True,
-            )
-            st.metric(
-                "HRV คืนล่าสุด",
-                fmt_num(wellness_today.get("hrv_last_night"), " ms"),
-                delta=fmt_text(wellness_today.get("hrv_status")).replace("_", " "),
-                delta_color="off",
-                border=True,
-            )
-            st.metric(
-                "ความพร้อมซ้อม",
-                (fmt_num(wellness_today.get("training_readiness"))
-                 if readiness_supported else "นาฬิกาไม่ส่ง"),
-                delta=(fmt_text(wellness_today.get("readiness_level")).replace("_", " ")
-                       if readiness_supported else None),
-                delta_color="off",
-                help=("Garmin Training Readiness ขึ้นกับรุ่นนาฬิกา; ถ้ารุ่นไม่ส่ง "
-                      "Dashboard ยังประเมินโหลดด้วย ACWR ของระบบเอง"),
-                border=True,
-            )
+        bb_snap = bb_high_snap
+    sleep_snap = latest_field(recent_wellness, "sleep_score")
+    rhr_snap = latest_field(recent_wellness, "resting_hr")
+    hrv_snap = latest_field(recent_wellness, "hrv_last_night")
+    ready_snap = latest_field(
+        recent_wellness,
+        "training_readiness",
+        ("readiness_timestamp_local", "readiness_timestamp_utc"),
+    )
+    hrv_status = fmt_text(hrv_snap["row"].get("hrv_status")) if hrv_snap else ""
+    readiness_level = fmt_text(ready_snap["row"].get("readiness_level")) if ready_snap else ""
 
-        pending_today = []
-        for label, column in (("Sleep", "sleep_score"), ("HRV", "hrv_last_night")):
-            if pd.isna(wellness_today.get(column)):
-                pending_today.append(label)
-        if readiness_supported and pd.isna(wellness_today.get("training_readiness")):
-            pending_today.append("Training Readiness")
-        if pending_today:
-            st.caption(
-                "ฐานข้อมูลจาก Garmin ยังไม่มีค่า " + ", ".join(pending_today)
-                + " ของวันนี้ ระบบจะลองเติมให้อัตโนมัติในรอบ sync ถัดไป; "
-                  "Dashboard ไม่สร้างค่าคาดเดามาอุดช่องว่าง (ดูสถานะสาย sync ได้ในแท็บทีม)"
-            )
+    st.subheader("การฟื้นตัวล่าสุด")
+    with st.container(horizontal=True):
+        st.metric(
+            "Body Battery ตอนนี้/ล่าสุด",
+            fmt_num(bb_snap["value"] if bb_snap else float("nan")),
+            help=("วันนี้ใช้ระดับล่าสุดระหว่างวัน; ถ้าไม่มีจะใช้ค่าล่าสุดที่มี · "
+                  + field_freshness(bb_snap, today)),
+            border=True,
+        )
+        st.metric(
+            "Sleep score",
+            fmt_num(sleep_snap["value"] if sleep_snap else float("nan")),
+            help=field_freshness(sleep_snap, today),
+            border=True,
+        )
+        st.metric(
+            "Resting HR",
+            fmt_num(rhr_snap["value"] if rhr_snap else float("nan"), " bpm"),
+            help=field_freshness(rhr_snap, today),
+            border=True,
+        )
+        st.metric(
+            "HRV คืนล่าสุด",
+            fmt_num(hrv_snap["value"] if hrv_snap else float("nan"), " ms"),
+            delta=hrv_status.replace("_", " ") or None,
+            delta_color="off",
+            help=field_freshness(hrv_snap, today),
+            border=True,
+        )
+        st.metric(
+            "ความพร้อมซ้อม",
+            fmt_num(ready_snap["value"] if ready_snap else float("nan")),
+            delta=readiness_level.replace("_", " ") or None,
+            delta_color="off",
+            help=("Garmin Training Readiness ขึ้นกับอุปกรณ์/บัญชีและอัปเดตได้ระหว่างวัน · "
+                  + readiness_when(ready_snap, today)),
+            border=True,
+        )
 
-        unsupported = []
-        if not readiness_supported:
-            unsupported.append("Training Readiness/Status")
-        if not training_load_supported:
-            unsupported.append("Garmin Training Load")
-        if unsupported:
-            st.caption(
-                "ค่าที่ไม่ขึ้นไม่ใช่ข้อมูลตกหล่นระหว่าง sync — นาฬิกาของนักกีฬาคนนี้ไม่ส่ง "
-                + ", ".join(unsupported)
-                + "; Dashboard ใช้ข้อมูลที่มีจริงและคำนวณ ACWR จากระยะวิ่งแทน"
+    st.caption(
+        "วันที่ของแต่ละค่า — "
+        + " · ".join(
+            f"{label}: {readiness_when(snapshot, today) if label == 'Readiness' else field_freshness(snapshot, today)}"
+            for label, snapshot in (
+                ("BB", bb_snap), ("Sleep", sleep_snap), ("RHR", rhr_snap),
+                ("HRV", hrv_snap), ("Readiness", ready_snap),
             )
+        )
+    )
+
+    pending_today = []
+    for label, column in (("Sleep", "sleep_score"), ("HRV", "hrv_last_night")):
+        if latest_field(today_wellness, column) is None:
+            pending_today.append(label)
+    if readiness_supported and latest_field(today_wellness, "training_readiness") is None:
+        pending_today.append("Training Readiness")
+    if pending_today:
+        st.caption(
+            "Garmin ยังไม่มีค่า " + ", ".join(pending_today)
+            + " ของวันนี้ ระบบจะลองเติมในรอบ sync ถัดไป; ค่าที่แสดงจากวันก่อนมีวันที่กำกับ "
+              "และไม่ได้ถูกคาดเดา"
+        )
+
+    if not readiness_supported:
+        models = ", ".join(device_names) if device_names else "ยังไม่มีทะเบียนอุปกรณ์ที่สดพอ"
+        st.caption(
+            "ยังไม่เคยได้รับ Training Readiness จากบัญชีนี้ในประวัติที่เก็บไว้ "
+            f"(อุปกรณ์ที่เคยพบ: {models}; กรองรายการที่ยืนยันว่า last_seen เกิน 90 วัน) "
+            "อาจเกิดจากความสามารถของอุปกรณ์ การตั้งค่าบัญชี "
+            "หรือ endpoint ไม่ส่งข้อมูล จึงยังไม่สรุปจากค่าว่างเพียงอย่างเดียวว่า ‘รุ่นไม่รองรับ’"
+        )
+    if not training_load_supported:
+        st.caption(
+            "ยังไม่เคยได้รับ Garmin Training Load จากกิจกรรมที่เก็บไว้; "
+            "ACWR ของระบบจึงคำนวณจากระยะวิ่งและระบุแหล่งที่มาชัดเจน"
+        )
 
     st.subheader("กิจกรรมวันนี้")
     if today_activities.empty:
@@ -1129,7 +1600,12 @@ with tab_today:
     if team_row is not None:
         st.subheader("บริบทโหลดสะสม")
         with st.container(horizontal=True):
-            st.metric("ACWR", fmt_num(team_row["ACWR"]), border=True)
+            st.metric(
+                "ACWR ของระบบ",
+                fmt_num(team_row["ACWR"], decimals=2),
+                help="อัตราส่วนโหลด 7 วัน ÷ ฐาน 28 วัน ไม่ใช่ acwrFactorPercent ของ Garmin Readiness",
+                border=True,
+            )
             st.metric("โหลด 7 วัน", team_row["โหลด 7 วัน"], border=True)
             st.metric("จำนวนเซสชัน 7 วัน", str(team_row["เซสชัน 7 วัน"]), border=True)
 
@@ -1138,93 +1614,412 @@ with tab_today:
 # TAB 3: HEALTH & RECOVERY (นักกีฬาที่เลือก)
 # =====================================================================
 with tab_health:
-    st.header(f"การฟื้นตัว — {selected_name}")
+    st.header(f"การฟื้นตัว — {selected_name}", anchor=f"recovery-{selected_anchor}")
     st.caption(f"ค่าเฉลี่ยและแนวโน้มระหว่าง {start_date.strftime('%d/%m/%Y')}–{end_date.strftime('%d/%m/%Y')}")
 
     if wellness_df.empty:
         st.info("ไม่มีข้อมูลสุขภาพในช่วงเวลานี้")
     else:
+        # Sleep/RHR เป็นค่าหลังคืนสิ้นสุดและใช้ของวันนี้ได้; BB-high/Stress เป็น
+        # intraday aggregates ที่ยังเปลี่ยนถึงเที่ยงคืน จึงไม่นับวันนี้เฉพาะสองค่านั้น
+        average_specs = [
+            ("Sleep score เฉลี่ย", "sleep_score", "", False),
+            ("Body Battery สูงสุดเฉลี่ย", "body_battery_high", "", True),
+            ("Resting HR เฉลี่ย", "resting_hr", " bpm", False),
+            ("Stress เฉลี่ย", "stress_avg", "", True),
+        ]
+        average_results = {
+            column: period_metric(
+                wellness_df, column, today, exclude_today, start_date, end_date
+            )
+            for _, column, _, exclude_today in average_specs
+        }
         with st.container(horizontal=True):
-            st.metric("Sleep score เฉลี่ย", fmt_num(wellness_df["sleep_score"].mean()), border=True)
-            st.metric("Body Battery สูงสุดเฉลี่ย", fmt_num(wellness_df["body_battery_high"].mean()), border=True)
-            st.metric("Resting HR เฉลี่ย", fmt_num(wellness_df["resting_hr"].mean(), " bpm"), border=True)
-            st.metric("Stress เฉลี่ย", fmt_num(wellness_df["stress_avg"].mean()), border=True)
+            for label, column, unit, _ in average_specs:
+                result = average_results[column]
+                sample_note = (
+                    f"{result['count']}/{result['total_days']} วันมีข้อมูล"
+                    if result["total_days"] else "ไม่มีวันเต็มในช่วง"
+                )
+                st.metric(
+                    label, fmt_num(result["mean"], unit), delta=sample_note,
+                    delta_color="off", border=True,
+                    help="mean() ใช้เฉพาะวันที่มีค่าจริง; วันที่ว่างไม่ถูกแทนด้วยศูนย์",
+                )
 
-        fig_health = px.line(wellness_df, x="calendar_date", y=["sleep_score", "body_battery_high"],
-                             labels={"value": "คะแนน", "calendar_date": "วันที่", "variable": "Metric"},
-                             title="แนวโน้มคะแนนการนอน (Sleep) และ Body Battery",
-                             markers=True)
-        st.plotly_chart(fig_health, width="stretch")
+        if any(result["excluded_today"] for result in average_results.values()):
+            st.caption(
+                "Sleep และ RHR รวมค่าของวันนี้ซึ่งสรุปหลังจบคืนแล้ว; Body Battery สูงสุดและ "
+                "Stress ไม่นับวันนี้ซึ่งยังเปลี่ยนระหว่างวัน ส่วนกราฟ/ตารางยังแสดงวันนี้ "
+                "พร้อมเส้นประ และ denominator ใต้การ์ดจึงต่างกันตามชนิด metric"
+            )
 
-        stress_series = ["stress_avg"]
-        if wellness_df["training_readiness"].notna().any():
-            stress_series.append("training_readiness")
-        fig_stress = px.line(wellness_df, x="calendar_date", y=stress_series,
-                             labels={"value": "ระดับ (Score)", "calendar_date": "วันที่", "variable": "Metric"},
-                             title=("ระดับความเครียด (Stress) และความพร้อมซ้อม (Readiness)"
-                                    if len(stress_series) > 1 else "ระดับความเครียด (Stress)"),
-                             markers=True)
-        st.plotly_chart(fig_stress, width="stretch")
-        if len(stress_series) == 1:
-            st.caption("Training Readiness เป็นความสามารถตามรุ่นนาฬิกา; รุ่นนี้ไม่ส่งค่า จึงไม่วาดเส้นว่าง")
+        quality_flags = wellness_quality_flags(wellness_df)
+        if quality_flags:
+            st.warning(
+                f"พบ {len(quality_flags)} กลุ่มค่าที่ควรตรวจเทียบนาฬิกา — "
+                "ยังคงค่าดิบไว้และรวมในค่าเฉลี่ย ไม่ตัด outlier อัตโนมัติ",
+                icon=":material/data_alert:",
+            )
+            with st.expander("ดูค่าที่ควรตรวจทาน", icon=":material/troubleshoot:"):
+                for note in quality_flags:
+                    st.markdown(f"- {note}")
 
-        # --- เมตริกเสริมที่นาฬิกาเก็บ (หายใจ/floors/kcal) ---
-        extra = []
-        if "avg_waking_respiration" in wellness_df:
-            extra.append(("หายใจตอนตื่น", wellness_df["avg_waking_respiration"].mean(), " brpm"))
-        if "avg_sleep_respiration" in wellness_df:
-            extra.append(("หายใจตอนนอน", wellness_df["avg_sleep_respiration"].mean(), " brpm"))
-        if "max_stress" in wellness_df:
-            extra.append(("Stress สูงสุด เฉลี่ย", wellness_df["max_stress"].mean(), ""))
-        if "floors_ascended" in wellness_df:
-            extra.append(("Floors/วัน", wellness_df["floors_ascended"].mean(), ""))
-        if "active_kilocalories" in wellness_df:
-            extra.append(("Active kcal/วัน", wellness_df["active_kilocalories"].mean(), ""))
-        extra = [e for e in extra if pd.notna(e[1])]
-        if extra:
+        # --- Sleep / Body Battery: สร้างเฉพาะ trace ที่มีข้อมูลและใช้ชื่อที่คนอ่านเข้าใจ ---
+        health_series = available_series(wellness_df, {
+            "sleep_score": "คะแนนการนอน",
+            "body_battery_high": "Body Battery สูงสุดของวัน",
+        })
+        if health_series:
+            fig_health = go.Figure()
+            health_colors = {"sleep_score": C_BLUE, "body_battery_high": C_GREEN}
+            for column, label in health_series:
+                fig_health.add_trace(go.Scatter(
+                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    mode="lines+markers", name=label, connectgaps=False,
+                    line=dict(color=health_colors[column]),
+                    hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
+                ))
+            fig_health.update_layout(
+                title="แนวโน้มคะแนนการนอนและ Body Battery สูงสุดของวัน",
+                xaxis_title="วันที่", yaxis_title="คะแนน", hovermode="x unified",
+            )
+            mark_partial_today(fig_health, today, start_date, end_date)
+            st.plotly_chart(fig_health, width="stretch")
+            plotted_counts = " · ".join(
+                f"{label} {wellness_df[column].notna().sum()}/{len(wellness_df)} จุด"
+                for column, label in health_series
+            )
+            st.caption(plotted_counts + " · ช่องว่างคือ Garmin ไม่มีค่า; กราฟไม่เชื่อมเส้นข้าม NULL")
+
+        # --- Stress กับ Readiness มีทิศทางความหมายตรงข้าม จึงแยกแกนและบอกชัด ---
+        stress_ready_series = available_series(wellness_df, {
+            "stress_avg": "Stress เฉลี่ย (สูง = แย่)",
+            "training_readiness": "Training Readiness (สูง = ดี)",
+        })
+        if stress_ready_series:
+            fig_stress = make_subplots(specs=[[{"secondary_y": True}]])
+            for column, label in stress_ready_series:
+                secondary = column == "training_readiness"
+                fig_stress.add_trace(go.Scatter(
+                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    mode="lines+markers", name=label, connectgaps=False,
+                    line=dict(color=C_GREEN if secondary else C_RED),
+                    hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
+                ), secondary_y=secondary)
+            fig_stress.update_layout(
+                title="Stress เทียบ Training Readiness", xaxis_title="วันที่",
+                hovermode="x unified",
+            )
+            fig_stress.update_yaxes(
+                title_text="Stress (สูง = แย่)", range=[0, 100], secondary_y=False,
+            )
+            if any(column == "training_readiness" for column, _ in stress_ready_series):
+                fig_stress.update_yaxes(
+                    title_text="Readiness (สูง = ดี)", range=[0, 100], secondary_y=True,
+                )
+            mark_partial_today(fig_stress, today, start_date, end_date)
+            st.plotly_chart(fig_stress, width="stretch")
+            st.caption("สองคะแนนอยู่ช่วง 0–100 เหมือนกันแต่แปลผลคนละทิศ: Stress สูงแย่, Readiness สูงดี")
+        if not has_any_value(wellness_df, ["training_readiness"]):
+            models = ", ".join(load_athlete_devices(athlete_id)) or "ยังไม่มีทะเบียนอุปกรณ์ที่สดพอ"
+            st.caption(
+                "ช่วงนี้ไม่มี Training Readiness (อุปกรณ์ที่เคยพบ: " + models
+                + "; กรองรายการที่ยืนยันว่า last_seen เกิน 90 วัน) อาจเกิดจากอุปกรณ์ บัญชี "
+                  "ช่วงวันที่ หรือ endpoint ไม่ส่ง; ไม่วาด trace ว่างและไม่ฟันธงว่าไม่รองรับ"
+            )
+
+        # --- RHR / HRV recovery trends ---
+        rhr_hrv_series = available_series(wellness_df, {
+            "resting_hr": "Resting HR",
+            "hrv_last_night": "HRV คืนล่าสุด",
+            "hrv_weekly_avg": "HRV เฉลี่ย 7 วัน",
+        })
+        if rhr_hrv_series:
+            fig_hrv = make_subplots(specs=[[{"secondary_y": True}]])
+            for column, label in rhr_hrv_series:
+                secondary = column != "resting_hr"
+                color = C_RED if column == "resting_hr" else (C_BLUE if column == "hrv_last_night" else C_GREEN)
+                fig_hrv.add_trace(go.Scatter(
+                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    mode="lines+markers", name=label, connectgaps=False,
+                    line=dict(color=color, dash="dot" if column == "hrv_weekly_avg" else "solid"),
+                    hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
+                ), secondary_y=secondary)
+            fig_hrv.update_layout(
+                title="แนวโน้ม Resting HR และ HRV", xaxis_title="วันที่", hovermode="x unified",
+            )
+            fig_hrv.update_yaxes(title_text="Resting HR (bpm)", secondary_y=False)
+            fig_hrv.update_yaxes(title_text="HRV (ms)", secondary_y=True)
+            mark_partial_today(fig_hrv, today, start_date, end_date)
+            st.plotly_chart(fig_hrv, width="stretch")
+
+        # --- ค่าเฉลี่ยเสริม พร้อม sample count เหมือนการ์ดหลัก ---
+        extra_specs = [
+            ("หายใจตอนตื่น", "avg_waking_respiration", " brpm"),
+            ("หายใจตอนนอน", "avg_sleep_respiration", " brpm"),
+            ("Stress สูงสุดเฉลี่ย", "max_stress", ""),
+            ("Floors/วัน", "floors_ascended", ""),
+            ("Active kcal/วัน", "active_kilocalories", " kcal"),
+        ]
+        extra_results = []
+        for label, column, unit in extra_specs:
+            result = period_metric(wellness_df, column, today, True, start_date, end_date)
+            if pd.notna(result["mean"]):
+                extra_results.append((label, unit, result))
+        if extra_results:
             with st.container(horizontal=True):
-                for label, val, unit in extra:
-                    st.metric(label, fmt_num(val, unit), border=True)
+                for label, unit, result in extra_results:
+                    st.metric(
+                        label, fmt_num(result["mean"], unit),
+                        delta=f"{result['count']}/{result['total_days']} วันมีข้อมูล",
+                        delta_color="off", border=True,
+                    )
 
-        # --- Respiration trend (ถ้ามี) ---
-        if "avg_sleep_respiration" in wellness_df and wellness_df["avg_sleep_respiration"].notna().any():
-            fig_resp = px.line(wellness_df, x="calendar_date",
-                               y=[c for c in ["avg_sleep_respiration", "avg_waking_respiration"] if c in wellness_df],
-                               labels={"value": "ครั้ง/นาที (brpm)", "calendar_date": "วันที่", "variable": "ช่วง"},
-                               title="อัตราการหายใจ (Respiration) — นอน vs ตื่น", markers=True)
+        # --- Respiration trend: เปิดเมื่อมีค่าตอนตื่นหรือตอนนอนอย่างใดอย่างหนึ่ง ---
+        respiration_series = available_series(wellness_df, {
+            "avg_sleep_respiration": "ขณะนอน",
+            "avg_waking_respiration": "ขณะตื่น",
+        })
+        if respiration_series:
+            fig_resp = go.Figure()
+            for column, label in respiration_series:
+                fig_resp.add_trace(go.Scatter(
+                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    mode="lines+markers", name=label, connectgaps=False,
+                    hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.1f}} brpm<extra></extra>",
+                ))
+            fig_resp.update_layout(
+                title="อัตราการหายใจ — ขณะนอนเทียบขณะตื่น",
+                xaxis_title="วันที่", yaxis_title="ครั้ง/นาที (brpm)", hovermode="x unified",
+            )
+            mark_partial_today(fig_resp, today, start_date, end_date)
             st.plotly_chart(fig_resp, width="stretch")
 
-        # --- Garmin Training Readiness & Recovery (เฉพาะนาฬิกาที่ให้ค่า เช่น พี่เก้า) ---
-        if "acwr_percent" in wellness_df and wellness_df["acwr_percent"].notna().any():
+        # --- Garmin Readiness / Recovery: เปิดเมื่อ field ใด field หนึ่งมีค่า ไม่ผูกกับ ACWR factor ---
+        readiness_section_fields = [
+            "training_readiness", "recovery_time_min", "recovery_time_hrs",
+            "acute_load", "acwr_percent", "hrv_factor_pct", "stress_history_pct",
+            "readiness_sleep_factor_pct", "recovery_time_factor_pct",
+            "training_status",
+        ]
+        if has_any_value(wellness_df, readiness_section_fields):
             st.subheader("ความพร้อมซ้อมและเวลาฟื้นตัวจาก Garmin")
-            rr = wellness_df.dropna(subset=["training_readiness"])
-            rlast = rr.iloc[-1] if not rr.empty else wellness_df.iloc[-1]
+            ready_snap = latest_field(
+                wellness_df, "training_readiness",
+                ("readiness_timestamp_local", "readiness_timestamp_utc"),
+            )
+            recovery_snap = latest_field(wellness_df, "recovery_time_min")
+            if recovery_snap is None:
+                recovery_snap = latest_field(wellness_df, "recovery_time_hrs")
+            acute_snap = latest_field(wellness_df, "acute_load")
+            acwr_factor_snap = latest_field(wellness_df, "acwr_percent")
+            ready_level = fmt_text(ready_snap["row"].get("readiness_level")) if ready_snap else ""
             with st.container(horizontal=True):
-                st.metric("Readiness ล่าสุด", fmt_num(rlast.get("training_readiness")),
-                          delta=fmt_text(rlast.get("readiness_level")).replace("_", " "),
-                          delta_color="off", border=True)
-                st.metric("Recovery Time",
-                          f"{rlast['recovery_time_hrs']:.0f} ชม." if pd.notna(rlast.get("recovery_time_hrs")) else "–",
-                          border=True)
-                st.metric("Acute Load (7 วัน)", fmt_num(rlast.get("acute_load")), border=True)
-                st.metric("ACWR (Garmin คำนวณเอง)",
-                          f"{rlast['acwr_percent']:.0f}%" if pd.notna(rlast.get("acwr_percent")) else "–",
-                          help="≈100% = สมดุล | ต่ำ = โหลดน้อยกว่าฐาน | สูง = โหลดพุ่ง", border=True)
-            fb = rlast.get("readiness_feedback")
-            if isinstance(fb, str) and fb:
-                st.caption(f"Garmin feedback ล่าสุด: **{fb.replace('_', ' ')}**")
-            fig_ready = px.line(wellness_df, x="calendar_date", y="training_readiness",
-                                labels={"training_readiness": "Readiness", "calendar_date": "วันที่"},
-                                title="แนวโน้ม Training Readiness (0–100)", markers=True)
-            fig_ready.add_hrect(y0=0, y1=50, fillcolor=C_CRIT, opacity=0.08, line_width=0)
-            st.plotly_chart(fig_ready, width="stretch")
+                st.metric(
+                    "Readiness ล่าสุด",
+                    fmt_num(ready_snap["value"] if ready_snap else float("nan")),
+                    delta=ready_level.replace("_", " ") or None,
+                    delta_color="off", border=True,
+                    help=readiness_when(ready_snap, today),
+                )
+                st.metric(
+                    "Recovery Time",
+                    fmt_recovery_time(get_recovery_minutes(recovery_snap["row"])
+                                      if recovery_snap else float("nan")),
+                    border=True,
+                    help=("Garmin ส่งหน่วยเป็นนาที; Dashboard แปลงเป็นชั่วโมง+นาที · "
+                          + field_freshness(recovery_snap, today)),
+                )
+                st.metric(
+                    "Acute Load ล่าสุด",
+                    fmt_num(acute_snap["value"] if acute_snap else float("nan")),
+                    border=True, help=field_freshness(acute_snap, today),
+                )
+                st.metric(
+                    "ปัจจัย Acute Load ต่อ Readiness",
+                    (f"{fmt_num(acwr_factor_snap['value'])}%" if acwr_factor_snap else "–"),
+                    help=("คะแนนองค์ประกอบที่ Garmin ใช้คำนวณ Training Readiness; "
+                          "ไม่ใช่ ACWR ratio (โหลด 7 วัน ÷ ฐาน 28 วัน) ที่ Dashboard คำนวณในแท็บการซ้อม · "
+                          + field_freshness(acwr_factor_snap, today)),
+                    border=True,
+                )
+
+            st.caption(
+                "วันที่ล่าสุดแยกตามค่า — Readiness: " + readiness_when(ready_snap, today)
+                + " · Recovery Time: " + field_freshness(recovery_snap, today)
+                + " · Acute Load: " + field_freshness(acute_snap, today)
+                + " · ปัจจัย Acute Load: " + field_freshness(acwr_factor_snap, today)
+            )
+            if ready_snap:
+                ready_row = ready_snap["row"]
+                feedback = (fmt_text(ready_row.get("readiness_feedback_long"))
+                            or fmt_text(ready_row.get("readiness_feedback")))
+                if feedback:
+                    st.caption(f"Garmin feedback ล่าสุด: **{feedback.replace('_', ' ')}**")
+                input_context = fmt_text(ready_row.get("readiness_input_context"))
+                if input_context:
+                    st.caption(f"Readiness input context: **{input_context.replace('_', ' ')}**")
+            if recovery_snap:
+                change_phrase = fmt_text(recovery_snap["row"].get("recovery_time_change_phrase"))
+                if change_phrase:
+                    st.caption(f"สถานะ Recovery Time: **{change_phrase.replace('_', ' ')}**")
+
+            if has_any_value(wellness_df, ["training_readiness"]):
+                fig_ready = go.Figure(go.Scatter(
+                    x=wellness_df["calendar_date"], y=wellness_df["training_readiness"],
+                    mode="lines+markers", name="Training Readiness", connectgaps=False,
+                    line=dict(color=C_GREEN),
+                    hovertemplate="%{x|%d %b}<br>Readiness: %{y:.0f}<extra></extra>",
+                ))
+                fig_ready.add_hrect(y0=0, y1=50, fillcolor=C_CRIT, opacity=0.08, line_width=0)
+                fig_ready.update_layout(
+                    title="แนวโน้ม Training Readiness (0–100)",
+                    xaxis_title="วันที่", yaxis_title="Readiness (สูง = ดี)", showlegend=False,
+                )
+                mark_partial_today(fig_ready, today, start_date, end_date)
+                st.plotly_chart(fig_ready, width="stretch")
+
+            recovery_minutes = recovery_minutes_series(wellness_df)
+            if recovery_minutes.notna().any():
+                recovery_labels = recovery_minutes.map(
+                    lambda value: fmt_recovery_time(value) if pd.notna(value) else "ไม่มีข้อมูล"
+                )
+                fig_recovery = go.Figure(go.Scatter(
+                    # Keep every calendar row: NaN in y now creates the intended
+                    # visible gap because connectgaps=False instead of being masked out.
+                    x=wellness_df["calendar_date"],
+                    y=recovery_minutes / 60,
+                    customdata=recovery_labels,
+                    mode="lines+markers", name="Recovery Time", connectgaps=False,
+                    line=dict(color=C_AMBER),
+                    hovertemplate="%{x|%d %b}<br>Recovery Time: %{customdata}<extra></extra>",
+                ))
+                fig_recovery.update_layout(
+                    title="แนวโน้ม Recovery Time", xaxis_title="วันที่",
+                    yaxis_title="ชั่วโมง (ค่าต้นทางเป็นนาที)", showlegend=False,
+                )
+                mark_partial_today(fig_recovery, today, start_date, end_date)
+                st.plotly_chart(fig_recovery, width="stretch")
+
+            factor_specs = [
+                ("ปัจจัย Acute Load", "acwr_percent", "acwr_factor_feedback"),
+                ("ปัจจัย HRV", "hrv_factor_pct", "hrv_factor_feedback"),
+                ("ปัจจัยประวัติ Stress", "stress_history_pct", "stress_history_factor_feedback"),
+                ("ปัจจัยการนอน", "readiness_sleep_factor_pct", "readiness_sleep_factor_feedback"),
+                ("ปัจจัย Recovery Time", "recovery_time_factor_pct", "recovery_time_factor_feedback"),
+            ]
+            factor_rows = []
+            for label, column, feedback_column in factor_specs:
+                snapshot = latest_field(wellness_df, column)
+                if snapshot:
+                    factor_rows.append({
+                        "องค์ประกอบ Readiness": label,
+                        "คะแนนองค์ประกอบ": f"{fmt_num(snapshot['value'])}%",
+                        "Garmin feedback": fmt_text(snapshot["row"].get(feedback_column), "–").replace("_", " "),
+                        "วันที่/ความสด": field_freshness(snapshot, today),
+                    })
+            if factor_rows:
+                with st.expander("ดูองค์ประกอบที่ Garmin ใช้คำนวณ Readiness", icon=":material/tune:"):
+                    st.dataframe(pd.DataFrame(factor_rows), hide_index=True)
+                    st.caption("คะแนนเหล่านี้เป็น factor ของ Readiness ไม่ใช่ค่า ACWR ratio")
+
+        # --- รายละเอียดที่เก็บแล้ว: collapsed เพื่อให้ตรวจเทียบนาฬิกาได้โดยไม่ทำหน้าหลักแน่น ---
+        detail_specs = [
+            ("HRV", "HRV เฉลี่ย 7 วัน", "hrv_weekly_avg", " ms"),
+            ("การนอน", "ระยะเวลานอน", "sleep_duration_sec", "duration"),
+            ("การนอน", "Deep sleep", "deep_sleep_sec", "duration"),
+            ("การนอน", "Light sleep", "light_sleep_sec", "duration"),
+            ("การนอน", "REM sleep", "rem_sleep_sec", "duration"),
+            ("การนอน", "Awake", "awake_sec", "duration"),
+            ("Body Battery", "ต่ำสุดของวัน", "body_battery_low", ""),
+            ("Body Battery", "ตอนตื่น", "bb_at_wake", ""),
+            ("Body Battery", "ชาร์จ", "bb_charged", ""),
+            ("Body Battery", "ใช้ไป", "bb_drained", ""),
+            ("Body Battery", "ระหว่างนอน", "bb_during_sleep", ""),
+            ("กิจวัตร", "Steps", "steps", " ก้าว"),
+            ("กิจวัตร", "เป้า Steps", "steps_goal", " ก้าว"),
+            ("กิจวัตร", "BMR", "bmr_kilocalories", " kcal"),
+            ("กิจวัตร", "Active time", "active_seconds", "duration"),
+            ("การหายใจ", "สูงสุด", "highest_respiration", " brpm"),
+            ("การหายใจ", "ต่ำสุด", "lowest_respiration", " brpm"),
+            ("การซ้อม", "Training Status", "training_status", "text"),
+            ("สมรรถนะ", "Endurance Score", "endurance_score", ""),
+            ("สมรรถนะ", "Hill Score", "hill_score_overall", ""),
+            ("สมรรถนะ", "Hill Strength", "hill_score_strength", ""),
+            ("สมรรถนะ", "Hill Endurance", "hill_score_endurance", ""),
+        ]
+        detail_rows = []
+        for category, label, column, unit in detail_specs:
+            snapshot = latest_field(wellness_df, column)
+            if not snapshot:
+                continue
+            if unit == "duration":
+                display_value = fmt_sec(snapshot["value"])
+            elif unit == "text":
+                display_value = fmt_text(snapshot["value"], "–").replace("_", " ")
+            else:
+                display_value = fmt_num(snapshot["value"], unit)
+            detail_rows.append({
+                "หมวด": category, "รายการ": label, "ค่าล่าสุด": display_value,
+                "วันที่/ความสด": field_freshness(snapshot, today),
+            })
+        if detail_rows:
+            with st.expander("ดูข้อมูลสุขภาพที่เก็บไว้ทั้งหมด", icon=":material/monitor_heart:"):
+                st.dataframe(pd.DataFrame(detail_rows), hide_index=True)
+                st.caption(
+                    "เลือกค่าล่าสุดแยกทีละ field; fetched_at เป็นเวลาระดับแถว ไม่ได้ยืนยันว่า "
+                    "ทุก endpoint ในแถวนั้นสดพร้อมกัน"
+                )
+
+        history_labels = {
+            "calendar_date": "วันที่", "hrv_weekly_avg": "HRV 7 วัน",
+            "sleep_duration_sec": "เวลานอน", "deep_sleep_sec": "Deep",
+            "light_sleep_sec": "Light", "rem_sleep_sec": "REM", "awake_sec": "Awake",
+            "body_battery_low": "BB ต่ำสุด", "bb_at_wake": "BB ตอนตื่น",
+            "bb_charged": "BB ชาร์จ", "bb_drained": "BB ใช้ไป",
+            "bb_during_sleep": "BB ระหว่างนอน", "bb_most_recent": "BB ล่าสุด",
+            "steps": "Steps", "steps_goal": "เป้า Steps", "floors_ascended": "Floors",
+            "active_kilocalories": "Active kcal", "bmr_kilocalories": "BMR kcal",
+            "active_seconds": "Active time",
+            "training_status": "Training Status", "highest_respiration": "หายใจสูงสุด",
+            "lowest_respiration": "หายใจต่ำสุด",
+            "training_readiness": "Readiness", "readiness_level": "Readiness level",
+            "acute_load": "Acute Load", "acwr_percent": "Readiness: Acute Load factor %",
+            "hrv_factor_pct": "Readiness: HRV factor %",
+            "stress_history_pct": "Readiness: Stress factor %",
+            "recovery_time_min": "Recovery Time (นาที)",
+            "endurance_score": "Endurance Score", "hill_score_overall": "Hill Score",
+            "hill_score_strength": "Hill Strength", "hill_score_endurance": "Hill Endurance",
+        }
+        if "recovery_time_min" not in wellness_df.columns and "recovery_time_hrs" in wellness_df.columns:
+            history_labels["recovery_time_hrs"] = "Recovery Time (นาที; schema เดิม)"
+        history_columns = [
+            column for column in history_labels
+            if column in wellness_df.columns
+            and (column == "calendar_date" or wellness_df[column].notna().any())
+        ]
+        if len(history_columns) > 1:
+            with st.expander("ดูประวัติสุขภาพรายวัน", icon=":material/table_chart:"):
+                history = wellness_df[history_columns].copy().sort_values("calendar_date", ascending=False)
+                history["calendar_date"] = pd.to_datetime(
+                    history["calendar_date"], errors="coerce"
+                ).dt.date
+                for column in (
+                    "sleep_duration_sec", "deep_sleep_sec", "light_sleep_sec",
+                    "rem_sleep_sec", "awake_sec", "active_seconds",
+                ):
+                    if column in history:
+                        history[column] = history[column].map(fmt_sec)
+                history = history.rename(columns=history_labels)
+                st.dataframe(history, hide_index=True)
 
 
 # =====================================================================
 # TAB 4: TRAINING (นักกีฬาที่เลือก) — ACWR + 80/20 + กราฟเดิม
 # =====================================================================
 with tab_train:
-    st.header(f"การซ้อม — {selected_name}")
+    st.header(f"การซ้อม — {selected_name}", anchor=f"training-{selected_anchor}")
     st.caption(f"สรุประหว่าง {start_date.strftime('%d/%m/%Y')}–{end_date.strftime('%d/%m/%Y')}")
 
     if activity_df.empty:
@@ -1402,7 +2197,7 @@ with tab_train:
 # TAB 5: PROGRESS — ความก้าวหน้า (VO2max / คาดการณ์แข่ง / PR / LT)
 # =====================================================================
 with tab_progress:
-    st.header(f"ความก้าวหน้า — {selected_name}")
+    st.header(f"ความก้าวหน้า — {selected_name}", anchor=f"progress-{selected_anchor}")
     st.caption(
         f"แนวโน้มระหว่าง {start_date.strftime('%d/%m/%Y')}–{end_date.strftime('%d/%m/%Y')} · "
         "ใช้ค่าจาก Garmin ดูทิศทาง ส่วนค่าสัมบูรณ์ให้ยึดผลเทสจริง"
@@ -1543,7 +2338,7 @@ with tab_progress:
 # TAB 6: SPLITS — เจาะลึกรายเซสชัน
 # =====================================================================
 with tab_splits:
-    st.header(f"รายละเอียดเซสชัน — {selected_name}")
+    st.header(f"รายละเอียดเซสชัน — {selected_name}", anchor=f"sessions-{selected_anchor}")
     st.caption(f"เลือกกิจกรรมระหว่าง {start_date.strftime('%d/%m/%Y')}–{end_date.strftime('%d/%m/%Y')}")
 
     if activity_df.empty:

@@ -12,10 +12,16 @@ Idempotent: safe to run multiple times. ยังทำ migration — เพิ�
 """
 
 import sqlite3
+import sys
 from pathlib import Path
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "garmin.db"
+UTC_NOW_DEFAULT = "TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
 
 # ── รายการคอลัมน์เต็ม (ชื่อ, ชนิด) — ใช้ทั้งตอน CREATE และ migration ──────────
 ACTIVITY_COLUMNS = [
@@ -79,7 +85,7 @@ ACTIVITY_COLUMNS = [
     # ไม่ลบแถวจริง กันเข้าใจผิด/กู้คืนได้). NULL = ยังมีอยู่จริง. ทุก query ที่คิดสถิติ
     # (ACWR/ระยะรวม) ต้องกรอง deleted_at IS NULL เสมอ
     ("deleted_at", "TEXT"),
-    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+    ("fetched_at", UTC_NOW_DEFAULT),
 ]
 
 SPLIT_COLUMNS = [
@@ -140,11 +146,28 @@ WELLNESS_COLUMNS = [
     ("training_readiness", "REAL"),
     ("readiness_level", "TEXT"),
     ("readiness_feedback", "TEXT"),
+    ("readiness_feedback_long", "TEXT"),
+    ("readiness_timestamp_utc", "TEXT"),
+    ("readiness_timestamp_local", "TEXT"),
+    ("readiness_input_context", "TEXT"),
+    ("readiness_device_id", "TEXT"),
+    ("readiness_sleep_factor_pct", "REAL"),
+    ("readiness_sleep_factor_feedback", "TEXT"),
     ("acute_load", "REAL"),
     ("acwr_percent", "REAL"),
+    ("acwr_factor_feedback", "TEXT"),
     ("hrv_factor_pct", "REAL"),
+    ("hrv_factor_feedback", "TEXT"),
+    # Legacy only: old ingestion stored Garmin's raw minute value under this
+    # misleading name.  Keep it so older dashboard builds can still open the DB;
+    # new ingestion writes recovery_time_min and the migration below copies history.
     ("recovery_time_hrs", "REAL"),
+    ("recovery_time_min", "REAL"),
+    ("recovery_time_factor_pct", "REAL"),
+    ("recovery_time_factor_feedback", "TEXT"),
+    ("recovery_time_change_phrase", "TEXT"),
     ("stress_history_pct", "REAL"),
+    ("stress_history_factor_feedback", "TEXT"),
     ("training_status", "TEXT"),
     ("vo2max_trend", "REAL"),
     ("fitness_age", "REAL"),
@@ -154,7 +177,23 @@ WELLNESS_COLUMNS = [
     ("hill_score_endurance", "REAL"),
     ("lactate_threshold_hr", "REAL"),
     ("lactate_threshold_pace_min_km", "REAL"),
-    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+    # Throttle metadata for the fast lane's conditional previous-day repair.
+    # It records an attempt, not proof that every metric was returned.
+    ("repair_attempted_at_utc", "TEXT"),
+    ("fetched_at", UTC_NOW_DEFAULT),
+]
+
+ATHLETE_DEVICE_COLUMNS = [
+    ("athlete_id", "INTEGER NOT NULL REFERENCES dim_athlete(athlete_id)"),
+    # Device IDs are identifiers, not quantities. TEXT avoids integer-width and
+    # leading-zero surprises while keeping the raw identifier out of logs/UI.
+    ("device_id", "TEXT NOT NULL"),
+    ("product_display_name", "TEXT"),
+    ("display_name", "TEXT"),
+    ("is_primary_device", "INTEGER"),
+    ("is_primary_activity_tracker", "INTEGER"),
+    ("is_primary_training_device", "INTEGER"),
+    ("last_seen_at_utc", UTC_NOW_DEFAULT),
 ]
 
 # ── ตารางใหม่ 21 ก.ค. 69 (รอบขยาย extras): range/snapshot endpoints ──────────
@@ -165,7 +204,7 @@ RACE_PREDICTION_COLUMNS = [
     ("time_10k_sec", "REAL"),
     ("time_half_sec", "REAL"),
     ("time_full_sec", "REAL"),
-    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+    ("fetched_at", UTC_NOW_DEFAULT),
 ]
 
 PERSONAL_RECORD_COLUMNS = [
@@ -175,7 +214,7 @@ PERSONAL_RECORD_COLUMNS = [
     ("value", "REAL"),
     ("activity_id", "INTEGER"),
     ("achieved_date", "TEXT"),
-    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+    ("fetched_at", UTC_NOW_DEFAULT),
 ]
 
 GEAR_COLUMNS = [
@@ -188,7 +227,7 @@ GEAR_COLUMNS = [
     ("retired", "INTEGER"),
     ("total_distance_m", "REAL"),
     ("total_activities", "INTEGER"),
-    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+    ("fetched_at", UTC_NOW_DEFAULT),
 ]
 
 BODY_COMPOSITION_COLUMNS = [
@@ -197,7 +236,7 @@ BODY_COMPOSITION_COLUMNS = [
     ("weight_kg", "REAL"),
     ("bmi", "REAL"),
     ("body_fat_pct", "REAL"),
-    ("fetched_at", "TEXT DEFAULT (datetime('now'))"),
+    ("fetched_at", UTC_NOW_DEFAULT),
 ]
 
 
@@ -221,6 +260,26 @@ def _migrate(cur, table, columns):
     return added
 
 
+def _migrate_recovery_minutes(cur):
+    """Copy legacy recovery values into the correctly named minute column.
+
+    `recovery_time_hrs` historically received Garmin's raw `recoveryTime`
+    unchanged.  The raw value is minutes, so this is a rename/copy, not a unit
+    conversion.  Keep the legacy column untouched for older app versions.
+    """
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(fact_daily_wellness)")}
+    if not {"recovery_time_hrs", "recovery_time_min"}.issubset(columns):
+        return 0
+    cur.execute(
+        """UPDATE fact_daily_wellness
+              SET recovery_time_min = recovery_time_hrs
+            WHERE recovery_time_min IS NULL
+              AND recovery_time_hrs IS NOT NULL
+              AND recovery_time_hrs BETWEEN 0 AND 5760"""
+    )
+    return max(cur.rowcount, 0)
+
+
 def init_schema(db_path: Path = DB_PATH):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -241,6 +300,8 @@ def init_schema(db_path: Path = DB_PATH):
     )
     """)
 
+    _create(cur, "dim_athlete_device", ATHLETE_DEVICE_COLUMNS,
+            ",\n        PRIMARY KEY (athlete_id, device_id)")
     _create(cur, "fact_activity", ACTIVITY_COLUMNS, ",\n        UNIQUE(activity_id) ON CONFLICT REPLACE")
     _create(cur, "fact_activity_split", SPLIT_COLUMNS,
             ",\n        PRIMARY KEY (activity_id, split_num) ON CONFLICT REPLACE")
@@ -259,6 +320,8 @@ def init_schema(db_path: Path = DB_PATH):
     added_a = _migrate(cur, "fact_activity", ACTIVITY_COLUMNS)
     added_s = _migrate(cur, "fact_activity_split", SPLIT_COLUMNS)
     added_w = _migrate(cur, "fact_daily_wellness", WELLNESS_COLUMNS)
+    added_d = _migrate(cur, "dim_athlete_device", ATHLETE_DEVICE_COLUMNS)
+    migrated_recovery = _migrate_recovery_minutes(cur)
     for table, cols in (("fact_race_prediction", RACE_PREDICTION_COLUMNS),
                         ("fact_personal_record", PERSONAL_RECORD_COLUMNS),
                         ("fact_gear", GEAR_COLUMNS),
@@ -267,6 +330,7 @@ def init_schema(db_path: Path = DB_PATH):
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_device_athlete ON dim_athlete_device(athlete_id)")
 
     conn.commit()
     conn.close()
@@ -279,9 +343,13 @@ def init_schema(db_path: Path = DB_PATH):
         print(f"   + fact_activity_split เพิ่ม {len(added_s)} คอลัมน์: {', '.join(added_s)}")
     if added_w:
         print(f"   + fact_daily_wellness เพิ่ม {len(added_w)} คอลัมน์: {', '.join(added_w)}")
-    if not (added_a or added_s or added_w):
+    if added_d:
+        print(f"   + dim_athlete_device เพิ่ม {len(added_d)} คอลัมน์: {', '.join(added_d)}")
+    if migrated_recovery:
+        print(f"   ↪ ย้าย Recovery Time เดิมเป็นหน่วยนาที {migrated_recovery} แถว")
+    if not (added_a or added_s or added_w or added_d or migrated_recovery):
         print("   (ไม่มีคอลัมน์ใหม่ต้องเพิ่ม)")
-    print("Tables: dim_athlete | fact_activity | fact_activity_split | fact_daily_wellness"
+    print("Tables: dim_athlete | dim_athlete_device | fact_activity | fact_activity_split | fact_daily_wellness"
           " | fact_race_prediction | fact_personal_record | fact_gear | fact_body_composition")
 
 

@@ -10,12 +10,13 @@ Requires token to already exist in tokens/<athlete>/.
 
 import argparse
 import json
+import math
 import os
 import socket
 import sqlite3
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +28,9 @@ DB_PATH = DATA_DIR / "garmin.db"
 # สถานะรายคนของรอบ sync ล่าสุด — fetch_all.py อ่านไปรวมเป็น data/sync_status.json
 # เพื่อให้ toast/dashboard บอกได้ว่าใครพังเพราะอะไร (token/เน็ต) และข้อมูลมีจุดน่าสงสัยไหม
 STATUS_DIR = DATA_DIR / "sync_status"
+UTC_NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+PREVIOUS_DAY_REPAIR_COOLDOWN_HOURS = 6
+BANGKOK_TZ = timezone(timedelta(hours=7))
 
 
 def use_data_dir(path) -> Path:
@@ -150,6 +154,8 @@ def safe_call(api_method, *args, **kwargs):
                 print(f"   ⚠️  Rate limited! Waiting {wait}s before retry...")
                 time.sleep(wait)
             elif "404" in error_str or "204" in error_str:
+                endpoint = getattr(api_method, "__name__", "Garmin endpoint")
+                print(f"   ℹ️  {endpoint}: ไม่มีข้อมูล (HTTP 404/204)")
                 return None  # No data for this endpoint/date
             elif is_timeout and attempt < max_retries - 1:
                 print(f"   ⚠️  เน็ตค้าง/timeout ({e}) — ลองใหม่ครั้งที่ {attempt + 2}...")
@@ -295,25 +301,21 @@ def fetch_and_insert_activities(
         )
         columns_sql = ", ".join(ACTIVITY_WRITE_COLUMNS)
         placeholders = ", ".join("?" for _ in ACTIVITY_WRITE_COLUMNS)
-        if fast:
-            # Garmin อาจส่ง summary บาง field เป็น NULL ชั่วคราวระหว่างประมวลผล.
-            # COALESCE ป้องกัน fast polling ล้างค่าที่ full sync เคยเติมไว้
-            # (รวม running dynamics, HR zones, load และ weather).
-            updates = ", ".join(
-                f"{column}=COALESCE(excluded.{column}, fact_activity.{column})"
-                for column in ACTIVITY_WRITE_COLUMNS
-                if column not in ("activity_id", "athlete_id")
-            )
-            sql = (
-                f"INSERT INTO fact_activity ({columns_sql}) VALUES ({placeholders}) "
-                f"ON CONFLICT(activity_id) DO UPDATE SET athlete_id=excluded.athlete_id, "
-                f"{updates}, deleted_at=NULL, fetched_at=datetime('now')"
-            )
-        else:
-            sql = (
-                f"INSERT OR REPLACE INTO fact_activity ({columns_sql}) "
-                f"VALUES ({placeholders})"
-            )
+        # Garmin can return a partial summary while an activity is still being
+        # processed, and enrichment endpoint failures are represented by None.
+        # Both fast and full/deep paths therefore merge per field instead of
+        # REPLACE-ing the row and destroying a previously good value.
+        updates = ", ".join(
+            f"{column}=COALESCE(excluded.{column}, fact_activity.{column})"
+            for column in ACTIVITY_WRITE_COLUMNS
+            if column not in ("activity_id", "athlete_id")
+        )
+        sql = (
+            f"INSERT INTO fact_activity ({columns_sql}, fetched_at) "
+            f"VALUES ({placeholders}, {UTC_NOW_SQL}) "
+            f"ON CONFLICT(activity_id) DO UPDATE SET athlete_id=excluded.athlete_id, "
+            f"{updates}, deleted_at=NULL, fetched_at=excluded.fetched_at"
+        )
         cur.execute(sql, values)
         # ปล่อย SQLite write lock ก่อนยิง endpoint ถัดไป เพื่อให้ subprocess
         # ของนักกีฬาคนอื่นเขียนแทรกได้เมื่อ fetch_all รันแบบขนาน
@@ -457,59 +459,175 @@ def reconcile_only(garmin, conn, athlete_id, start_date, end_date):
 # (อัปเดตเฉพาะฟิลด์ที่ขยับระหว่างวัน) — คีย์ของ dict = ชื่อคอลัมน์ใน fact_daily_wellness
 
 
-def _drop_sentinel(value):
-    """Garmin ส่ง -1 แปลว่า "วันนั้นไม่มีข้อมูล" ไม่ใช่ค่าที่วัดได้ — ต้องเก็บเป็น NULL
+def _first_not_none(*values):
+    """Return the first actual value; unlike ``or`` this preserves numeric zero."""
+    return next((value for value in values if value is not None), None)
 
-    เจอจริง 4 ส.ค. 69: `stress_avg = -1` หลุดเข้า DB 13 แถว (พี่เก้า 4 ส.ค. + ต้องอีก 12 วัน)
-    แล้ว dashboard เอาไปหาค่าเฉลี่ยตรง ๆ (`wellness_df["stress_avg"].mean()`) → ตัวเลข
-    "Stress เฉลี่ย" ต่ำกว่าความจริง และกราฟ stress มีขาลงไปแตะ -1 ทั้งที่แค่ไม่มีข้อมูล
 
-    ทุกคอลัมน์ใน _parse_stats เป็นค่าที่ติดลบไม่ได้ทางกายภาพ (HR/ก้าว/แคลอรี/ชั้น/
-    หายใจ/body battery/stress) จึงตัดค่าติดลบทิ้งได้ทั้งชุดอย่างปลอดภัย
+def _bounded_number(value, minimum=0, maximum=None):
+    """Validate a Garmin numeric field and turn sentinels/garbage into NULL.
+
+    Garmin uses negative numbers (commonly -1) as "not available" in more than
+    just the stats endpoint.  Reject bools and non-finite floats too so NaN/Inf
+    cannot poison SQLite aggregates.  Callers provide the documented/physical
+    range for scores whose bounds are known.
     """
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(float(value)):
+        return None
+    if minimum is not None and value < minimum:
+        return None
+    if maximum is not None and value > maximum:
         return None
     return value
 
 
+def _drop_sentinel(value):
+    """Backward-compatible helper retained for tests/callers: reject negatives."""
+    return _bounded_number(value)
+
+
+def _clean_text(value, max_length=500):
+    """Keep a small printable text value from an API payload, or return NULL."""
+    if not isinstance(value, str):
+        return None
+    value = "".join(ch for ch in value.strip() if ch.isprintable())
+    return value[:max_length] or None
+
+
+def _calendar_date(value):
+    """Return a canonical YYYY-MM-DD API date, rejecting malformed keys."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()[:10]
+    try:
+        return date.fromisoformat(candidate).isoformat()
+    except ValueError:
+        return None
+
+
+def _api_datetime(value):
+    """Parse Garmin ISO/epoch timestamps as an aware datetime for ordering.
+
+    ``timestamp`` is UTC in the Training Readiness contract.  Numeric values are
+    accepted in seconds or milliseconds.  Naive strings are treated as UTC;
+    ``timestampLocal`` is only used as a fallback and snapshots for one response
+    are from the same athlete/timezone, so their ordering remains correct.
+    """
+    try:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        if isinstance(value, (int, float)):
+            if not math.isfinite(float(value)):
+                return None
+            seconds = float(value)
+            if abs(seconds) >= 100_000_000_000:
+                seconds /= 1000.0
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        raw = value.strip()
+        if raw.replace(".", "", 1).isdigit():
+            return _api_datetime(float(raw))
+        if raw.endswith(("Z", "z")):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+
+
+def _utc_timestamp_text(value):
+    parsed = _api_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _readiness_snapshot(readiness):
+    """Choose the newest Training Readiness snapshot without trusting list order."""
+    items = readiness if isinstance(readiness, list) else [readiness]
+    candidates = [item for item in items if isinstance(item, dict)]
+    if not candidates:
+        return None
+
+    def sort_key(item):
+        moment = _first_not_none(
+            _api_datetime(item.get("timestamp")),
+            _api_datetime(item.get("timestampLocal")),
+            _api_datetime(item.get("calendarDate")),
+        )
+        epoch = moment.timestamp() if moment is not None else float("-inf")
+        # Canonical payload is a stable final tie-breaker, so equal/missing
+        # timestamps do not silently make the result depend on list order.
+        canonical = json.dumps(item, sort_keys=True, ensure_ascii=True, default=str)
+        return (moment is not None, epoch, canonical)
+
+    return max(candidates, key=sort_key)
+
+
 def _parse_stats(stats):
     """RHR / steps / stress / kcal / floors / body battery ละเอียด / respiration ตื่น."""
-    def _s(*keys):
-        return _drop_sentinel(safe_get(stats, *keys) if stats else None)
-    return {
-        "resting_hr": _s("restingHeartRate"),
-        "steps": _s("totalSteps"),
-        "steps_goal": _s("dailyStepGoal"),
-        "stress_avg": _s("averageStressLevel"),
-        "max_stress": _s("maxStressLevel"),
-        "floors_ascended": _s("floorsAscended"),
-        "active_kilocalories": _s("activeKilocalories"),
-        "bmr_kilocalories": _s("bmrKilocalories"),
-        "active_seconds": _s("activeSeconds"),
-        "avg_waking_respiration": _s("avgWakingRespirationValue"),
-        "body_battery_high": _s("bodyBatteryHighestValue"),
-        "body_battery_low": _s("bodyBatteryLowestValue"),
-        "bb_at_wake": _s("bodyBatteryAtWakeTime"),
-        "bb_charged": _s("bodyBatteryChargedValue"),
-        "bb_drained": _s("bodyBatteryDrainedValue"),
-        "bb_during_sleep": _s("bodyBatteryDuringSleep"),
-        "bb_most_recent": _s("bodyBatteryMostRecentValue"),
+    def _s(*keys, minimum=0, maximum=None):
+        raw = safe_get(stats, *keys) if isinstance(stats, dict) else None
+        return _bounded_number(raw, minimum, maximum)
+    parsed = {
+        "resting_hr": _s("restingHeartRate", minimum=1, maximum=300),
+        "steps": _s("totalSteps", maximum=1_000_000),
+        "steps_goal": _s("dailyStepGoal", maximum=1_000_000),
+        "stress_avg": _s("averageStressLevel", maximum=100),
+        "max_stress": _s("maxStressLevel", maximum=100),
+        "floors_ascended": _s("floorsAscended", maximum=10_000),
+        "active_kilocalories": _s("activeKilocalories", maximum=100_000),
+        "bmr_kilocalories": _s("bmrKilocalories", maximum=100_000),
+        "active_seconds": _s("activeSeconds", maximum=86_400),
+        "avg_waking_respiration": _s(
+            "avgWakingRespirationValue", minimum=1, maximum=100),
+        "body_battery_high": _s("bodyBatteryHighestValue", minimum=5, maximum=100),
+        "body_battery_low": _s("bodyBatteryLowestValue", minimum=5, maximum=100),
+        "bb_at_wake": _s("bodyBatteryAtWakeTime", minimum=5, maximum=100),
+        # These three are cumulative/change amounts, not instantaneous 5–100
+        # levels (a valid daily charged value of 102 exists in production).
+        "bb_charged": _s("bodyBatteryChargedValue", maximum=1_000),
+        "bb_drained": _s("bodyBatteryDrainedValue", maximum=1_000),
+        "bb_during_sleep": _s("bodyBatteryDuringSleep", maximum=1_000),
+        "bb_most_recent": _s("bodyBatteryMostRecentValue", minimum=5, maximum=100),
     }
+    # Treat the daily high/low levels as one atomic observation.  Garmin can
+    # occasionally return a sentinel for only one half of the pair.  Updating
+    # the other half alone could combine it with yesterday's/earlier snapshot
+    # and manufacture an impossible high < low relation in SQLite.
+    bb_pair = (parsed["body_battery_high"], parsed["body_battery_low"])
+    if (
+        (bb_pair[0] is None) != (bb_pair[1] is None)
+        or (bb_pair[0] is not None and bb_pair[0] < bb_pair[1])
+    ):
+        parsed["body_battery_high"] = None
+        parsed["body_battery_low"] = None
+    return parsed
 
 
 def _parse_hrv(hrv):
     out = {"hrv_weekly_avg": None, "hrv_last_night": None, "hrv_status": None}
-    if hrv and isinstance(hrv, dict):
+    if isinstance(hrv, dict):
         summary = safe_get(hrv, "hrvSummary")
-        if summary:
-            out["hrv_weekly_avg"] = safe_get(summary, "weeklyAvg")
-            out["hrv_last_night"] = safe_get(summary, "lastNightAvg")
-            out["hrv_status"] = safe_get(summary, "status")
-        # Alternative structure
-        if out["hrv_weekly_avg"] is None:
-            out["hrv_weekly_avg"] = safe_get(hrv, "weeklyAvg")
-            out["hrv_last_night"] = safe_get(hrv, "lastNightAvg")
-            out["hrv_status"] = safe_get(hrv, "status")
+        if not isinstance(summary, dict):
+            summary = {}
+        # Fall back independently.  Previously a missing nested weeklyAvg also
+        # replaced a perfectly good nested lastNightAvg/status with top-level NULL.
+        weekly = _first_not_none(summary.get("weeklyAvg"), hrv.get("weeklyAvg"))
+        last_night = _first_not_none(summary.get("lastNightAvg"), hrv.get("lastNightAvg"))
+        status = _first_not_none(summary.get("status"), hrv.get("status"))
+        out["hrv_weekly_avg"] = _bounded_number(weekly, 1, 1_000)
+        out["hrv_last_night"] = _bounded_number(last_night, 1, 1_000)
+        out["hrv_status"] = _clean_text(status, 100)
     return out
 
 
@@ -518,18 +636,26 @@ def _parse_sleep(sleep):
            "light_sleep_sec": None, "rem_sleep_sec": None, "awake_sec": None}
     if sleep and isinstance(sleep, dict):
         daily_sleep = safe_get(sleep, "dailySleepDTO")
-        if daily_sleep:
-            out["sleep_duration_sec"] = safe_get(daily_sleep, "sleepTimeSeconds")
-            out["deep_sleep_sec"] = safe_get(daily_sleep, "deepSleepSeconds")
-            out["light_sleep_sec"] = safe_get(daily_sleep, "lightSleepSeconds")
-            out["rem_sleep_sec"] = safe_get(daily_sleep, "remSleepSeconds")
-            out["awake_sec"] = safe_get(daily_sleep, "awakeSleepSeconds")
+        if isinstance(daily_sleep, dict):
+            out["sleep_duration_sec"] = _bounded_number(
+                safe_get(daily_sleep, "sleepTimeSeconds"), 0, 172_800)
+            out["deep_sleep_sec"] = _bounded_number(
+                safe_get(daily_sleep, "deepSleepSeconds"), 0, 172_800)
+            out["light_sleep_sec"] = _bounded_number(
+                safe_get(daily_sleep, "lightSleepSeconds"), 0, 172_800)
+            out["rem_sleep_sec"] = _bounded_number(
+                safe_get(daily_sleep, "remSleepSeconds"), 0, 172_800)
+            out["awake_sec"] = _bounded_number(
+                safe_get(daily_sleep, "awakeSleepSeconds"), 0, 172_800)
             # sleepScores lives INSIDE dailySleepDTO, not at the top level
-            out["sleep_score"] = safe_get(daily_sleep, "sleepScores", "overall", "value")
+            out["sleep_score"] = _bounded_number(
+                safe_get(daily_sleep, "sleepScores", "overall", "value"), 0, 100)
         # Fallback for older payload shapes
         if out["sleep_score"] is None:
-            out["sleep_score"] = (safe_get(sleep, "overallScore")
-                                  or safe_get(sleep, "sleepScores", "overall", "value"))
+            out["sleep_score"] = _bounded_number(_first_not_none(
+                safe_get(sleep, "overallScore"),
+                safe_get(sleep, "sleepScores", "overall", "value"),
+            ), 0, 100)
     return out
 
 
@@ -537,34 +663,79 @@ def _parse_respiration(respiration):
     out = {"avg_sleep_respiration": None, "highest_respiration": None,
            "lowest_respiration": None, "avg_waking_respiration": None}
     if isinstance(respiration, dict):
-        out["avg_sleep_respiration"] = respiration.get("avgSleepRespirationValue")
-        out["highest_respiration"] = respiration.get("highestRespirationValue")
-        out["lowest_respiration"] = respiration.get("lowestRespirationValue")
-        out["avg_waking_respiration"] = respiration.get("avgWakingRespirationValue")
+        out["avg_sleep_respiration"] = _bounded_number(
+            respiration.get("avgSleepRespirationValue"), 1, 100)
+        out["highest_respiration"] = _bounded_number(
+            respiration.get("highestRespirationValue"), 1, 100)
+        out["lowest_respiration"] = _bounded_number(
+            respiration.get("lowestRespirationValue"), 1, 100)
+        out["avg_waking_respiration"] = _bounded_number(
+            respiration.get("avgWakingRespirationValue"), 1, 100)
     return out
 
 
 def _parse_readiness(readiness):
     """readiness score/level/feedback + acute load + ACWR ของ Garmin เอง + ปัจจัยย่อย.
     API คืน LIST อาจว่างถ้านาฬิกาไม่ให้"""
-    out = {"training_readiness": None, "readiness_level": None, "readiness_feedback": None,
-           "acute_load": None, "acwr_percent": None, "hrv_factor_pct": None,
-           "recovery_time_hrs": None, "stress_history_pct": None}
-    if isinstance(readiness, list):
-        obj = readiness[0] if readiness else None
-    elif isinstance(readiness, dict):
-        obj = readiness
-    else:
-        obj = None
+    out = {
+        "training_readiness": None,
+        "readiness_level": None,
+        "readiness_feedback": None,
+        "readiness_feedback_long": None,
+        "readiness_timestamp_utc": None,
+        "readiness_timestamp_local": None,
+        "readiness_input_context": None,
+        "readiness_device_id": None,
+        "readiness_sleep_factor_pct": None,
+        "readiness_sleep_factor_feedback": None,
+        "acute_load": None,
+        "acwr_percent": None,
+        "acwr_factor_feedback": None,
+        "hrv_factor_pct": None,
+        "hrv_factor_feedback": None,
+        "recovery_time_min": None,
+        "recovery_time_factor_pct": None,
+        "recovery_time_factor_feedback": None,
+        "recovery_time_change_phrase": None,
+        "stress_history_pct": None,
+        "stress_history_factor_feedback": None,
+    }
+    obj = _readiness_snapshot(readiness)
     if isinstance(obj, dict):
-        out["training_readiness"] = obj.get("score") or obj.get("trainingReadinessScore")
-        out["readiness_level"] = obj.get("level")
-        out["readiness_feedback"] = obj.get("feedbackShort")
-        out["acute_load"] = obj.get("acuteLoad")
-        out["acwr_percent"] = obj.get("acwrFactorPercent")
-        out["hrv_factor_pct"] = obj.get("hrvFactorPercent")
-        out["recovery_time_hrs"] = obj.get("recoveryTime")
-        out["stress_history_pct"] = obj.get("stressHistoryFactorPercent")
+        out["training_readiness"] = _bounded_number(
+            _first_not_none(obj.get("score"), obj.get("trainingReadinessScore")), 0, 100)
+        out["readiness_level"] = _clean_text(obj.get("level"), 100)
+        out["readiness_feedback"] = _clean_text(obj.get("feedbackShort"), 500)
+        out["readiness_feedback_long"] = _clean_text(obj.get("feedbackLong"), 2_000)
+        out["readiness_timestamp_utc"] = _utc_timestamp_text(obj.get("timestamp"))
+        out["readiness_timestamp_local"] = _clean_text(obj.get("timestampLocal"), 100)
+        out["readiness_input_context"] = _clean_text(obj.get("inputContext"), 200)
+        device_id = obj.get("deviceId")
+        if isinstance(device_id, (str, int)) and not isinstance(device_id, bool):
+            out["readiness_device_id"] = _clean_text(str(device_id), 100)
+        out["readiness_sleep_factor_pct"] = _bounded_number(
+            obj.get("sleepScoreFactorPercent"), 0, 100)
+        out["readiness_sleep_factor_feedback"] = _clean_text(
+            obj.get("sleepScoreFactorFeedback"), 500)
+        out["acute_load"] = _bounded_number(obj.get("acuteLoad"), 0, 100_000)
+        out["acwr_percent"] = _bounded_number(obj.get("acwrFactorPercent"), 0, 100)
+        out["acwr_factor_feedback"] = _clean_text(obj.get("acwrFactorFeedback"), 500)
+        out["hrv_factor_pct"] = _bounded_number(obj.get("hrvFactorPercent"), 0, 100)
+        out["hrv_factor_feedback"] = _clean_text(obj.get("hrvFactorFeedback"), 500)
+        phrase = _clean_text(obj.get("recoveryTimeChangePhrase"), 200)
+        recovery_minutes = _bounded_number(obj.get("recoveryTime"), 0, 5_760)
+        if phrase and phrase.upper() == "REACHED_ZERO":
+            recovery_minutes = 0
+        out["recovery_time_min"] = recovery_minutes
+        out["recovery_time_factor_pct"] = _bounded_number(
+            obj.get("recoveryTimeFactorPercent"), 0, 100)
+        out["recovery_time_factor_feedback"] = _clean_text(
+            obj.get("recoveryTimeFactorFeedback"), 500)
+        out["recovery_time_change_phrase"] = phrase
+        out["stress_history_pct"] = _bounded_number(
+            obj.get("stressHistoryFactorPercent"), 0, 100)
+        out["stress_history_factor_feedback"] = _clean_text(
+            obj.get("stressHistoryFactorFeedback"), 500)
     return out
 
 
@@ -576,15 +747,19 @@ def _parse_training_status(training_status):
         if isinstance(latest, dict):
             for device_data in latest.values():
                 if isinstance(device_data, dict):
-                    value = (device_data.get("trainingStatusFeedbackPhrase")
-                             or device_data.get("trainingStatus"))
+                    value = _first_not_none(
+                        device_data.get("trainingStatusFeedbackPhrase"),
+                        device_data.get("trainingStatus"),
+                    )
                     if value is not None:
                         break
         # Fallback to older top-level shapes
         if value is None:
-            value = (safe_get(training_status, "trainingStatus")
-                     or safe_get(training_status, "currentDayTrainingStatus"))
-    return {"training_status": value}
+            value = _first_not_none(
+                safe_get(training_status, "trainingStatus"),
+                safe_get(training_status, "currentDayTrainingStatus"),
+            )
+    return {"training_status": _clean_text(value, 500)}
 
 
 def _parse_max_metrics(max_metrics):
@@ -603,11 +778,28 @@ def _parse_max_metrics(max_metrics):
             continue
         generic = item.get("generic")
         if isinstance(generic, dict):
-            out["vo2max_trend"] = (generic.get("vo2MaxPreciseValue")
-                                   or generic.get("vo2MaxValue"))
+            out["vo2max_trend"] = _bounded_number(_first_not_none(
+                generic.get("vo2MaxPreciseValue"), generic.get("vo2MaxValue")
+            ), 1, 150)
             if out["vo2max_trend"] is not None:
                 break
     return out
+
+
+def _parse_endurance(endurance):
+    return {"endurance_score": _bounded_number(
+        endurance.get("overallScore") if isinstance(endurance, dict) else None,
+        0, 100_000,
+    )}
+
+
+def _parse_hill(hill):
+    hill = hill if isinstance(hill, dict) else {}
+    return {
+        "hill_score_overall": _bounded_number(hill.get("overallScore"), 0, 100),
+        "hill_score_strength": _bounded_number(hill.get("strengthScore"), 0, 100),
+        "hill_score_endurance": _bounded_number(hill.get("enduranceScore"), 0, 100),
+    }
 
 
 def _fill_missing(target: dict, extra: dict) -> dict:
@@ -616,6 +808,33 @@ def _fill_missing(target: dict, extra: dict) -> dict:
         if target.get(key) is None:
             target[key] = value
     return target
+
+
+def _wellness_columns(cur):
+    """Return deployed columns so new ingestion remains safe during rollout."""
+    return {row[1] for row in cur.execute("PRAGMA table_info(fact_daily_wellness)")}
+
+
+def _atomic_body_battery_values(values: dict) -> dict:
+    """Return merge values with daily Body Battery high/low kept atomic.
+
+    Parsers normally provide both keys, but this guard lives at the write
+    boundary as well so a future caller cannot update just one half and create
+    an incoherent pair with a value already stored in the row.
+    """
+    prepared = dict(values)
+    pair = ("body_battery_high", "body_battery_low")
+    if not any(key in prepared for key in pair):
+        return prepared
+    high = _bounded_number(prepared.get(pair[0]), 5, 100)
+    low = _bounded_number(prepared.get(pair[1]), 5, 100)
+    if high is None or low is None or high < low:
+        prepared.pop(pair[0], None)
+        prepared.pop(pair[1], None)
+    else:
+        prepared[pair[0]] = high
+        prepared[pair[1]] = low
+    return prepared
 
 
 def _insert_wellness_row(cur, athlete_id, date_str, values: dict):
@@ -628,41 +847,59 @@ def _insert_wellness_row(cur, athlete_id, date_str, values: dict):
     ไม่ได้ดึงรายวัน แต่ fetch_extras เขียนให้เฉพาะ "วันล่าสุด" วันเดียว → ทุกวันที่ถูก
     เขียนซ้ำจะเสีย LT ไป เหลือแค่วันล่าสุดวันเดียว
     (ชื่อคอลัมน์มาจาก parser ในไฟล์นี้เท่านั้น ไม่ได้มาจาก input ภายนอก)"""
-    cols = list(values)
+    # Endpoint absence/temporary failure is represented by None.  Full/deep sync
+    # must follow the same non-destructive rule as fast sync: only fields with a
+    # fresh valid value are allowed to replace the existing snapshot.
+    allowed = _wellness_columns(cur)
+    values = _atomic_body_battery_values(values)
+    fresh = {
+        key: value for key, value in values.items()
+        if value is not None and key in allowed
+    }
+    cols = list(fresh)
     if not cols:
         cur.execute(
-            "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO fact_daily_wellness "
+            f"(athlete_id, calendar_date, fetched_at) VALUES (?, ?, {UTC_NOW_SQL})",
             (athlete_id, date_str),
         )
-        return
+        return 0
     placeholders = ", ".join(["?"] * (len(cols) + 2))
     assignments = ", ".join(f"{c} = excluded.{c}" for c in cols)
     # fetched_at ต้องเลื่อนเอง: ปกติมันได้ค่า DEFAULT ตอน insert แถวใหม่ แต่ทาง DO UPDATE
     # ไม่มีใครแตะ → dashboard (ที่ใช้ fetched_at ตัดสินความสดของข้อมูล) จะอ่านผิด
     cur.execute(
-        f"INSERT INTO fact_daily_wellness (athlete_id, calendar_date, {', '.join(cols)}) "
-        f"VALUES ({placeholders}) "
+        f"INSERT INTO fact_daily_wellness "
+        f"(athlete_id, calendar_date, {', '.join(cols)}, fetched_at) "
+        f"VALUES ({placeholders}, {UTC_NOW_SQL}) "
         f"ON CONFLICT(athlete_id, calendar_date) DO UPDATE SET {assignments}, "
-        f"fetched_at = datetime('now')",
-        (athlete_id, date_str, *(values[c] for c in cols)),
+        f"fetched_at = {UTC_NOW_SQL}",
+        (athlete_id, date_str, *(fresh[c] for c in cols)),
     )
+    return len(fresh)
 
 
 def _update_wellness_fields(cur, athlete_id, date_str, values: dict) -> int:
     """อัปเดตเฉพาะคอลัมน์ที่มีค่า (ห้าม INSERT OR REPLACE — จะล้างคอลัมน์อื่นของวันนั้นทิ้ง
     เช่น sleep/VO2max/LT ที่ full sync เก็บไว้แล้ว). คืนจำนวนคอลัมน์ที่เขียนจริง"""
-    fresh = {k: v for k, v in values.items() if v is not None}
+    allowed = _wellness_columns(cur)
+    values = _atomic_body_battery_values(values)
+    fresh = {
+        key: value for key, value in values.items()
+        if value is not None and key in allowed
+    }
     if not fresh:
         return 0
     cur.execute(
-        "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
+        "INSERT OR IGNORE INTO fact_daily_wellness "
+        f"(athlete_id, calendar_date, fetched_at) VALUES (?, ?, {UTC_NOW_SQL})",
         (athlete_id, date_str),
     )
     # ต้องเลื่อน fetched_at ด้วย ไม่งั้นมันจะค้างที่เวลา insert แถวแรกของวัน แล้ว dashboard
     # (ที่ใช้ fetched_at ตัดสินว่า "ค่าครบวันแล้วหรือยัง") จะอ่านความสดของข้อมูลผิด
     assignments = ", ".join(f"{c} = ?" for c in fresh)
     cur.execute(
-        f"UPDATE fact_daily_wellness SET {assignments}, fetched_at = datetime('now') "
+        f"UPDATE fact_daily_wellness SET {assignments}, fetched_at = {UTC_NOW_SQL} "
         f"WHERE athlete_id = ? AND calendar_date = ?",
         (*fresh.values(), athlete_id, date_str),
     )
@@ -713,6 +950,124 @@ def fetch_and_update_wellness_fast(garmin, conn, athlete_id, start_date, end_dat
 
     print(f"   ✅ อัปเดต wellness {count} วัน")
     return count
+
+
+_REPAIR_CHECK_FIELDS = (
+    "repair_attempted_at_utc",
+    "resting_hr", "stress_avg", "steps",
+    "sleep_score", "hrv_last_night",
+    "body_battery_high", "body_battery_low",
+    "avg_waking_respiration", "avg_sleep_respiration",
+)
+
+
+def _previous_day_repair_due(conn, athlete_id, repair_date, *, now_utc=None):
+    """Return ``(due, reasons)`` for a throttled previous-day wellness repair."""
+    cur = conn.cursor()
+    columns = _wellness_columns(cur)
+    if not set(_REPAIR_CHECK_FIELDS).issubset(columns):
+        return False, ["schema_missing_repair_metadata"]
+
+    row = cur.execute(
+        f"SELECT {', '.join(_REPAIR_CHECK_FIELDS)} FROM fact_daily_wellness "
+        "WHERE athlete_id = ? AND calendar_date = ?",
+        (athlete_id, str(repair_date)),
+    ).fetchone()
+    now_utc = _api_datetime(now_utc or datetime.now(timezone.utc))
+    if row is None:
+        return True, ["row_missing"]
+
+    values = dict(zip(_REPAIR_CHECK_FIELDS, row))
+    attempted = _api_datetime(values["repair_attempted_at_utc"])
+    if attempted is not None:
+        elapsed = now_utc - attempted
+        if timedelta(0) <= elapsed < timedelta(hours=PREVIOUS_DAY_REPAIR_COOLDOWN_HOURS):
+            return False, ["cooldown"]
+
+    reasons = []
+    if values["sleep_score"] is None:
+        reasons.append("sleep_missing")
+    if values["hrv_last_night"] is None:
+        reasons.append("hrv_missing")
+
+    core_fields = ("resting_hr", "stress_avg", "steps", "body_battery_high")
+    if any(values[field] is None for field in core_fields):
+        reasons.append("core_stats_partial")
+
+    bb_high = values["body_battery_high"]
+    bb_low = values["body_battery_low"]
+    if (
+        (bb_high is not None and _bounded_number(bb_high, 5, 100) is None)
+        or (bb_low is not None and _bounded_number(bb_low, 5, 100) is None)
+        or (bb_high is not None and bb_low is not None and bb_high < bb_low)
+    ):
+        reasons.append("body_battery_invalid")
+
+    has_daytime_or_core = any(
+        values[field] is not None
+        for field in (*core_fields, "avg_waking_respiration", "sleep_score")
+    )
+    if values["avg_sleep_respiration"] is None and has_daytime_or_core:
+        reasons.append("sleep_respiration_missing")
+    return bool(reasons), reasons
+
+
+def fetch_and_repair_previous_day_wellness(
+    garmin, conn, athlete_id, repair_date, *, now_utc=None
+):
+    """Repair a partial yesterday snapshot without doubling every fast poll.
+
+    Only a partial/invalid row that is outside the cooldown triggers calls.  The
+    extra respiration endpoint is included because overnight values commonly
+    arrive after the first post-wakeup sync.  Every write is NULL-safe.
+    """
+    due, reasons = _previous_day_repair_due(
+        conn, athlete_id, repair_date, now_utc=now_utc)
+    if not due:
+        if reasons != ["cooldown"]:
+            print(f"   ℹ️  ข้ามซ่อม {repair_date}: ข้อมูลเมื่อวานครบหรือ schema ยังไม่พร้อม")
+        return 0
+
+    date_str = str(repair_date)
+    print(f"\n🩹 ซ่อม wellness เมื่อวาน {date_str} ({', '.join(reasons)})...")
+    stats = safe_call(garmin.get_stats, date_str)
+    time.sleep(0.3)
+    hrv = safe_call(garmin.get_hrv_data, date_str)
+    time.sleep(0.3)
+    sleep = safe_call(garmin.get_sleep_data, date_str)
+    time.sleep(0.3)
+    respiration = safe_call(garmin.get_respiration_data, date_str)
+    time.sleep(0.3)
+    readiness = safe_call(garmin.get_training_readiness, date_str)
+
+    values = {
+        **_parse_stats(stats),
+        **_parse_hrv(hrv),
+        **_parse_sleep(sleep),
+        **_parse_readiness(readiness),
+    }
+    _fill_missing(values, _parse_respiration(respiration))
+    cur = conn.cursor()
+    n_fields = _update_wellness_fields(cur, athlete_id, date_str, values)
+
+    # Record the attempt even if Garmin still returned nothing.  A real
+    # no-night-data case will therefore retry only after the cooldown.
+    attempted_at = _utc_timestamp_text(now_utc or datetime.now(timezone.utc))
+    if "repair_attempted_at_utc" in _wellness_columns(cur):
+        cur.execute(
+            "INSERT OR IGNORE INTO fact_daily_wellness "
+            f"(athlete_id, calendar_date, repair_attempted_at_utc, fetched_at) "
+            f"VALUES (?, ?, ?, {UTC_NOW_SQL})",
+            (athlete_id, date_str, attempted_at),
+        )
+        cur.execute(
+            "UPDATE fact_daily_wellness SET repair_attempted_at_utc = ? "
+            "WHERE athlete_id = ? AND calendar_date = ?",
+            (attempted_at, athlete_id, date_str),
+        )
+    conn.commit()
+    print(f"   ✅ ซ่อมเมื่อวานแล้ว ({n_fields} ฟิลด์ที่ Garmin ส่งกลับ)")
+    return int(n_fields > 0)
 
 
 def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
@@ -772,10 +1127,8 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
             **_parse_readiness(readiness),
             **_parse_training_status(training_status),
             **_parse_max_metrics(max_metrics),
-            "endurance_score": endurance.get("overallScore") if isinstance(endurance, dict) else None,
-            "hill_score_overall": hill.get("overallScore") if isinstance(hill, dict) else None,
-            "hill_score_strength": hill.get("strengthScore") if isinstance(hill, dict) else None,
-            "hill_score_endurance": hill.get("enduranceScore") if isinstance(hill, dict) else None,
+            **_parse_endurance(endurance),
+            **_parse_hill(hill),
         }
         # waking respiration มาได้ทั้งจาก stats และ respiration — stats มาก่อน แล้วค่อยเติมที่ขาด
         _fill_missing(values, _parse_respiration(respiration))
@@ -814,6 +1167,105 @@ PR_LABELS = {
 }
 
 
+def _clean_identifier(value, max_length=128):
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    value = str(value).strip()
+    allowed = set("-_.:")
+    if not value or len(value) > max_length:
+        return None
+    if any(not (ch.isalnum() or ch in allowed) for ch in value):
+        return None
+    return value
+
+
+def _bool_flag(value):
+    """Normalize API boolean variants without turning missing into false."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return int(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1"}:
+            return 1
+        if normalized in {"false", "no", "n", "0"}:
+            return 0
+    return None
+
+
+def fetch_and_upsert_devices(garmin, conn, athlete_id):
+    """Refresh the account's device models once per full sync.
+
+    Store only the whitelist needed for capability-aware UI.  Device identifiers
+    are keys but are deliberately never included in logs.
+    """
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dim_athlete_device'"
+    ).fetchone()
+    if not table_exists:
+        print("   ⚠️  ข้าม device inventory: กรุณารัน 02_init_schema.py")
+        return 0
+    method = getattr(garmin, "get_devices", None)
+    if not callable(method):
+        return 0
+    payload = safe_call(method)
+    if isinstance(payload, dict):
+        payload = payload.get("devices")
+    devices = payload if isinstance(payload, list) else []
+    cur = conn.cursor()
+    seen = set()
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        device_id = _clean_identifier(_first_not_none(
+            device.get("deviceId"), device.get("unitId")))
+        if not device_id or device_id in seen:
+            continue
+        seen.add(device_id)
+        product_name = _clean_text(_first_not_none(
+            device.get("productDisplayName"), device.get("productName")), 200)
+        display_name = _clean_text(device.get("displayName"), 200)
+        is_primary = _bool_flag(_first_not_none(
+            device.get("isPrimaryDevice"), device.get("primaryDevice"),
+            device.get("primary")))
+        is_activity = _bool_flag(_first_not_none(
+            device.get("isPrimaryActivityTracker"),
+            device.get("primaryActivityTracker")))
+        is_training = _bool_flag(_first_not_none(
+            device.get("isPrimaryTrainingDevice"),
+            device.get("primaryTrainingDevice")))
+        cur.execute(
+            f"""INSERT INTO dim_athlete_device (
+                    athlete_id, device_id, product_display_name, display_name,
+                    is_primary_device, is_primary_activity_tracker,
+                    is_primary_training_device, last_seen_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, {UTC_NOW_SQL})
+                ON CONFLICT(athlete_id, device_id) DO UPDATE SET
+                    product_display_name = COALESCE(
+                        excluded.product_display_name,
+                        dim_athlete_device.product_display_name),
+                    display_name = COALESCE(
+                        excluded.display_name, dim_athlete_device.display_name),
+                    is_primary_device = COALESCE(
+                        excluded.is_primary_device,
+                        dim_athlete_device.is_primary_device),
+                    is_primary_activity_tracker = COALESCE(
+                        excluded.is_primary_activity_tracker,
+                        dim_athlete_device.is_primary_activity_tracker),
+                    is_primary_training_device = COALESCE(
+                        excluded.is_primary_training_device,
+                        dim_athlete_device.is_primary_training_device),
+                    last_seen_at_utc = excluded.last_seen_at_utc""",
+            (athlete_id, device_id, product_name, display_name,
+             is_primary, is_activity, is_training),
+        )
+    conn.commit()
+    if seen:
+        print(f"   ✅ Device inventory: {len(seen)} เครื่อง")
+    return len(seen)
+
+
 def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
     """ข้อมูลเสริมที่ API ให้แบบ range/snapshot (ไม่ต้องวนรายวัน — ประหยัด request):
     lactate threshold ล่าสุดจากนาฬิกา, race predictions รายวันทั้งช่วง,
@@ -821,30 +1273,28 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
     print("\n🎯 Fetching extras (LT / race predictions / body comp / PR / gear)...")
     cur = conn.cursor()
 
+    # One lightweight account-level call per full sync; never part of fast lanes.
+    fetch_and_upsert_devices(garmin, conn, athlete_id)
+    time.sleep(0.3)
+
     # ── Lactate Threshold ล่าสุด (Garmin ประเมินจาก HR+pace ระหว่างวิ่ง) ──
     lt = safe_call(garmin.get_lactate_threshold, latest=True)
     if isinstance(lt, dict):
         shr = lt.get("speed_and_heart_rate") or {}
-        lt_date = shr.get("calendarDate")
-        if isinstance(lt_date, str):
-            lt_date = lt_date[:10]  # API คืน timestamp เต็ม — ตัดเหลือวันที่ให้ตรงคีย์ wellness
-        lt_hr = shr.get("heartRate")
-        lt_speed = shr.get("speed")
+        lt_date = _calendar_date(shr.get("calendarDate"))
+        lt_hr = _bounded_number(shr.get("heartRate"), 1, 300)
+        lt_speed = _bounded_number(shr.get("speed"), 0.01, 20)
         # API คืน speed สเกล 0.1 m/s (เจอจริง: พี่เก้าได้ 0.3306 = 3.306 m/s) —
         # LT ของนักวิ่งอยู่ช่วง 2.5-6 m/s ถ้าค่า < 1 แปลว่ามาแบบสเกลย่อ คูณ 10 ก่อน
-        if isinstance(lt_speed, (int, float)) and 0 < lt_speed < 1.0:
+        if lt_speed is not None and lt_speed < 1.0:
             lt_speed *= 10
-        lt_pace = round(1000.0 / lt_speed / 60.0, 2) if lt_speed else None
+        lt_pace = _bounded_number(
+            round(1000.0 / lt_speed / 60.0, 2) if lt_speed else None, 1, 30)
         if lt_date and (lt_hr is not None or lt_pace is not None):
-            # สร้าง row โครงถ้ายังไม่มี แล้ว UPDATE เฉพาะคอลัมน์ LT
-            # (ห้าม INSERT OR REPLACE — จะล้างคอลัมน์ wellness อื่นของวันนั้นทิ้ง)
-            cur.execute(
-                "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
-                (athlete_id, lt_date))
-            cur.execute("""UPDATE fact_daily_wellness
-                           SET lactate_threshold_hr = ?, lactate_threshold_pace_min_km = ?
-                           WHERE athlete_id = ? AND calendar_date = ?""",
-                        (lt_hr, lt_pace, athlete_id, lt_date))
+            _update_wellness_fields(cur, athlete_id, lt_date, {
+                "lactate_threshold_hr": lt_hr,
+                "lactate_threshold_pace_min_km": lt_pace,
+            })
             print(f"   ✅ LT ล่าสุด ({lt_date}): HR {lt_hr}, pace {lt_pace} นาที/กม.")
     conn.commit()
     time.sleep(0.3)
@@ -855,17 +1305,18 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
     # = Garmin ไม่คำนวณให้คนอายุน้อย ซึ่งไม่ใช่ความผิดพลาด ปล่อย NULL ไว้ถูกแล้ว
     fa = safe_call(garmin.get_fitnessage_data, end_date.isoformat())
     if isinstance(fa, dict):
+        fitness_age = None
         if fa.get("invalidReason"):
             print(f"   ℹ️  Fitness Age: Garmin ไม่คำนวณให้ ({fa['invalidReason']})")
-        elif isinstance(fa.get("fitnessAge"), (int, float)):
+        else:
+            fitness_age = _bounded_number(fa.get("fitnessAge"), 1, 120)
+        if not fa.get("invalidReason") and fitness_age is not None:
             fa_date = end_date.isoformat()
-            cur.execute(
-                "INSERT OR IGNORE INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (?, ?)",
-                (athlete_id, fa_date))
-            cur.execute("""UPDATE fact_daily_wellness SET fitness_age = ?
-                           WHERE athlete_id = ? AND calendar_date = ?""",
-                        (round(float(fa["fitnessAge"]), 1), athlete_id, fa_date))
-            print(f"   ✅ Fitness Age ({fa_date}): {round(float(fa['fitnessAge']), 1)} "
+            fitness_age = round(float(fitness_age), 1)
+            _update_wellness_fields(cur, athlete_id, fa_date, {
+                "fitness_age": fitness_age,
+            })
+            print(f"   ✅ Fitness Age ({fa_date}): {fitness_age} "
                   f"(อายุจริง {fa.get('chronologicalAge')})")
     conn.commit()
     time.sleep(0.3)
@@ -875,15 +1326,28 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
                       start_date.isoformat(), end_date.isoformat(), "daily")
     n_pred = 0
     for p in preds if isinstance(preds, list) else []:
-        if not isinstance(p, dict) or not p.get("calendarDate"):
+        if not isinstance(p, dict):
             continue
-        times = (p.get("time5K"), p.get("time10K"), p.get("timeHalfMarathon"), p.get("timeMarathon"))
+        prediction_date = _calendar_date(p.get("calendarDate"))
+        if not prediction_date:
+            continue
+        times = tuple(_bounded_number(value, 1, 604_800) for value in (
+            p.get("time5K"), p.get("time10K"),
+            p.get("timeHalfMarathon"), p.get("timeMarathon"),
+        ))
         if not any(t is not None for t in times):
             continue  # วันปัจจุบัน Garmin มักคืนแถวว่าง (ยังไม่คำนวณ) — ไม่เก็บแถวขยะ
-        cur.execute("""INSERT OR REPLACE INTO fact_race_prediction
-            (athlete_id, calendar_date, time_5k_sec, time_10k_sec, time_half_sec, time_full_sec)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            (athlete_id, p["calendarDate"], *times))
+        cur.execute(f"""INSERT INTO fact_race_prediction
+            (athlete_id, calendar_date, time_5k_sec, time_10k_sec,
+             time_half_sec, time_full_sec, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, {UTC_NOW_SQL})
+            ON CONFLICT(athlete_id, calendar_date) DO UPDATE SET
+                time_5k_sec = COALESCE(excluded.time_5k_sec, fact_race_prediction.time_5k_sec),
+                time_10k_sec = COALESCE(excluded.time_10k_sec, fact_race_prediction.time_10k_sec),
+                time_half_sec = COALESCE(excluded.time_half_sec, fact_race_prediction.time_half_sec),
+                time_full_sec = COALESCE(excluded.time_full_sec, fact_race_prediction.time_full_sec),
+                fetched_at = excluded.fetched_at""",
+            (athlete_id, prediction_date, *times))
         n_pred += 1
     if n_pred:
         print(f"   ✅ Race predictions: {n_pred} วัน")
@@ -898,18 +1362,33 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
         for entry in body.get("dateWeightList") or []:
             if not isinstance(entry, dict):
                 continue
-            cal = entry.get("calendarDate")
+            cal = _calendar_date(entry.get("calendarDate"))
             if not cal and isinstance(entry.get("date"), (int, float)):
-                cal = datetime.fromtimestamp(entry["date"] / 1000).date().isoformat()
+                try:
+                    cal = datetime.fromtimestamp(
+                        entry["date"] / 1000, tz=timezone.utc).date().isoformat()
+                except (OverflowError, OSError, ValueError):
+                    cal = None
             if not cal:
                 continue
-            weight_g = entry.get("weight")  # Garmin คืนเป็นกรัม
-            cur.execute("""INSERT OR REPLACE INTO fact_body_composition
-                (athlete_id, calendar_date, weight_kg, bmi, body_fat_pct)
-                VALUES (?, ?, ?, ?, ?)""",
-                (athlete_id, cal,
-                 round(weight_g / 1000.0, 2) if isinstance(weight_g, (int, float)) else None,
-                 entry.get("bmi"), entry.get("bodyFat")))
+            weight_g = _bounded_number(entry.get("weight"), 1_000, 500_000)
+            values = (
+                round(weight_g / 1000.0, 2) if weight_g is not None else None,
+                _bounded_number(entry.get("bmi"), 5, 100),
+                _bounded_number(entry.get("bodyFat"), 0, 100),
+            )
+            if not any(value is not None for value in values):
+                continue
+            cur.execute(f"""INSERT INTO fact_body_composition
+                (athlete_id, calendar_date, weight_kg, bmi, body_fat_pct, fetched_at)
+                VALUES (?, ?, ?, ?, ?, {UTC_NOW_SQL})
+                ON CONFLICT(athlete_id, calendar_date) DO UPDATE SET
+                    weight_kg = COALESCE(excluded.weight_kg, fact_body_composition.weight_kg),
+                    bmi = COALESCE(excluded.bmi, fact_body_composition.bmi),
+                    body_fat_pct = COALESCE(
+                        excluded.body_fat_pct, fact_body_composition.body_fat_pct),
+                    fetched_at = excluded.fetched_at""",
+                (athlete_id, cal, *values))
             n_body += 1
     if n_body:
         print(f"   ✅ Body composition: {n_body} รายการ")
@@ -922,16 +1401,38 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
         prs = prs.get("personalRecords") or []
     n_pr = 0
     for pr in prs if isinstance(prs, list) else []:
-        if not isinstance(pr, dict) or pr.get("typeId") is None:
+        if not isinstance(pr, dict):
             continue
-        achieved = pr.get("prStartTimeGmtFormatted") or pr.get("prStartTimeGmt")
+        record_type_id = _bounded_number(pr.get("typeId"), 1, 1_000_000)
+        value = _bounded_number(pr.get("value"), 0, 1_000_000_000)
+        if record_type_id is None or value is None:
+            continue
+        achieved = _first_not_none(
+            pr.get("prStartTimeGmtFormatted"), pr.get("prStartTimeGmt"))
         if isinstance(achieved, (int, float)):
-            achieved = datetime.fromtimestamp(achieved / 1000).date().isoformat()
-        cur.execute("""INSERT OR REPLACE INTO fact_personal_record
-            (athlete_id, record_type_id, record_label, value, activity_id, achieved_date)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            (athlete_id, pr["typeId"], PR_LABELS.get(pr["typeId"]), pr.get("value"),
-             pr.get("activityId"), achieved))
+            try:
+                achieved = datetime.fromtimestamp(
+                    achieved / 1000, tz=timezone.utc).date().isoformat()
+            except (OverflowError, OSError, ValueError):
+                achieved = None
+        else:
+            achieved = _calendar_date(achieved)
+        activity_id = _bounded_number(pr.get("activityId"), 1, None)
+        cur.execute(f"""INSERT INTO fact_personal_record
+            (athlete_id, record_type_id, record_label, value, activity_id,
+             achieved_date, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, {UTC_NOW_SQL})
+            ON CONFLICT(athlete_id, record_type_id) DO UPDATE SET
+                record_label = COALESCE(
+                    excluded.record_label, fact_personal_record.record_label),
+                value = COALESCE(excluded.value, fact_personal_record.value),
+                activity_id = COALESCE(
+                    excluded.activity_id, fact_personal_record.activity_id),
+                achieved_date = COALESCE(
+                    excluded.achieved_date, fact_personal_record.achieved_date),
+                fetched_at = excluded.fetched_at""",
+            (athlete_id, record_type_id, PR_LABELS.get(record_type_id), value,
+             activity_id, achieved))
         n_pr += 1
     if n_pr:
         print(f"   ✅ Personal records: {n_pr} รายการ")
@@ -950,18 +1451,40 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
         if isinstance(gear_list, dict):
             gear_list = gear_list.get("gear") or []
         for g in gear_list if isinstance(gear_list, list) else []:
-            if not isinstance(g, dict) or not g.get("uuid"):
+            if not isinstance(g, dict):
+                continue
+            gear_uuid = _clean_identifier(g.get("uuid"))
+            if not gear_uuid:
                 continue
             time.sleep(0.3)
-            stats = safe_call(garmin.get_gear_stats, g["uuid"]) or {}
-            retired = 1 if (g.get("gearStatusName") or "").lower() == "retired" else 0
-            cur.execute("""INSERT OR REPLACE INTO fact_gear
+            stats = safe_call(garmin.get_gear_stats, gear_uuid)
+            stats = stats if isinstance(stats, dict) else {}
+            gear_status = _clean_text(g.get("gearStatusName"), 100)
+            retired = None if gear_status is None else int(gear_status.lower() == "retired")
+            cur.execute(f"""INSERT INTO fact_gear
                 (athlete_id, gear_uuid, gear_name, gear_type, custom_make_model,
-                 date_begin, retired, total_distance_m, total_activities)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (athlete_id, g["uuid"], g.get("displayName") or g.get("customMakeModel"),
-                 g.get("gearTypeName"), g.get("customMakeModel"), g.get("dateBegin"),
-                 retired, stats.get("totalDistance"), stats.get("totalActivities")))
+                 date_begin, retired, total_distance_m, total_activities, fetched_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {UTC_NOW_SQL})
+                 ON CONFLICT(athlete_id, gear_uuid) DO UPDATE SET
+                    gear_name = COALESCE(excluded.gear_name, fact_gear.gear_name),
+                    gear_type = COALESCE(excluded.gear_type, fact_gear.gear_type),
+                    custom_make_model = COALESCE(
+                        excluded.custom_make_model, fact_gear.custom_make_model),
+                    date_begin = COALESCE(excluded.date_begin, fact_gear.date_begin),
+                    retired = COALESCE(excluded.retired, fact_gear.retired),
+                    total_distance_m = COALESCE(
+                        excluded.total_distance_m, fact_gear.total_distance_m),
+                    total_activities = COALESCE(
+                        excluded.total_activities, fact_gear.total_activities),
+                    fetched_at = excluded.fetched_at""",
+                (athlete_id, gear_uuid,
+                 _clean_text(_first_not_none(
+                     g.get("displayName"), g.get("customMakeModel")), 200),
+                 _clean_text(g.get("gearTypeName"), 100),
+                 _clean_text(g.get("customMakeModel"), 200),
+                 _calendar_date(g.get("dateBegin")), retired,
+                 _bounded_number(stats.get("totalDistance"), 0, 1_000_000_000),
+                 _bounded_number(stats.get("totalActivities"), 0, 10_000_000)))
             conn.commit()
             n_gear += 1
     if n_gear:
@@ -1031,20 +1554,61 @@ def sanity_check(conn, athlete_id, start_date, end_date, *,
     #    วันนี้ยังไม่จบวัน ค่าอาจยังไม่มา ไม่นับ / เก่าเกิน WELLNESS_GAP_WARN_DAYS ก็ไม่นับ
     #    เพราะเตือนแล้วทำอะไรไม่ได้ กลายเป็นแถบเหลืองค้างหน้า dashboard จนคนเลิกอ่านคำเตือน
     if include_wellness:
+        thai_today = datetime.now(BANGKOK_TZ).date()
+        recent_start = thai_today - timedelta(days=WELLNESS_GAP_WARN_DAYS)
         rows = conn.execute(
             """SELECT calendar_date FROM fact_daily_wellness
                WHERE athlete_id = ? AND calendar_date BETWEEN ? AND ?
-                 AND calendar_date < date('now', 'localtime')
-                 AND calendar_date >= date('now', 'localtime', ?)
-                 AND resting_hr IS NULL AND sleep_score IS NULL AND body_battery_high IS NULL
+                  AND calendar_date < ?
+                  AND calendar_date >= ?
+                  AND resting_hr IS NULL AND sleep_score IS NULL AND body_battery_high IS NULL
                ORDER BY calendar_date""",
             (athlete_id, str(start_date), str(end_date),
-             f"-{WELLNESS_GAP_WARN_DAYS} days")).fetchall()
+             thai_today.isoformat(), recent_start.isoformat())).fetchall()
         if rows:
             days = ", ".join(r[0] for r in rows[:WELLNESS_GAP_DAYS_LISTED])
             if len(rows) > WELLNESS_GAP_DAYS_LISTED:
                 days += f" และอีก {len(rows) - WELLNESS_GAP_DAYS_LISTED} วัน"
             warns.append(f"wellness ว่างทั้งวัน: {days} — นักกีฬาอาจยังไม่ได้ sync นาฬิกาเข้าแอป")
+
+        # A partial post-wakeup snapshot is more subtle than an empty row: day
+        # metrics have arrived, but at least two of the nightly bundle have not.
+        # This caught Tong 8 Aug immediately whereas the old all-empty check did not.
+        partial_rows = conn.execute(
+            """SELECT calendar_date, sleep_score, hrv_last_night,
+                      avg_sleep_respiration
+                 FROM fact_daily_wellness
+                WHERE athlete_id = ? AND calendar_date BETWEEN ? AND ?
+                  AND calendar_date < ?
+                  AND calendar_date >= ?
+                  AND (resting_hr IS NOT NULL OR stress_avg IS NOT NULL
+                       OR steps IS NOT NULL OR body_battery_high IS NOT NULL
+                       OR avg_waking_respiration IS NOT NULL)
+                  AND NOT (resting_hr IS NULL AND sleep_score IS NULL
+                           AND body_battery_high IS NULL)
+                  AND ((sleep_score IS NULL) + (hrv_last_night IS NULL)
+                       + (avg_sleep_respiration IS NULL)) >= 2
+                ORDER BY calendar_date""",
+            (athlete_id, str(start_date), str(end_date),
+             thai_today.isoformat(), recent_start.isoformat()),
+        ).fetchall()
+        if partial_rows:
+            details = []
+            for day, sleep_score, hrv_last_night, sleep_resp in partial_rows[
+                    :WELLNESS_GAP_DAYS_LISTED]:
+                missing = []
+                if sleep_score is None:
+                    missing.append("Sleep")
+                if hrv_last_night is None:
+                    missing.append("HRV")
+                if sleep_resp is None:
+                    missing.append("sleep respiration")
+                details.append(f"{day} ({'/'.join(missing)})")
+            if len(partial_rows) > WELLNESS_GAP_DAYS_LISTED:
+                details.append(f"อีก {len(partial_rows) - WELLNESS_GAP_DAYS_LISTED} วัน")
+            warns.append(
+                "wellness เป็น partial snapshot: " + ", ".join(details)
+                + " — เปิด Garmin Connect/sync นาฬิกาแล้วให้ fast sync ซ่อมย้อนหลัง")
 
     return warns
 
@@ -1124,7 +1688,9 @@ def main():
     conn.commit()
 
     # Date range
-    end_date = date.today()
+    # Business dates are Thai calendar days regardless of the Windows/Task
+    # Scheduler host timezone.  Thailand has no daylight-saving transition.
+    end_date = datetime.now(BANGKOK_TZ).date()
     start_date = end_date - timedelta(days=args.days)
 
     print(f"\n🗓️  Backfill range: {start_date} → {end_date} ({args.days} days)")
@@ -1164,14 +1730,24 @@ def main():
         wellness_count = fetch_and_update_wellness_fast(
             garmin, conn, athlete_id, start_date, end_date
         )
+        # The scheduled lane uses --days 0.  A manual wider fast range already
+        # fetched yesterday in the loop, so do not duplicate those calls.
+        if start_date == end_date:
+            wellness_count += fetch_and_repair_previous_day_wellness(
+                garmin, conn, athlete_id, end_date - timedelta(days=1)
+            )
     else:
         wellness_count = fetch_and_insert_wellness(
             garmin, conn, athlete_id, start_date, end_date
         )
         fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
 
+    sanity_start_date = (
+        min(start_date, end_date - timedelta(days=1))
+        if args.wellness_fast else start_date
+    )
     warnings = sanity_check(
-        conn, athlete_id, start_date, end_date,
+        conn, athlete_id, sanity_start_date, end_date,
         include_wellness=not args.activities_only,
         include_activities=not args.wellness_fast,
     )

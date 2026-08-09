@@ -21,6 +21,7 @@ exit code: 0 = ไม่มี ERROR (อาจมี WARNING) | 1 = พบ ERRO
 
 import argparse
 import ast
+import importlib.util
 import json
 import os
 import re
@@ -31,6 +32,15 @@ import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:  # ``python scripts/health_report.py``
+    import data_quality as dq
+except ModuleNotFoundError:  # loaded directly by importlib from any cwd
+    _dq_spec = importlib.util.spec_from_file_location(
+        "garmin_data_quality", Path(__file__).with_name("data_quality.py")
+    )
+    dq = importlib.util.module_from_spec(_dq_spec)
+    _dq_spec.loader.exec_module(dq)
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -240,15 +250,41 @@ def default_schtasks_provider(task_name: str) -> str:
     try:
         result = subprocess.run(
             ["schtasks", "/Query", "/TN", task_name, "/V", "/FO", "LIST"],
-            capture_output=True, text=True, timeout=15,
+            # Capture bytes deliberately.  On Thai Windows, schtasks may emit
+            # CP874 bytes while Python's preferred text codec is CP1252; using
+            # text=True then crashes its reader thread before we can report a
+            # finding.  The parser only needs ASCII field names, but preserve
+            # Thai task/path text for diagnostics too.
+            capture_output=True, text=False, timeout=15,
         )
     except FileNotFoundError as e:
         raise SchtasksUnavailable(f"ไม่พบคำสั่ง schtasks: {e}") from e
     except subprocess.TimeoutExpired as e:
         raise SchtasksUnavailable(f"schtasks ค้าง: {e}") from e
     if result.returncode != 0:
-        raise SchtasksUnavailable((result.stderr or "schtasks คืน error").strip())
-    return result.stdout
+        detail = _decode_windows_output(result.stderr).strip() or "schtasks คืน error"
+        raise SchtasksUnavailable(detail)
+    return _decode_windows_output(result.stdout)
+
+
+def _decode_windows_output(raw) -> str:
+    """Decode Windows command output without trusting the process code page."""
+    if isinstance(raw, str):
+        return raw
+    if not isinstance(raw, (bytes, bytearray)):
+        return ""
+    raw = bytes(raw)
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    for encoding in ("utf-8-sig", "cp874", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def parse_schtasks_output(raw: str) -> dict:
@@ -463,7 +499,109 @@ def check_db_integrity() -> list:
     return [Finding("db_integrity", OK if ok else ERROR, detail)]
 
 
-# ── 7. พื้นที่ว่างของไดรฟ์ ────────────────────────────────────────
+# ── 7. คุณภาพข้อมูลต่อ field (read-only, วันตัดตาม Asia/Bangkok) ─────────────
+
+def _data_quality_message(finding: dict) -> str:
+    kind = finding.get("kind")
+    if kind == "drift":
+        return (
+            f"{finding['field']} coverage ลดในช่วง {finding['horizon_days']} วัน: "
+            f"{finding['prior'][0]}/{finding['prior'][1]} "
+            f"({finding['prior_rate']:.0%}) → {finding['recent'][0]}/{finding['recent'][1]} "
+            f"({finding['recent_rate']:.0%})"
+        )
+    if kind == "partial_snapshot":
+        return (
+            f"{finding['calendar_date']} เป็น partial snapshot — "
+            f"มี {', '.join(finding['present'])}; ขาด {', '.join(finding['missing'])}"
+        )
+    if kind == "missing_snapshot":
+        state = "ไม่มีแถว" if finding.get("reason") == "row_missing" else "มีแถวแต่ค่าที่คาดว่างทั้งหมด"
+        return (
+            f"{finding['calendar_date']} ขาด wellness ทั้ง snapshot ({state}) — "
+            f"ขาด {', '.join(finding['missing'])}"
+        )
+    if kind == "range":
+        examples = ", ".join(f"{d}={v}" for d, v in finding["examples"])
+        return (
+            f"{finding['field']} นอกช่วง {finding['bounds'][0]}–{finding['bounds'][1]} "
+            f"{finding['count']} จุด ({examples})"
+        )
+    if kind == "relation":
+        examples = ", ".join(
+            f"{row[0]}={row[1]}/{row[2]}" for row in finding["examples"]
+        )
+        return f"relation {finding['field']} ผิด {finding['count']} จุด ({examples})"
+    return str(finding)
+
+
+def check_data_quality(now=None) -> list:
+    """Check field coverage, partial rows and values without modifying SQLite."""
+    if not DB_PATH.exists():
+        return [Finding("data_quality", ERROR, f"ไม่พบไฟล์ DB ที่ {DB_PATH}")]
+    uri = f"file:{DB_PATH.resolve().as_posix()}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        return [Finding("data_quality", ERROR, f"เปิด DB แบบ read-only ไม่ได้: {exc}")]
+
+    findings = []
+    try:
+        athletes = conn.execute(
+            "SELECT slug, athlete_id FROM dim_athlete ORDER BY slug"
+        ).fetchall()
+        for slug, athlete_id in athletes:
+            anomalies, coverage = dq.check_athlete(
+                conn, slug, athlete_id, today=now,
+            )
+            wellness = {
+                item["field"]: item["recent"][0]
+                for item in coverage if item["table"] == "wellness"
+            }
+            summary_fields = (
+                "resting_hr", "sleep_score", "body_battery_high", "stress_avg",
+                "hrv_last_night", "avg_sleep_respiration", "training_readiness",
+            )
+            summary = ", ".join(
+                f"{field}={wellness[field]}/30"
+                for field in summary_fields if field in wellness
+            ) or "ไม่มี wellness field ที่รองรับ"
+            core_fields = (
+                "resting_hr", "sleep_score", "body_battery_high",
+                "stress_avg", "hrv_last_night",
+            )
+            core_counts = [wellness[field] for field in core_fields if field in wellness]
+            very_low_core = (
+                not core_counts
+                or max(core_counts) <= int(30 * dq.BAD_RATE)
+            )
+            coverage_level = WARNING if very_low_core else OK
+            coverage_note = (
+                " — coverage ค่าหลักต่ำมาก; ตรวจว่าเป็นนักกีฬาใหม่/ไม่ได้ sync "
+                "หรือ wellness endpoint ขาดทั้งวัน"
+                if very_low_core else ""
+            )
+            findings.append(Finding(
+                f"data_quality_coverage:{slug}", coverage_level,
+                f"coverage วันเต็มล่าสุด (Asia/Bangkok): {summary}{coverage_note}",
+            ))
+            for anomaly in anomalies:
+                findings.append(Finding(
+                    f"data_quality:{slug}:{anomaly['kind']}:{anomaly['field']}",
+                    ERROR if anomaly["level"] == "ERROR" else WARNING,
+                    _data_quality_message(anomaly),
+                ))
+    except sqlite3.Error as exc:
+        return [Finding("data_quality", ERROR, f"query ตรวจคุณภาพข้อมูลล้มเหลว: {exc}")]
+    finally:
+        conn.close()
+
+    if not findings:
+        findings.append(Finding("data_quality", WARNING, "ไม่พบนักกีฬาใน dim_athlete"))
+    return findings
+
+
+# ── 8. พื้นที่ว่างของไดรฟ์ ────────────────────────────────────────
 
 def check_disk_space(disk_usage=None) -> list:
     disk_usage = disk_usage or shutil.disk_usage
@@ -485,7 +623,7 @@ def check_disk_space(disk_usage=None) -> list:
     return [Finding("disk_space", OK, msg)]
 
 
-# ── 8. ความสอดคล้องของ 6 สาย: dashboard.py เทียบ notify_sync.ps1 ─────
+# ── 9. ความสอดคล้องของ 6 สาย: dashboard.py เทียบ notify_sync.ps1 ─────
 # เทคนิคเดียวกับ tests/test_fast_sync.py::LaneStaleLimitTests (ast อ่าน python,
 # regex อ่าน powershell) — ต่างกันตรงนี้คือรันสด ๆ ตอน health check จริง ไม่ใช่แค่ตอน CI
 
@@ -540,6 +678,7 @@ def run_all_checks(*, now=None, schtasks_provider=None, disk_usage=None,
     findings += check_unfinished_runs(now=now)
     findings += check_backup(now=now)
     findings += check_db_integrity()
+    findings += check_data_quality(now=now)
     findings += check_disk_space(disk_usage=disk_usage)
     findings += check_lane_limit_consistency(dashboard_path=dashboard_path, watchdog_path=watchdog_path)
     return findings
