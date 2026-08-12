@@ -6,10 +6,14 @@ import importlib.util
 import io
 import os
 import socket
+import sqlite3
+import subprocess
 import sys
+import tempfile
 import unittest
 import urllib.error
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +28,133 @@ def load_script(name, filename):
 
 
 backup_db = load_script("garmin_backup_db_healthcheck_under_test", "backup_db.py")
+
+
+class DataDirIsolationTests(unittest.TestCase):
+    """ต้นทาง DB และสถานะ backup ต้องย้ายตาม GARMIN_DATA_DIR ทั้งตอน import/เทส."""
+
+    def test_import_honors_garmin_data_dir_for_every_source_path(self):
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-data-") as temp:
+            isolated_dir = Path(temp)
+            with mock.patch.dict(
+                os.environ, {"GARMIN_DATA_DIR": str(isolated_dir)}
+            ):
+                isolated = load_script(
+                    "garmin_backup_db_data_dir_probe", "backup_db.py"
+                )
+
+            self.assertEqual(isolated.DATA_DIR, isolated_dir)
+            self.assertEqual(isolated.DB_PATH, isolated_dir / "garmin.db")
+            self.assertEqual(
+                isolated.LANE_STATUS,
+                isolated_dir / "sync_lane" / "backup.json",
+            )
+
+    def test_use_data_dir_repoints_database_and_lane_status_together(self):
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-data-") as temp:
+            isolated_dir = Path(temp)
+            previous = backup_db.use_data_dir(isolated_dir)
+            try:
+                self.assertEqual(backup_db.DATA_DIR, isolated_dir)
+                self.assertEqual(backup_db.DB_PATH, isolated_dir / "garmin.db")
+                self.assertEqual(
+                    backup_db.LANE_STATUS,
+                    isolated_dir / "sync_lane" / "backup.json",
+                )
+            finally:
+                backup_db.use_data_dir(previous)
+
+    def test_missing_source_database_is_never_created_by_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-data-") as temp:
+            root = Path(temp)
+            missing_source = root / "isolated" / "garmin.db"
+            destination = root / "backup" / "garmin.db"
+            missing_source.parent.mkdir()
+
+            with self.assertRaises(FileNotFoundError):
+                backup_db.snapshot(missing_source, destination)
+
+            self.assertFalse(missing_source.exists())
+            self.assertFalse(destination.exists())
+
+    def test_snapshot_still_reads_an_existing_wal_database(self):
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-data-") as temp:
+            root = Path(temp)
+            source = root / "isolated" / "garmin.db"
+            destination = root / "backup" / "garmin.db"
+            source.parent.mkdir()
+            writer = sqlite3.connect(source)
+            try:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("CREATE TABLE fact_activity (activity_id INTEGER)")
+                writer.executemany(
+                    "INSERT INTO fact_activity VALUES (?)", [(1,), (2,)]
+                )
+                writer.commit()
+
+                rows = backup_db.snapshot(source, destination)
+            finally:
+                writer.close()
+
+            copied = sqlite3.connect(destination)
+            try:
+                copied_rows = copied.execute(
+                    "SELECT COUNT(*) FROM fact_activity"
+                ).fetchone()[0]
+            finally:
+                copied.close()
+            self.assertEqual((rows, copied_rows), (2, 2))
+
+    def test_snapshot_rejects_live_database_as_its_own_destination(self):
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-data-") as temp:
+            database = Path(temp) / "garmin.db"
+            conn = sqlite3.connect(database)
+            conn.execute("CREATE TABLE fact_activity (activity_id INTEGER)")
+            conn.commit()
+            conn.close()
+            before = database.read_bytes()
+
+            with self.assertRaises(ValueError):
+                backup_db.snapshot(database, database)
+
+            self.assertEqual(database.read_bytes(), before)
+
+    def test_daily_copy_is_valid_sqlite_and_leaves_no_partial_file(self):
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-daily-") as temp:
+            root = Path(temp)
+            snapshot = root / "snapshot.db"
+            daily = root / "daily"
+            conn = sqlite3.connect(snapshot)
+            conn.execute("CREATE TABLE fact_activity (activity_id INTEGER)")
+            conn.execute("INSERT INTO fact_activity VALUES (7)")
+            conn.commit()
+            conn.close()
+
+            backup_db.rotate_daily(daily, snapshot)
+
+            copies = list(daily.glob("garmin-*.db"))
+            self.assertEqual(len(copies), 1)
+            check = sqlite3.connect(copies[0])
+            try:
+                self.assertEqual(
+                    check.execute("PRAGMA integrity_check").fetchone()[0], "ok"
+                )
+            finally:
+                check.close()
+            self.assertEqual(list(daily.glob("*.tmp")), [])
+
+    def test_lane_status_write_failure_is_reported_to_caller(self):
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-status-") as temp:
+            previous = backup_db.use_data_dir(temp)
+            try:
+                blocker = Path(temp) / "sync_lane"
+                blocker.write_text("not a directory", encoding="ascii")
+                written = backup_db.write_status(
+                    datetime.now(), True, "ok", []
+                )
+            finally:
+                backup_db.use_data_dir(previous)
+            self.assertFalse(written)
 
 
 class _FakeResponse:
@@ -45,6 +176,70 @@ class EnvVarIsolatedMixin:
         patcher.start()
         os.environ.pop(backup_db.HEALTHCHECK_ENV_VAR, None)
         self.addCleanup(patcher.stop)
+        self.health_data = tempfile.TemporaryDirectory(
+            prefix="garmin-healthcheck-secret-"
+        )
+        self.addCleanup(self.health_data.cleanup)
+        previous = backup_db.use_data_dir(self.health_data.name)
+        self.addCleanup(backup_db.use_data_dir, previous)
+
+
+class HealthcheckSecretStorageTests(EnvVarIsolatedMixin, unittest.TestCase):
+    def test_dpapi_file_is_used_when_environment_is_absent(self):
+        encrypted = Path(self.health_data.name) / backup_db.HEALTHCHECK_DPAPI_FILE
+        encrypted.write_bytes(b"synthetic-ciphertext")
+        with mock.patch.object(backup_db.os, "name", "nt"), mock.patch.object(
+            backup_db, "_dpapi_unprotect",
+            return_value="https://hc-ping.com/synthetic-check",
+        ) as decrypt:
+            resolved = backup_db.get_healthcheck_url()
+        self.assertEqual(resolved, "https://hc-ping.com/synthetic-check")
+        decrypt.assert_called_once_with(b"synthetic-ciphertext")
+
+    def test_environment_is_fallback_when_dpapi_file_is_absent(self):
+        os.environ[backup_db.HEALTHCHECK_ENV_VAR] = "https://hc-ping.com/env-check"
+        with mock.patch.object(backup_db, "_dpapi_unprotect") as decrypt:
+            self.assertEqual(
+                backup_db.get_healthcheck_url(),
+                "https://hc-ping.com/env-check",
+            )
+        decrypt.assert_not_called()
+
+    def test_dpapi_file_wins_over_stale_machine_environment(self):
+        encrypted = Path(self.health_data.name) / backup_db.HEALTHCHECK_DPAPI_FILE
+        encrypted.write_bytes(b"protected")
+        os.environ[backup_db.HEALTHCHECK_ENV_VAR] = "https://hc-ping.com/stale-env"
+        with mock.patch.object(backup_db.os, "name", "nt"), mock.patch.object(
+            backup_db, "_dpapi_unprotect",
+            return_value="https://hc-ping.com/protected-file",
+        ):
+            resolved = backup_db.get_healthcheck_url()
+        self.assertEqual(resolved, "https://hc-ping.com/protected-file")
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI integration test")
+    def test_windows_dpapi_current_user_round_trip(self):
+        secret = "https://hc-ping.com/synthetic-dpapi-roundtrip"
+        path = Path(self.health_data.name) / "roundtrip.dpapi"
+        env = os.environ.copy()
+        env["RUN_PERF_DPAPI_TEST_VALUE"] = secret
+        env["RUN_PERF_DPAPI_TEST_PATH"] = str(path)
+        script = (
+            "Add-Type -AssemblyName System.Security;"
+            "$raw=[Text.Encoding]::UTF8.GetBytes($env:RUN_PERF_DPAPI_TEST_VALUE);"
+            "$blob=[Security.Cryptography.ProtectedData]::Protect("
+            "$raw,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);"
+            "[IO.File]::WriteAllBytes($env:RUN_PERF_DPAPI_TEST_PATH,$blob)"
+        )
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", script],
+            env=env,
+            capture_output=True,
+            text=False,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(backup_db._dpapi_unprotect(path.read_bytes()), secret)
 
 
 class HealthcheckPingUnitTests(EnvVarIsolatedMixin, unittest.TestCase):
@@ -60,6 +255,18 @@ class HealthcheckPingUnitTests(EnvVarIsolatedMixin, unittest.TestCase):
         with mock.patch("urllib.request.urlopen", return_value=_FakeResponse()) as m:
             backup_db.notify_healthcheck("start")
         self.assertEqual(m.call_args.args[0], "https://hc-ping.com/abc123/start")
+
+    def test_http_or_url_with_query_never_touches_network(self):
+        for unsafe in (
+            "http://hc-ping.com/abc123",
+            "https://hc-ping.com/abc123?athlete=secret",
+            "https://user:pass@hc-ping.com/abc123",
+        ):
+            with self.subTest(unsafe=unsafe):
+                os.environ[backup_db.HEALTHCHECK_ENV_VAR] = unsafe
+                with mock.patch("urllib.request.urlopen") as request:
+                    backup_db.notify_healthcheck("start")
+                request.assert_not_called()
 
     def test_success_hits_bare_url_no_suffix(self):
         os.environ[backup_db.HEALTHCHECK_ENV_VAR] = "https://hc-ping.com/abc123"
@@ -174,6 +381,36 @@ class MainPingSequenceTests(EnvVarIsolatedMixin, unittest.TestCase):
                 self.assertEqual(len(kinds), len(set(kinds)), f"kind ซ้ำในรอบเดียว: {kinds}")
                 self.assertEqual(kinds[0], "start")
                 self.assertEqual(len(kinds), 2, "ต้องมีแค่ start + ผลสุดท้ายอย่างละ 1 ครั้งต่อรอบ")
+
+    def test_daily_rotation_failure_is_a_real_backup_failure(self):
+        argv = [
+            "backup_db.py", "--dest", "/tmp/fake-dest",
+            "--daily", "/tmp/fake-daily", "--robocopy-exit", "0",
+        ]
+        with mock.patch.object(backup_db, "notify_healthcheck") as ping_mock, \
+             mock.patch.object(backup_db, "write_status") as status_mock, \
+             mock.patch.object(backup_db, "snapshot", return_value=5), \
+             mock.patch.object(
+                 backup_db, "rotate_daily", side_effect=OSError("disk full")
+             ), \
+             mock.patch.object(sys, "argv", argv):
+            code = backup_db.main()
+
+        self.assertEqual(code, 1)
+        self.assertEqual([c.args[0] for c in ping_mock.call_args_list], ["start", "fail"])
+        self.assertFalse(status_mock.call_args.args[1])
+        self.assertEqual(status_mock.call_args.args[2], "daily")
+
+    def test_lane_status_write_failure_turns_success_into_failure(self):
+        argv = ["backup_db.py", "--dest", "/tmp/fake-dest", "--robocopy-exit", "0"]
+        with mock.patch.object(backup_db, "notify_healthcheck") as ping_mock, \
+             mock.patch.object(backup_db, "write_status", return_value=False), \
+             mock.patch.object(backup_db, "snapshot", return_value=5), \
+             mock.patch.object(sys, "argv", argv):
+            code = backup_db.main()
+
+        self.assertEqual(code, 1)
+        self.assertEqual([c.args[0] for c in ping_mock.call_args_list], ["start", "fail"])
 
 
 class MainExitCodeUnaffectedByHealthcheckOutageTests(EnvVarIsolatedMixin, unittest.TestCase):

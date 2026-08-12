@@ -196,6 +196,18 @@ def pending_slots(lane: str, slots: list[dtime], now: datetime,
     except Exception:
         # ไม่เคยรัน/ไฟล์เสีย → ถือว่าค้างทั้งหมด ให้รันเลย
         return candidates or [now]
+    # New lane files carry per-athlete results.  A round which ran but failed is
+    # not evidence that a catch-up slot completed; leave it pending so the next
+    # hourly trigger can retry.  Files from older builds had no `results`, so
+    # retain their historical run_at behavior for backward compatibility.
+    results = data.get("results")
+    if results is not None and (
+        not isinstance(results, list)
+        or not results
+        or not all(isinstance(result, dict) and result.get("ok") is True
+                   for result in results)
+    ):
+        return candidates
     return [c for c in candidates if c > last_run]
 
 
@@ -352,6 +364,7 @@ def main():
         }, ensure_ascii=False, indent=1)
         # ไฟล์รวม (notify + dashboard อ่าน) + สำเนาแยกสายงาน (dashboard โชว์ว่าสายไหน
         # เดินล่าสุดเมื่อไหร่ — สายที่ล้มจะไม่ถูกสายอื่นที่ผ่านมาทับจนมองไม่เห็น)
+        status_write_failed = False
         for target in (STATUS_FILE, LANE_STATUS_DIR / f"{lane}.json"):
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -359,6 +372,7 @@ def main():
                 tmp.write_text(payload, encoding="utf-8")
                 tmp.replace(target)
             except Exception as e:
+                status_write_failed = True
                 print(f"⚠️  เขียน {target.name} ไม่สำเร็จ: {e}")
 
     n_warn = sum(len(r["warnings"]) for r in results)
@@ -368,7 +382,7 @@ def main():
           f" | ข้อมูลน่าสงสัย: {n_warn} จุด")
     print("=" * 60)
     # exit code != 0 ถ้ามีคนล้มเหลว เพื่อให้ log/Task เห็นสถานะ
-    sys.exit(1 if failed else 0)
+    sys.exit(1 if failed or status_write_failed else 0)
 
 
 if __name__ == "__main__":

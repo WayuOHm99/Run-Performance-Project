@@ -31,6 +31,7 @@ STATUS_DIR = DATA_DIR / "sync_status"
 UTC_NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
 PREVIOUS_DAY_REPAIR_COOLDOWN_HOURS = 6
 BANGKOK_TZ = timezone(timedelta(hours=7))
+SQLITE_MAX_INTEGER = 2**63 - 1
 
 
 def use_data_dir(path) -> Path:
@@ -169,6 +170,60 @@ def safe_call(api_method, *args, **kwargs):
 
 # ── Activity Fetching ────────────────────────────────────────
 
+
+class RequiredEndpointError(RuntimeError):
+    """A mandatory Garmin response was unavailable."""
+
+    status_reason = "network"
+
+
+class InvalidEndpointPayloadError(RequiredEndpointError):
+    """A mandatory Garmin response arrived but is unsafe to reconcile."""
+
+    status_reason = "payload"
+
+
+def _normalize_activity_id(value):
+    """Return one canonical positive SQLite INTEGER activity id."""
+    if isinstance(value, bool):
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return normalized if 1 <= normalized <= SQLITE_MAX_INTEGER else None
+
+
+def _validated_activities(payload):
+    """Validate the authoritative activity collection before any reconciliation.
+
+    An empty list is a valid "no activities" response.  Any other top-level
+    shape, malformed item, or unusable id means the response is not safe to use
+    as evidence that rows disappeared from Garmin.
+    """
+    if payload is None:
+        raise RequiredEndpointError("activity list unavailable")
+    if not isinstance(payload, list):
+        raise InvalidEndpointPayloadError(
+            f"activity list unavailable/invalid ({type(payload).__name__})"
+        )
+    validated = []
+    for index, activity in enumerate(payload):
+        if not isinstance(activity, dict):
+            raise InvalidEndpointPayloadError(
+                f"activity item {index} is {type(activity).__name__}, expected object"
+            )
+        activity_id = _normalize_activity_id(activity.get("activityId"))
+        if activity_id is None:
+            raise InvalidEndpointPayloadError(
+                f"activity item {index} has invalid activityId"
+            )
+        validated.append((activity, activity_id))
+    return validated
+
+
 ACTIVITY_WRITE_COLUMNS = (
     "activity_id", "athlete_id", "activity_type", "activity_name",
     "start_time_local", "start_time_utc", "duration_sec", "moving_duration_sec",
@@ -228,20 +283,16 @@ def fetch_and_insert_activities(
         start_date.isoformat(),
         end_date.isoformat(),
     )
-    # แยก None (ดึงไม่สำเร็จ) ออกจาก [] (ไม่มีกิจกรรมจริง) — สำคัญมากสำหรับ reconcile:
-    # ถ้าดึงพลาดแล้วเข้าใจว่า "ไม่มีกิจกรรม" จะ mark ทุกกิจกรรมในช่วงว่าถูกลบ (ผิด)
-    if activities is None:
-        print("   ⚠️  ดึงรายการกิจกรรมไม่สำเร็จ — ข้ามรอบนี้ (ไม่แตะข้อมูลเดิม/ไม่ reconcile)")
-        return 0
+    # Only a validated list is authoritative enough for reconciliation.  In
+    # particular, an empty mapping/string must never be mistaken for [] and
+    # soft-delete every activity in the requested window.
+    activities = _validated_activities(activities)
 
     cur = conn.cursor()
     count = 0
     present_ids = set()   # activityId ทั้งหมดที่ Garmin คืนช่วงนี้ — ใช้ reconcile ตอนจบ
 
-    for act in activities:
-        activity_id = act.get("activityId")
-        if not activity_id:
-            continue
+    for act, activity_id in activities:
         present_ids.add(activity_id)
 
         duration = act.get("duration")
@@ -344,25 +395,36 @@ def fetch_and_insert_activities(
 
 
 def fetch_and_insert_splits(garmin, conn, activity_id):
-    """Fetch per-km splits for a single activity."""
+    """Fetch the authoritative ordered lap/split snapshot for one activity."""
     splits_data = safe_call(garmin.get_activity_splits, activity_id)
-    if not splits_data:
+    if splits_data is None:
         return
 
-    # The splits structure varies — look for lapDTOs or splitSummaries
-    laps = []
-    if isinstance(splits_data, dict):
-        laps = splits_data.get("lapDTOs", [])
-        if not laps:
-            laps = splits_data.get("splitSummaries", [])
-    elif isinstance(splits_data, list):
+    # The splits structure varies.  A valid empty collection is authoritative
+    # and must clear old rows; an absent/malformed response is not evidence that
+    # Garmin removed every lap, so preserve the existing snapshot in that case.
+    if isinstance(splits_data, list):
         laps = splits_data
+    elif isinstance(splits_data, dict):
+        known = [
+            splits_data[key]
+            for key in ("lapDTOs", "splitSummaries")
+            if key in splits_data
+        ]
+        if not known or not all(isinstance(value, list) for value in known):
+            print("   ⚠️  split payload ผิดรูปแบบ — เก็บข้อมูลเดิมไว้")
+            return
+        laps = next((value for value in known if value), known[0])
+    else:
+        print("   ⚠️  split payload ผิดรูปแบบ — เก็บข้อมูลเดิมไว้")
+        return
+
+    if not all(isinstance(lap, dict) for lap in laps):
+        print("   ⚠️  split payload ผิดรูปแบบ — เก็บข้อมูลเดิมไว้")
+        return
 
     cur = conn.cursor()
     for i, lap in enumerate(laps, 1):
-        if not isinstance(lap, dict):
-            continue
-
         duration = lap.get("duration") or lap.get("elapsedDuration")
         distance = lap.get("distance")
         avg_pace = None
@@ -378,6 +440,35 @@ def fetch_and_insert_splits(garmin, conn, activity_id):
                 vertical_oscillation_cm, vertical_ratio,
                 elevation_gain_m, elevation_loss_m, intensity_type, avg_pace_min_km
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(activity_id, split_num) DO UPDATE SET
+                distance_m = COALESCE(excluded.distance_m, fact_activity_split.distance_m),
+                duration_sec = COALESCE(excluded.duration_sec, fact_activity_split.duration_sec),
+                avg_hr = COALESCE(excluded.avg_hr, fact_activity_split.avg_hr),
+                max_hr = COALESCE(excluded.max_hr, fact_activity_split.max_hr),
+                avg_cadence = COALESCE(excluded.avg_cadence, fact_activity_split.avg_cadence),
+                max_cadence = COALESCE(excluded.max_cadence, fact_activity_split.max_cadence),
+                avg_power = COALESCE(excluded.avg_power, fact_activity_split.avg_power),
+                max_power = COALESCE(excluded.max_power, fact_activity_split.max_power),
+                normalized_power = COALESCE(
+                    excluded.normalized_power, fact_activity_split.normalized_power),
+                avg_speed_mps = COALESCE(
+                    excluded.avg_speed_mps, fact_activity_split.avg_speed_mps),
+                avg_stride_length_cm = COALESCE(
+                    excluded.avg_stride_length_cm, fact_activity_split.avg_stride_length_cm),
+                ground_contact_time_ms = COALESCE(
+                    excluded.ground_contact_time_ms, fact_activity_split.ground_contact_time_ms),
+                vertical_oscillation_cm = COALESCE(
+                    excluded.vertical_oscillation_cm, fact_activity_split.vertical_oscillation_cm),
+                vertical_ratio = COALESCE(
+                    excluded.vertical_ratio, fact_activity_split.vertical_ratio),
+                elevation_gain_m = COALESCE(
+                    excluded.elevation_gain_m, fact_activity_split.elevation_gain_m),
+                elevation_loss_m = COALESCE(
+                    excluded.elevation_loss_m, fact_activity_split.elevation_loss_m),
+                intensity_type = COALESCE(
+                    excluded.intensity_type, fact_activity_split.intensity_type),
+                avg_pace_min_km = COALESCE(
+                    excluded.avg_pace_min_km, fact_activity_split.avg_pace_min_km)
         """, (
             activity_id, i,
             distance,
@@ -400,6 +491,13 @@ def fetch_and_insert_splits(garmin, conn, activity_id):
             avg_pace,
         ))
 
+    # The endpoint is a complete ordered snapshot.  Remove tail rows left by a
+    # previous version of an activity after Garmin reprocesses/edits its laps.
+    cur.execute(
+        "DELETE FROM fact_activity_split WHERE activity_id = ? AND split_num > ?",
+        (activity_id, len(laps)),
+    )
+
 
 # ── Reconciliation (กิจกรรมถูกลบฝั่ง Garmin) ──────────────────
 
@@ -408,12 +506,13 @@ def reconcile_activities(conn, athlete_id, start_date, end_date, present_ids):
       - อยู่ DB แต่ไม่อยู่ Garmin = ถูกลบฝั่งแอป → set deleted_at (soft delete ไม่ลบแถวจริง)
       - เคยมาร์ค deleted แต่กลับมาอยู่ Garmin = กู้คืน → clear deleted_at (self-healing)
 
-    ⚠️ เรียกเฉพาะเมื่อ present_ids มาจากการดึงที่ "สำเร็จ" เท่านั้น — ถ้าดึงพลาดแล้วส่ง set ว่าง
-    เข้ามาจะ mark กิจกรรมที่ยังอยู่จริงทั้งหมดว่าถูกลบ (ผู้เรียกต้องกันกรณี None ก่อน)"""
+    ⚠️ เรียกเฉพาะเมื่อ present_ids มาจาก collection ที่ตรวจรูปแบบครบแล้วเท่านั้น —
+    ถ้าดึงพลาดแล้วส่ง set ว่างเข้ามาจะ mark กิจกรรมที่ยังอยู่จริงทั้งหมดว่าถูกลบ"""
     cur = conn.cursor()
     db_rows = cur.execute(
         """SELECT activity_id, deleted_at FROM fact_activity
-           WHERE athlete_id = ? AND date(start_time_local) BETWEEN ? AND ?""",
+           WHERE athlete_id = ?
+             AND substr(start_time_local, 1, 10) BETWEEN ? AND ?""",
         (athlete_id, str(start_date), str(end_date))).fetchall()
     now = datetime.now().isoformat(timespec="seconds")
     marked, restored = [], []
@@ -442,10 +541,8 @@ def reconcile_only(garmin, conn, athlete_id, start_date, end_date):
     print(f"\n🔍 Reconcile (เช็คกิจกรรมถูกลบ) {start_date} → {end_date}...")
     activities = safe_call(garmin.get_activities_by_date,
                            start_date.isoformat(), end_date.isoformat())
-    if activities is None:
-        print("   ⚠️  ดึงรายการจาก Garmin ไม่สำเร็จ — ข้าม reconcile (กัน mark ผิด)")
-        return None
-    present_ids = {a.get("activityId") for a in activities if a.get("activityId")}
+    activities = _validated_activities(activities)
+    present_ids = {activity_id for _activity, activity_id in activities}
     marked, restored = reconcile_activities(conn, athlete_id, start_date, end_date, present_ids)
     print(f"   ✅ Reconcile เสร็จ — Garmin มี {len(present_ids)} กิจกรรม | "
           f"mark deleted {len(marked)} | กู้คืน {len(restored)}")
@@ -843,7 +940,8 @@ def _insert_wellness_row(cur, athlete_id, date_str, values: dict):
     ไม่ได้ดึงจะกลายเป็น NULL ทั้งหมด
 
     เจอจริง 3 ส.ค. 69: deep resync 45 วัน ล้าง lactate_threshold ย้อนหลังของพี่เก้าทิ้ง
-    (16 ก.ค. HR 184 / pace 5:04 — ค่าที่ LTHR_BY_SLUG ใน dashboard อ้างอิงอยู่) เพราะ LT
+    (16 ก.ค. HR 184 / pace 5:02 จากค่า 5.04 นาที/กม. — ค่าที่ LTHR_BY_SLUG ใน
+    dashboard อ้างอิงอยู่) เพราะ LT
     ไม่ได้ดึงรายวัน แต่ fetch_extras เขียนให้เฉพาะ "วันล่าสุด" วันเดียว → ทุกวันที่ถูก
     เขียนซ้ำจะเสีย LT ไป เหลือแค่วันล่าสุดวันเดียว
     (ชื่อคอลัมน์มาจาก parser ในไฟล์นี้เท่านั้น ไม่ได้มาจาก input ภายนอก)"""
@@ -1537,7 +1635,8 @@ def sanity_check(conn, athlete_id, start_date, end_date, *,
         rows = conn.execute(
             """SELECT activity_id, activity_type, start_time_local, duration_sec, distance_m, avg_hr
                FROM fact_activity
-               WHERE athlete_id = ? AND date(start_time_local) BETWEEN ? AND ?""",
+               WHERE athlete_id = ? AND deleted_at IS NULL
+                 AND substr(start_time_local, 1, 10) BETWEEN ? AND ?""",
             (athlete_id, str(start_date), str(end_date))).fetchall()
         for act_id, atype, started, dur, dist, hr in rows:
             day = (started or "?")[:10]
@@ -1698,12 +1797,16 @@ def main():
 
     # โหมด reconcile อย่างเดียว (ไม่ดึงกิจกรรม/wellness ใหม่) — สำหรับ task รายสัปดาห์
     if args.reconcile:
-        result = reconcile_only(garmin, conn, athlete_id, start_date, end_date)
-        conn.close()
-        if result is None:
-            write_status(args.athlete, ok=False, reason="network",
-                         error="reconcile: ดึงรายการกิจกรรมไม่สำเร็จ")
+        try:
+            result = reconcile_only(garmin, conn, athlete_id, start_date, end_date)
+        except RequiredEndpointError as exc:
+            conn.close()
+            print(f"   ❌ Reconcile ใช้ response นี้ไม่ได้: {exc}")
+            write_status(
+                args.athlete, ok=False, reason=exc.status_reason, error=str(exc)
+            )
             sys.exit(1)
+        conn.close()
         marked, restored = result
         write_status(args.athlete, ok=True, reason="ok",
                      warnings=([f"reconcile: mark กิจกรรมถูกลบ {len(marked)} รายการ"] if marked else []))
@@ -1712,35 +1815,44 @@ def main():
         print("=" * 50)
         return
 
-    # Fetch data
-    if args.skip_activities or args.wellness_fast:
-        _why = "--skip-activities" if args.skip_activities else "--wellness-fast"
-        print(f"\n📊 (ข้ามการดึงกิจกรรม — {_why})")
-        activity_count = 0
-    else:
-        activity_count = fetch_and_insert_activities(
-            garmin, conn, athlete_id, start_date, end_date,
-            fast=args.activities_only,
-        )
-
-    if args.activities_only:
-        wellness_count = None
-        print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
-    elif args.wellness_fast:
-        wellness_count = fetch_and_update_wellness_fast(
-            garmin, conn, athlete_id, start_date, end_date
-        )
-        # The scheduled lane uses --days 0.  A manual wider fast range already
-        # fetched yesterday in the loop, so do not duplicate those calls.
-        if start_date == end_date:
-            wellness_count += fetch_and_repair_previous_day_wellness(
-                garmin, conn, athlete_id, end_date - timedelta(days=1)
+    # Fetch data.  A mandatory collection which is unavailable or malformed is
+    # a failed sync, never a successful zero-row round.
+    try:
+        if args.skip_activities or args.wellness_fast:
+            _why = "--skip-activities" if args.skip_activities else "--wellness-fast"
+            print(f"\n📊 (ข้ามการดึงกิจกรรม — {_why})")
+            activity_count = 0
+        else:
+            activity_count = fetch_and_insert_activities(
+                garmin, conn, athlete_id, start_date, end_date,
+                fast=args.activities_only,
             )
-    else:
-        wellness_count = fetch_and_insert_wellness(
-            garmin, conn, athlete_id, start_date, end_date
+
+        if args.activities_only:
+            wellness_count = None
+            print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
+        elif args.wellness_fast:
+            wellness_count = fetch_and_update_wellness_fast(
+                garmin, conn, athlete_id, start_date, end_date
+            )
+            # The scheduled lane uses --days 0.  A manual wider fast range already
+            # fetched yesterday in the loop, so do not duplicate those calls.
+            if start_date == end_date:
+                wellness_count += fetch_and_repair_previous_day_wellness(
+                    garmin, conn, athlete_id, end_date - timedelta(days=1)
+                )
+        else:
+            wellness_count = fetch_and_insert_wellness(
+                garmin, conn, athlete_id, start_date, end_date
+            )
+            fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
+    except RequiredEndpointError as exc:
+        conn.close()
+        print(f"\n❌ Sync ใช้ response จาก Garmin ไม่ได้: {exc}")
+        write_status(
+            args.athlete, ok=False, reason=exc.status_reason, error=str(exc)
         )
-        fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
+        sys.exit(1)
 
     sanity_start_date = (
         min(start_date, end_date - timedelta(days=1))

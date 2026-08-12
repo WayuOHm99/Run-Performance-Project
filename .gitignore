@@ -14,6 +14,8 @@ garmin/data/
 # ไฟล์ token ที่นักกีฬาส่งกลับมา (เผื่อวางผิดที่)
 garmin_token_*.zip
 garmin_tokens.json
+# Streamlit credentials (config.toml is public UI config; secrets.toml is not)
+garmin/.streamlit/secrets.toml
 
 # ── ค่าเฉพาะเครื่องของ Claude Code ──
 .claude/settings.local.json

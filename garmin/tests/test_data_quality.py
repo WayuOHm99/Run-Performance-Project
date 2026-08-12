@@ -87,6 +87,8 @@ def create_db(path=":memory:"):
             start_time_local TEXT,
             training_load REAL,
             avg_hr REAL,
+            training_effect_aerobic REAL,
+            training_effect_anaerobic REAL,
             deleted_at TEXT
         )"""
     )
@@ -282,6 +284,63 @@ class DriftAndPartialSnapshotTests(unittest.TestCase):
         self.assertNotIn("readiness_device_id", fields)
 
 
+class ActivityCoverageTests(unittest.TestCase):
+    def test_training_effect_columns_are_monitored_under_their_schema_names(self):
+        conn = create_db()
+        self.addCleanup(conn.close)
+
+        fields = {
+            item["field"] for item in dq.coverage_for_athlete(
+                conn, 1, today=date(2030, 2, 1)
+            ) if item["table"] == "activity"
+        }
+
+        self.assertIn("training_effect_aerobic", fields)
+        self.assertIn("training_effect_anaerobic", fields)
+        self.assertNotIn("aerobic_te", fields)
+        self.assertNotIn("anaerobic_te", fields)
+
+    def test_iso_t_activity_on_window_end_is_included_in_coverage(self):
+        conn = create_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, start_time_local, training_load,
+                   deleted_at
+               ) VALUES (1, 1, '2030-01-31T08:00:00', 42, NULL)"""
+        )
+        conn.commit()
+
+        coverage = dq.coverage_for_athlete(conn, 1, today=date(2030, 2, 1))
+        training_load = next(
+            item for item in coverage
+            if item["table"] == "activity" and item["field"] == "training_load"
+        )
+
+        self.assertEqual(training_load["recent"], (1, 1))
+
+    def test_activity_offset_does_not_shift_its_local_calendar_date(self):
+        conn = create_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, start_time_local, training_load,
+                   deleted_at
+               ) VALUES (1, 1, '2030-01-02T00:30:00+07:00', 42, NULL)"""
+        )
+        conn.commit()
+
+        coverage = dq.coverage_for_athlete(conn, 1, today=date(2030, 2, 1))
+        training_load = next(
+            item for item in coverage
+            if item["table"] == "activity" and item["field"] == "training_load"
+        )
+
+        # start_time_local is a wall-clock timestamp.  Applying SQLite date()
+        # would convert +07:00 to UTC and incorrectly move this row to Jan 1.
+        self.assertEqual(training_load["recent"], (1, 1))
+
+
 class SentinelAndRangeTests(unittest.TestCase):
     def test_invalid_sentinels_ranges_and_relations_are_reported(self):
         conn = create_db()
@@ -395,6 +454,56 @@ class MonitoringIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 1)
         self.assertEqual(resting["examples"][0][1], "Infinity")
+
+    def test_check_drift_atomically_persists_deep_lane_failure(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """UPDATE fact_daily_wellness SET resting_hr = ?
+               WHERE athlete_id = 1 AND calendar_date = '2026-08-08'""",
+            (float("inf"),),
+        )
+        conn.commit()
+        conn.close()
+        lane_dir = self.temp_dir / "sync_lane"
+        lane_dir.mkdir()
+        lane_path = lane_dir / "deep.json"
+        lane_path.write_text(
+            json.dumps({
+                "run_at": "2026-08-09T10:30:00",
+                "lane": "deep",
+                "results": [{"slug": "synthetic", "ok": True, "reason": "ok", "warnings": []}],
+            }),
+            encoding="utf-8",
+        )
+        previous = drift.use_data_dir(self.temp_dir)
+        self.addCleanup(drift.use_data_dir, previous)
+
+        with redirect_stdout(io.StringIO()):
+            exit_code = drift.main([
+                "--today", "2026-08-09", "--json", "--record-deep-status"
+            ])
+
+        payload = json.loads(lane_path.read_text(encoding="utf-8"))
+        durable = [r for r in payload["results"] if r.get("reason") == "drift"]
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(len(durable), 1)
+        self.assertFalse(durable[0]["ok"])
+        self.assertEqual(list(lane_dir.glob("*.tmp")), [])
+
+    def test_check_drift_unknown_explicit_athlete_is_an_error(self):
+        previous = drift.use_data_dir(self.temp_dir)
+        self.addCleanup(drift.use_data_dir, previous)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = drift.main([
+                "--athlete", "typo-does-not-exist", "--today", "2026-08-09", "--json"
+            ])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("ไม่พบนักกีฬา", payload["error"])
 
     def test_health_reports_missing_snapshot_as_error_with_specific_message(self):
         conn = sqlite3.connect(self.db_path)

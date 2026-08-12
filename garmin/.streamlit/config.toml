@@ -10,3 +10,8 @@ textColor = "#31333F"
 # ค่านี้ frontend จะได้สตริงว่างแล้วสแปม console warning "Invalid color passed for textColor"
 [theme.sidebar]
 textColor = "#31333F"
+
+# Health and activity data is private.  Bind only to this computer unless an
+# authenticated reverse proxy is deliberately configured in front of Streamlit.
+[server]
+address = "127.0.0.1"

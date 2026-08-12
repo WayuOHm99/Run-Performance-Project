@@ -51,7 +51,7 @@ $tasks = @(
         # ชนกันทีไรสายนี้ต้องข้ามรอบเพราะ sync.lock เสียเที่ยวเปล่า
         Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:05' `
                             -RepetitionInterval (New-TimeSpan -Minutes 15) `
-                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
+                            -RepetitionDuration (New-TimeSpan -Days 36500)) }
         Optional    = $false
     },
     @{
@@ -64,7 +64,7 @@ $tasks = @(
         # เหลื่อมจาก Fast (:05/:20/:35/:50) และจาก full sync (ต้นชั่วโมง) กันแย่ง sync.lock
         Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:12' `
                             -RepetitionInterval (New-TimeSpan -Minutes 30) `
-                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
+                            -RepetitionDuration (New-TimeSpan -Days 36500)) }
         Optional    = $false
     },
     @{
@@ -80,7 +80,7 @@ $tasks = @(
         # (เจอจริง 2 ส.ค. 69: เครื่องหลับตอน 08:00 → รอบตามที่ 09:04 ตายเพราะ log ชนกัน → ไม่มี full sync ทั้งวัน)
         Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:00' `
                             -RepetitionInterval (New-TimeSpan -Hours 1) `
-                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
+                            -RepetitionDuration (New-TimeSpan -Days 36500)) }
         Optional    = $false
     },
     @{
@@ -150,6 +150,12 @@ $tasks = @(
     }
 )
 
+$knownTaskNames = @($tasks | ForEach-Object { $_.Name })
+if ($TaskName -and $TaskName -notin $knownTaskNames) {
+    Write-Error "ไม่รู้จัก TaskName '$TaskName' (เลือกได้: $($knownTaskNames -join ', '))"
+    exit 2
+}
+
 # ---------------- ตรวจ anchor ของ trigger รายสัปดาห์ ----------------
 # ทำไมต้องมี: New-ScheduledTaskTrigger ตั้ง StartBoundary เป็น "วันที่รันสคริปต์นี้"
 # ถ้าวันนั้นไม่ใช่วันที่ระบุใน -DaysOfWeek การนับ WeeksInterval จะยึดจากวันสุ่ม
@@ -193,7 +199,7 @@ foreach ($t in $tasks) {
         continue
     }
 
-    if ($t.Optional -and -not $IncludeOptional) {
+    if ($t.Optional -and -not $IncludeOptional -and -not $TaskName) {
         Write-Host "[ข้าม]  $($t.Name)  (ใส่ -IncludeOptional ถ้าต้องการ)" -ForegroundColor DarkGray
         $skipped++
         continue
@@ -296,3 +302,6 @@ catch {
     Write-Host "event log ของ Task Scheduler: ตรวจไม่ได้ ($($_.Exception.Message))" -ForegroundColor DarkGray
 }
 Write-Host ""
+
+if ($failed -gt 0) { exit 1 }
+exit 0

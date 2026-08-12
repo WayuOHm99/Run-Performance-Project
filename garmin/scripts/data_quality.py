@@ -90,7 +90,8 @@ WELLNESS_FIELDS = (
 
 ACTIVITY_FIELDS = (
     "duration_sec", "distance_m", "avg_hr", "max_hr", "calories",
-    "training_load", "aerobic_te", "anaerobic_te", "avg_cadence",
+    "training_load", "training_effect_aerobic", "training_effect_anaerobic",
+    "avg_cadence",
     "avg_power", "normalized_power", "elevation_gain_m",
 )
 
@@ -236,8 +237,15 @@ def _rate(
     active_fields: tuple[str, ...] = (),
     extra_condition: str = "",
     denominator_days: int | None = None,
+    normalize_date: bool = False,
 ) -> tuple[int, int]:
     field_sql = _identifier(field)
+    date_sql = _identifier(date_field)
+    if normalize_date:
+        # start_time_local is already a wall-clock value.  Taking its YYYY-MM-DD
+        # prefix accepts both ``T`` and space separators without SQLite date()
+        # converting an optional +07:00 suffix to UTC and shifting the day.
+        date_sql = f"substr({date_sql}, 1, 10)"
     active = ""
     if active_fields:
         active = " AND (" + " OR ".join(
@@ -245,7 +253,7 @@ def _rate(
         ) + ")"
     row = conn.execute(
         f"SELECT COUNT({field_sql}), COUNT(*) FROM {_identifier(table)} "
-        f"WHERE athlete_id = ? AND {_identifier(date_field)} BETWEEN ? AND ?"
+        f"WHERE athlete_id = ? AND {date_sql} BETWEEN ? AND ?"
         f"{extra_condition}{active}",
         (athlete_id, start, end),
     ).fetchone()
@@ -322,26 +330,26 @@ def coverage_for_athlete(
             "recent": _rate(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
-                start=recent_start, end=recent_end + " 23:59:59",
-                extra_condition=deleted_filter,
+                start=recent_start, end=recent_end,
+                extra_condition=deleted_filter, normalize_date=True,
             ),
             "prior": _rate(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
-                start=prior_start, end=prior_end + " 23:59:59",
-                extra_condition=deleted_filter,
+                start=prior_start, end=prior_end,
+                extra_condition=deleted_filter, normalize_date=True,
             ),
             "short": _rate(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
-                start=short_start, end=short_end + " 23:59:59",
-                extra_condition=deleted_filter,
+                start=short_start, end=short_end,
+                extra_condition=deleted_filter, normalize_date=True,
             ),
             "short_baseline": _rate(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
-                start=short_base_start, end=short_base_end + " 23:59:59",
-                extra_condition=deleted_filter,
+                start=short_base_start, end=short_base_end,
+                extra_condition=deleted_filter, normalize_date=True,
             ),
             "calendar_days": 30,
         })

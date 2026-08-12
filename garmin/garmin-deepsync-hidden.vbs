@@ -4,4 +4,5 @@
 ' "Day 1/46" and nothing reported it, because a killed .bat never reaches its notify
 ' line. bWaitOnReturn = True so Task Scheduler waits for python to really finish.
 Here = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
-CreateObject("WScript.Shell").Run "cmd /c """ & Here & "\garmin-deepsync-auto.bat""", 0, True
+ExitCode = CreateObject("WScript.Shell").Run("cmd /c """ & Here & "\garmin-deepsync-auto.bat""", 0, True)
+WScript.Quit ExitCode

@@ -23,6 +23,7 @@ param(
     [int]$SyncExit = 0,
     [string]$StartMarker = "sync_run_start.txt",
     [string]$Lane = "",
+    [ValidateSet("", "drift")][string]$FailureContext = "",
     [switch]$CheckStale,
     # -StaleOnly: รอบนี้ไม่ได้ทำงานจริง (ข้ามเพราะชน lock) จึงไม่มี "ผลของรอบ" ให้ตรวจ —
     # เอาไว้ให้สาย wellness ยังเดิน watchdog ได้แม้รอบตัวเองถูกข้าม ไม่งั้นช่วงที่มีสายอื่น
@@ -58,30 +59,61 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
     # เวลาเริ่มรอบนี้ (bat เขียนก่อนรัน fetch_all) — ใช้ตัดสินว่าสถานะถูกเขียน "รอบนี้" จริงไหม
     $runStart = $null
     if (Test-Path $StartPath) {
-        try { $runStart = [datetime]::Parse((Get-Content $StartPath -Raw).Trim()) } catch {}
-    }
-
-    if (-not (Test-Path $StatusPath)) {
-        # ไม่มีไฟล์สถานะเลย — แจ้งถ้ารอบนี้ exit ผิดปกติ
-        if ($SyncExit -ne 0) {
-            Show-Toast "Garmin sync ล้มเหลว" "ไม่มีไฟล์สถานะ — เปิด log C:\Backup\garmin-sync-*.log"
+        try {
+            $runStart = [datetime]::Parse((Get-Content $StartPath -Raw).Trim())
         }
+        catch {
+            Show-Toast "Garmin sync ล้มเหลว" "start marker เสีย/อ่านไม่ได้ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
+            return
+        }
+    }
+    elseif ($Lane) {
+        Show-Toast "Garmin sync ล้มเหลว" "ไม่มี start marker ของรอบนี้ — prep_log ทำงานไม่สำเร็จ"
         return
     }
 
-    $s = Get-Content $StatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $statusTime = [datetime]$s.run_at
+    if (-not (Test-Path $StatusPath)) {
+        Show-Toast "Garmin sync ล้มเหลว" "ไม่มีไฟล์สถานะ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
+        return
+    }
+
+    try {
+        $s = Get-Content $StatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $s.run_at) { throw "status ไม่มี run_at" }
+        $statusTime = [datetime]$s.run_at
+        $results = @($s.results)
+        if ($results.Count -eq 0) { throw "status ไม่มี results" }
+        foreach ($result in $results) {
+            $okProperty = if ($null -ne $result) { $result.PSObject.Properties['ok'] } else { $null }
+            if ($null -eq $okProperty -or $okProperty.Value -isnot [bool]) {
+                throw "status results[].ok ต้องเป็น boolean"
+            }
+        }
+    }
+    catch {
+        Show-Toast "Garmin sync ล้มเหลว" "ไฟล์สถานะเสีย/อ่านไม่ได้ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
+        return
+    }
 
     # สถานะรอบนี้จริงไหม: run_at ต้อง >= เวลาเริ่มรอบ (เผื่อ jitter 5 วิ). ถ้าไม่มี start-marker
     # (เช่นรัน fetch_all มือตรง ๆ ไม่ผ่าน bat) ถือว่า fresh เพื่อไม่เตือนพร่ำเพรื่อ
     $isFresh = ($null -eq $runStart) -or ($statusTime -ge $runStart.AddSeconds(-5))
     if (-not $isFresh) {
-        Show-Toast "Garmin sync ล้มเหลว" "fetch_all ไม่ได้เขียนสถานะรอบนี้ (ไม่ได้รัน/ตายก่อน) — เปิด log C:\Backup\garmin-sync-*.log"
+        Show-Toast "Garmin sync ล้มเหลว" "fetch_all ไม่ได้เขียนสถานะรอบนี้ (ไม่ได้รัน/ตายก่อน) — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
         return
     }
 
     $failed = @($s.results | Where-Object { -not $_.ok })
     $warned = @($s.results | Where-Object { $_.ok -and @($_.warnings).Count -gt 0 })
+    if ($SyncExit -ne 0 -and $failed.Count -eq 0) {
+        if ($FailureContext -eq "drift") {
+            Show-Toast "Garmin data quality/schema drift" "พบข้อมูลน่าสงสัยหรือ schema drift (exit $SyncExit) — เปิด deepsync log"
+        }
+        else {
+            Show-Toast "Garmin sync ล้มเหลว" "worker/launcher คืน exit code $SyncExit แม้ status เดิมจะดูสำเร็จ — เปิด log"
+        }
+        return
+    }
     if ($failed.Count -eq 0 -and $warned.Count -eq 0) { return }
 
     $lines = @()
@@ -90,6 +122,7 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
             "token"   { "token เสีย -> รัน เพิ่มนักกีฬา.bat" }
             "network" { "เน็ต/เซิร์ฟเวอร์มีปัญหา (รอบหน้าลองใหม่เอง)" }
             "timeout" { "ค้างเกินเวลาที่ให้ต่อคน" }
+            "payload" { "Garmin payload ผิดรูปแบบ/ข้อมูลตอบกลับเสีย -> ดู log" }
             default   { "ล้มเหลว -> ดู log" }
         }
         $lines += "$($f.slug): $why"
@@ -193,7 +226,7 @@ function Test-StaleLanes([string]$DataDir) {
     }
     $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $lastPath
     Show-Toast "Garmin sync มีสายที่หยุดเดิน" (($stale -join "`n") +
-        "`nเช็ค Task Scheduler + log C:\Backup\garmin-sync-*.log")
+        "`nเช็ค Task Scheduler + log C:\Backup\run-performance-logs\garmin-sync-*.log")
 }
 
 try {

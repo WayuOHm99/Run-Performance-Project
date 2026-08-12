@@ -79,3 +79,27 @@ jobs:
       - name: Clean up canary
         if: always()
         run: rm -f data/ci-canary.txt
+
+  windows-ops:
+    name: Windows ACL and launcher regressions
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Run temp-only Windows operations tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python -m unittest
+          garmin.tests.test_ops_security
+          garmin.tests.test_health_report.PrivateAclChecksTests
+          garmin.tests.test_health_report.HealthcheckSecretStorageChecksTests
+          garmin.tests.test_backup_healthcheck.HealthcheckSecretStorageTests
+          -v

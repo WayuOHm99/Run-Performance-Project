@@ -11,6 +11,7 @@ Idempotent: safe to run multiple times. ยังทำ migration — เพิ�
 (20 ก.ค. เก็บฟิลด์พื้นฐาน | 21 ก.ค. ขยายเก็บ "ทุกอย่างที่นาฬิกามี" ละเอียดสุด)
 """
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -20,8 +21,19 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "garmin.db"
+DATA_DIR = Path(os.environ.get("GARMIN_DATA_DIR", PROJECT_ROOT / "data"))
+DB_PATH = DATA_DIR / "garmin.db"
 UTC_NOW_DEFAULT = "TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+
+
+def use_data_dir(path) -> Path:
+    """Point every schema write at one isolated data directory."""
+    global DATA_DIR, DB_PATH
+    previous = DATA_DIR
+    DATA_DIR = Path(path)
+    DB_PATH = DATA_DIR / "garmin.db"
+    return previous
+
 
 # ── รายการคอลัมน์เต็ม (ชื่อ, ชนิด) — ใช้ทั้งตอน CREATE และ migration ──────────
 ACTIVITY_COLUMNS = [
@@ -280,7 +292,9 @@ def _migrate_recovery_minutes(cur):
     return max(cur.rowcount, 0)
 
 
-def init_schema(db_path: Path = DB_PATH):
+def init_schema(db_path: Path | None = None):
+    if db_path is None:
+        db_path = DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     # WAL mode: อ่าน (dashboard) กับ เขียน (sync) ทำพร้อมกันได้ ไม่ล็อกกัน —

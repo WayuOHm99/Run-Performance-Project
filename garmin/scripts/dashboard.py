@@ -1,6 +1,7 @@
 import datetime
 import json
 import math
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -173,7 +174,8 @@ _print_friendly.layout.font = dict(color="#31333F")  # เทาเข้ม (�
 pio.templates.default = _print_friendly
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "garmin.db"
+DATA_DIR = Path(os.environ.get("GARMIN_DATA_DIR", PROJECT_ROOT / "data"))
+DB_PATH = DATA_DIR / "garmin.db"
 
 # ประเภทกิจกรรมที่นับเป็น "วิ่ง" (ใช้คำนวณ ACWR / 80-20)
 RUN_TYPES = ("running", "track_running", "trail_running", "treadmill_running")
@@ -181,7 +183,7 @@ RUN_TYPES = ("running", "track_running", "trail_running", "treadmill_running")
 # LTHR จากผลเทสเป็นทางการ — ตารางนักกีฬาใน CLAUDE.md คือที่เก็บผลเทส อัปเดตทั้งสองที่ให้ตรงกัน
 # tong: 5K TT 14 ก.ค. 69 | dan: VCR30 8 ก.ค. 69
 # p'kao: เทสแลบ Lactate ไม่มีค่า HR → ใช้ Garmin LT จากนาฬิกา แทนค่าเดา 89%
-#        อัปเดต 4 ส.ค. 69: นาฬิกาตรวจ LT ใหม่ 31 ก.ค. = HR 181 / pace 4:41 (เดิม 16 ก.ค. HR 184 / 5:04)
+#        อัปเดต 4 ส.ค. 69: นาฬิกาตรวจ LT ใหม่ 31 ก.ค. = HR 181 / pace 4:41 (เดิม 16 ก.ค. HR 184 / 5:02)
 LTHR_BY_SLUG = {"tong": 171, "dan": 178, "p'kao": 181}
 LTHR_SOURCE_BY_SLUG = {
     "tong": "จากผลเทสล่าสุด (5K TT 14 ก.ค.)",
@@ -301,6 +303,25 @@ def latest_field(df, column, timestamp_columns=()):
     }
 
 
+def body_battery_snapshots(df, today_date):
+    """Return ``(display, latest_completed_high)`` with stable day semantics.
+
+    Body Battery has two different meanings in this dashboard: today's card is
+    the most-recent intraday level, while a completed day is represented by its
+    daily high.  Keeping the completed snapshot separate also prevents a
+    partial ``body_battery_high`` from today from suppressing yesterday's alert.
+    """
+    if df is None or df.empty or "calendar_date" not in df.columns:
+        return None, None
+    today_date = pd.Timestamp(today_date).date()
+    dates = pd.to_datetime(df["calendar_date"], errors="coerce").dt.date
+    today_rows = df.loc[dates == today_date]
+    completed_rows = df.loc[dates < today_date]
+    current = latest_field(today_rows, "bb_most_recent")
+    completed = latest_field(completed_rows, "body_battery_high")
+    return current or completed, completed
+
+
 def period_metric(df, column, today_date, exclude_partial_today=True,
                   period_start=None, period_end=None):
     """Calculate a period mean and expose the true sample denominator.
@@ -349,6 +370,22 @@ def period_metric(df, column, today_date, exclude_partial_today=True,
         "selected_days": selected_days,
         "excluded_today": excluded_today,
     }
+
+
+def calendar_aligned_frame(df, date_column, period_start, period_end):
+    """Reindex daily data so a missing whole day becomes an explicit NaN row."""
+    if df is None or date_column not in getattr(df, "columns", ()):
+        return pd.DataFrame({date_column: pd.date_range(period_start, period_end, freq="D")})
+    aligned = df.copy()
+    aligned[date_column] = pd.to_datetime(aligned[date_column], errors="coerce").dt.normalize()
+    aligned = aligned.dropna(subset=[date_column]).drop_duplicates(date_column, keep="last")
+    index = pd.date_range(pd.Timestamp(period_start), pd.Timestamp(period_end), freq="D")
+    return (
+        aligned.set_index(date_column)
+        .reindex(index)
+        .rename_axis(date_column)
+        .reset_index()
+    )
 
 
 def fmt_recovery_time(minutes):
@@ -604,18 +641,113 @@ def team_status(acwr, flags, has_workload, wellness_core_count, has_any_wellness
     return "🟢 พร้อมซ้อม"
 
 
-def compute_acwr(daily, end_date):
+def compute_acwr(daily, end_date, history_start=None):
     """คำนวณ ACWR รายวันจากตาราง (date, value): acute = ผลรวม 7 วัน, chronic = ผลรวม 28 วัน / 4
-    value = training_load หรือ ระยะวิ่ง(กม.) — ACWR เป็นอัตราส่วน จึงเทียบได้ทั้งสองหน่วย"""
+    value = training_load หรือ ระยะวิ่ง(กม.) — ACWR เป็นอัตราส่วน จึงเทียบได้ทั้งสองหน่วย
+
+    ``history_start`` is the first calendar day for which absence of a workload
+    row is a known rest day.  Without it, a long run-free period disappears from
+    the index and the training tab can incorrectly claim that 28-day history is
+    unavailable even though the athlete has older records.
+    """
     if daily.empty:
         return pd.DataFrame(columns=["date", "acute", "chronic", "acwr"])
-    idx = pd.date_range(daily["date"].min(), pd.Timestamp(end_date), freq="D")
+    first_day = pd.Timestamp(history_start) if history_start is not None else daily["date"].min()
+    idx = pd.date_range(first_day, pd.Timestamp(end_date), freq="D")
     s = daily.set_index("date")["value"].reindex(idx, fill_value=0.0)
     acute = s.rolling(7, min_periods=7).sum()
     chronic = s.rolling(28, min_periods=28).sum() / 4
     out = pd.DataFrame({"date": idx, "acute": acute.values, "chronic": chronic.values})
     out["acwr"] = out["acute"] / out["chronic"].where(out["chronic"] > 0)
     return out
+
+
+def aggregate_pace_min_per_km(activity_rows):
+    """Aggregate pace from paired, positive duration and distance observations."""
+    if (activity_rows is None or activity_rows.empty
+            or not {"distance_m", "duration_sec"}.issubset(activity_rows.columns)):
+        return float("nan")
+    distance = pd.to_numeric(activity_rows["distance_m"], errors="coerce")
+    duration = pd.to_numeric(activity_rows["duration_sec"], errors="coerce")
+    valid = (
+        distance.notna() & duration.notna()
+        & distance.gt(0) & duration.gt(0)
+        & distance.map(math.isfinite) & duration.map(math.isfinite)
+    )
+    if not valid.any():
+        return float("nan")
+    total_km = distance.loc[valid].sum() / 1000
+    return (duration.loc[valid].sum() / 60) / total_km if total_km > 0 else float("nan")
+
+
+def usable_hr_zone_rows(activity_rows, zone_columns):
+    """Keep activities with at least one positive HR-zone second."""
+    if (activity_rows is None or activity_rows.empty
+            or not set(zone_columns).issubset(activity_rows.columns)):
+        return activity_rows.iloc[0:0] if activity_rows is not None else pd.DataFrame()
+    zones = activity_rows[list(zone_columns)].apply(pd.to_numeric, errors="coerce")
+    return activity_rows.loc[zones.gt(0).any(axis=1)].copy()
+
+
+def analyze_distance_halves(splits):
+    """Return pace/HR for equal-distance halves, fractionally splitting a lap.
+
+    Garmin laps can be very uneven (including a short final lap), so dividing by
+    lap count does not represent the first and second half of the route.  A lap
+    crossing the distance midpoint contributes proportional duration to each
+    half.  HR denominators include only portions whose HR is actually present.
+    """
+    empty = (float("nan"),) * 4
+    if (splits is None or splits.empty
+            or not {"distance_m", "duration_sec"}.issubset(splits.columns)):
+        return empty
+    distance = pd.to_numeric(splits["distance_m"], errors="coerce")
+    duration = pd.to_numeric(splits["duration_sec"], errors="coerce")
+    hr = (pd.to_numeric(splits["avg_hr"], errors="coerce")
+          if "avg_hr" in splits.columns else pd.Series(float("nan"), index=splits.index))
+    valid = (
+        distance.notna() & duration.notna()
+        & distance.gt(0) & duration.gt(0)
+        & distance.map(math.isfinite) & duration.map(math.isfinite)
+    )
+    if not valid.any():
+        return empty
+
+    total_distance = float(distance.loc[valid].sum())
+    midpoint = total_distance / 2
+    half_distance = [0.0, 0.0]
+    half_duration = [0.0, 0.0]
+    hr_weighted = [0.0, 0.0]
+    hr_duration = [0.0, 0.0]
+    traversed = 0.0
+
+    for idx in splits.index[valid]:
+        lap_distance = float(distance.loc[idx])
+        lap_duration = float(duration.loc[idx])
+        first_distance = max(0.0, min(lap_distance, midpoint - traversed))
+        portions = (first_distance, lap_distance - first_distance)
+        for half, portion_distance in enumerate(portions):
+            if portion_distance <= 0:
+                continue
+            portion_duration = lap_duration * portion_distance / lap_distance
+            half_distance[half] += portion_distance
+            half_duration[half] += portion_duration
+            lap_hr = float(hr.loc[idx]) if pd.notna(hr.loc[idx]) else float("nan")
+            if math.isfinite(lap_hr) and lap_hr > 0:
+                hr_weighted[half] += lap_hr * portion_duration
+                hr_duration[half] += portion_duration
+        traversed += lap_distance
+
+    paces = [
+        (half_duration[i] / 60) / (half_distance[i] / 1000)
+        if half_distance[i] > 0 else float("nan")
+        for i in range(2)
+    ]
+    hrs = [
+        hr_weighted[i] / hr_duration[i] if hr_duration[i] > 0 else float("nan")
+        for i in range(2)
+    ]
+    return paces[0], paces[1], hrs[0], hrs[1]
 
 
 def pace_axis_ticks(pace_series):
@@ -627,6 +759,31 @@ def pace_axis_ticks(pace_series):
     end = math.ceil(pmax / step) * step
     vals = [round(start + i * step, 4) for i in range(int(round((end - start) / step)) + 1)]
     return vals, [fmt_pace(v) for v in vals]
+
+
+def expected_lane_status_paths(lane_dir, expected_lanes):
+    """Return every expected lane paired with its status path or ``None``."""
+    lane_dir = Path(lane_dir)
+    return [
+        (lane, (lane_dir / f"{lane}.json") if (lane_dir / f"{lane}.json").exists() else None)
+        for lane in expected_lanes
+    ]
+
+
+def validate_lane_status(payload, expected_lane):
+    """Validate one lane file before it can be rendered as authoritative."""
+    if not isinstance(payload, dict) or payload.get("lane") != expected_lane:
+        raise ValueError("lane ไม่ตรงกับชื่อไฟล์")
+    run_at = payload.get("run_at")
+    results = payload.get("results")
+    if not isinstance(run_at, str):
+        raise ValueError("ไม่มี run_at")
+    parsed_run_at = datetime.datetime.fromisoformat(run_at)
+    if (not isinstance(results, list) or not results
+            or not all(isinstance(row, dict) and isinstance(row.get("ok"), bool)
+                       for row in results)):
+        raise ValueError("results ต้องเป็นรายการผลที่มี ok แบบ boolean")
+    return parsed_run_at, results
 
 
 # --- DB LOADERS ---
@@ -649,9 +806,17 @@ LANE_STALE_LIMIT_MIN = {
 }
 
 
+def connect_db():
+    """Open the dashboard database read-only without creating a missing file."""
+    uri = f"{DB_PATH.resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_athletes():
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     df = pd.read_sql_query("SELECT athlete_id, display_name, slug FROM dim_athlete", conn)
     conn.close()
     return df
@@ -674,7 +839,7 @@ _ACTIVITY_TEXT = {"activity_type", "activity_name", "start_time_local", "start_t
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_wellness_data(athlete_id, start_date, end_date):
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     query = """
         SELECT * FROM fact_daily_wellness
         WHERE athlete_id = ? AND calendar_date >= ? AND calendar_date <= ?
@@ -690,7 +855,7 @@ def load_wellness_data(athlete_id, start_date, end_date):
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_activity_data(athlete_id, start_date, end_date):
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     query = """
         SELECT * FROM fact_activity
         WHERE athlete_id = ? AND start_time_local >= ? AND start_time_local <= ?
@@ -708,7 +873,7 @@ def load_activity_data(athlete_id, start_date, end_date):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_daily_run_km(athlete_id, start_date, end_date):
     """ระยะวิ่งรวมรายวัน (เฉพาะประเภทวิ่ง) สำหรับ ACWR"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     placeholders = ",".join("?" for _ in RUN_TYPES)
     query = f"""
         SELECT SUBSTR(start_time_local, 1, 10) AS date, SUM(distance_m) / 1000.0 AS km, COUNT(*) AS sessions
@@ -729,7 +894,7 @@ def load_daily_run_km(athlete_id, start_date, end_date):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_first_run_date(athlete_id):
     """วันแรกที่มีข้อมูลวิ่ง — ใช้ตัดสินว่าประวัติพอคำนวณ chronic 28 วันหรือยัง"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     placeholders = ",".join("?" for _ in RUN_TYPES)
     row = conn.execute(
         f"SELECT MIN(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
@@ -742,7 +907,7 @@ def load_first_run_date(athlete_id):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def athlete_has_load(athlete_id):
     """นาฬิกาคนนี้ให้ค่า training_load ไหม (บางรุ่นไม่ให้ → ต้อง fallback เป็นระยะวิ่ง)"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     n = conn.execute(
         "SELECT COUNT(*) FROM fact_activity "
         "WHERE athlete_id = ? AND training_load IS NOT NULL AND deleted_at IS NULL",
@@ -754,7 +919,7 @@ def athlete_has_load(athlete_id):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def athlete_has_training_readiness(athlete_id):
     """บัญชีนี้เคยได้รับ Training Readiness หรือไม่ (ไม่ใช้ฟันธงรุ่นนาฬิกา)."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     n = conn.execute(
         "SELECT COUNT(*) FROM fact_daily_wellness "
         "WHERE athlete_id = ? AND training_readiness IS NOT NULL",
@@ -766,7 +931,7 @@ def athlete_has_training_readiness(athlete_id):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_athlete_devices(athlete_id):
     """Load recently seen device labels when the optional inventory table exists."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     try:
         exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dim_athlete_device'"
@@ -803,7 +968,7 @@ def load_athlete_devices(athlete_id):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_daily_load(athlete_id, start_date, end_date):
     """ผลรวม Garmin training_load รายวัน — ทุกกิจกรรม (รวม cross-training: HIIT/เวท/มวย)"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     query = """
         SELECT SUBSTR(start_time_local, 1, 10) AS date, SUM(training_load) AS value, COUNT(*) AS sessions
         FROM fact_activity
@@ -832,7 +997,7 @@ def load_daily_workload(athlete_id, start_date, end_date):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_first_activity_date(athlete_id):
     """วันแรกที่มีกิจกรรม (ทุกประเภท) — ใช้ตัดสินความพอของประวัติเมื่อ ACWR อิง training_load"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     row = conn.execute(
         "SELECT MIN(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
         "WHERE athlete_id = ? AND deleted_at IS NULL",
@@ -848,7 +1013,7 @@ def load_last_data_dates(athlete_id):
     wellness ต้องนับเฉพาะวันที่ "มีข้อมูลจริง" — ระบบ sync insert แถวของวันใหม่ไว้ก่อน
     แม้ค่าทุกช่องเป็น NULL (นักกีฬายังไม่ sync นาฬิกา) ถ้านับแถวเปล่าด้วย แถบจะโชว์
     🟢 "วันนี้" ทั้งที่ข้อมูลจริงหยุดไปแล้ว (เคสพี่เก้า 22 ก.ค. 69)"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     la = conn.execute("SELECT MAX(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
                       "WHERE athlete_id = ? AND deleted_at IS NULL",
                       (athlete_id,)).fetchone()[0]
@@ -884,7 +1049,7 @@ def wellness_freshness(days):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_observed_max_hr(athlete_id):
     """HR สูงสุดที่เคยบันทึก — ใช้ประมาณ LTHR เมื่อยังไม่มีผลเทส"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     row = conn.execute("SELECT MAX(max_hr) FROM fact_activity "
                        "WHERE athlete_id = ? AND deleted_at IS NULL", (athlete_id,)).fetchone()
     conn.close()
@@ -893,7 +1058,7 @@ def load_observed_max_hr(athlete_id):
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_splits(activity_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     df = pd.read_sql_query(
         "SELECT * FROM fact_activity_split WHERE activity_id = ? ORDER BY split_num ASC",
         conn, params=(activity_id,))
@@ -917,7 +1082,7 @@ def prepare_session_candidates(activity_df):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_race_predictions(athlete_id, start_date, end_date):
     """Garmin ทำนายเวลาแข่ง 5K/10K/HM/FM รายวัน (จาก fact_race_prediction)"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     df = pd.read_sql_query(
         """SELECT calendar_date, time_5k_sec, time_10k_sec, time_half_sec, time_full_sec
            FROM fact_race_prediction
@@ -934,7 +1099,7 @@ def load_race_predictions(athlete_id, start_date, end_date):
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_personal_records(athlete_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     df = pd.read_sql_query(
         """SELECT record_type_id, record_label, value, achieved_date
            FROM fact_personal_record WHERE athlete_id = ? ORDER BY record_type_id ASC""",
@@ -947,7 +1112,7 @@ def load_personal_records(athlete_id):
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_latest_lt(athlete_id):
     """Garmin Lactate Threshold ล่าสุด (hr, pace, วันที่) — None ถ้านาฬิกาไม่ให้"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = connect_db()
     row = conn.execute(
         """SELECT calendar_date, lactate_threshold_hr, lactate_threshold_pace_min_km
            FROM fact_daily_wellness
@@ -1011,7 +1176,7 @@ with st.sidebar:
     ):
         st.cache_data.clear()
         st.rerun()
-    _c = sqlite3.connect(DB_PATH)
+    _c = connect_db()
     _la = _c.execute("SELECT MAX(start_time_local) FROM fact_activity WHERE deleted_at IS NULL").fetchone()[0]
     # ต้องกรองแถวที่ยังไม่มีค่าจริง — full sync สร้างแถวของวันใหม่ไว้ก่อนแม้ทุกช่องเป็น NULL
     # ถ้านับแถวเปล่าด้วย บรรทัดนี้จะโชว์ "วันนี้" ตลอดทั้งที่ข้อมูลจริงหยุดไปแล้ว
@@ -1081,6 +1246,9 @@ activity_df = load_activity_data(athlete_id, start_date.strftime("%Y-%m-%d"), en
 
 if not wellness_df.empty:
     wellness_df["calendar_date"] = pd.to_datetime(wellness_df["calendar_date"])
+wellness_plot_df = calendar_aligned_frame(
+    wellness_df, "calendar_date", start_date, end_date
+)
 if not activity_df.empty:
     activity_df["start_time_local"] = pd.to_datetime(activity_df["start_time_local"])
     activity_df["distance_km"] = activity_df["distance_m"] / 1000
@@ -1118,7 +1286,8 @@ with tab_team:
     st.markdown("**🔄 sync ล่าสุด (wellness):** &nbsp; " + " &nbsp;·&nbsp; ".join(fresh_parts))
     if stale_names:
         st.warning("⚠️ ข้อมูลค้าง ≥ 3 วัน: " + ", ".join(stale_names)
-                   + " — เช็ค log `C:\\Backup\\garmin-sync-<สาย>.log` | token เสียให้รัน `เพิ่มนักกีฬา.bat` ใหม่ "
+                   + " — เช็ค log `C:\\Backup\\run-performance-logs\\garmin-sync-<สาย>.log` "
+                     "| token เสียให้รัน `เพิ่มนักกีฬา.bat` ใหม่ "
                      "| ถ้า sync รอบล่าสุดผ่าน (ไม่มีแถบแดงด้านล่าง) = นักกีฬาไม่ได้เปิดแอป Garmin ให้นาฬิกา sync")
 
     # --- ผลรอบ sync ล่าสุด "แยกตามสายงาน" (จาก data/sync_lane/<lane>.json ที่ fetch_all เขียน) ---
@@ -1131,49 +1300,64 @@ with tab_team:
     _reason_txt = {"token": "token เสีย → รัน เพิ่มนักกีฬา.bat",
                    "network": "เน็ต/เซิร์ฟเวอร์มีปัญหา",
                    "timeout": "ค้างเกินเวลา",
-                   "db": "สำเนา garmin.db ไม่สำเร็จ → เปิด C:\\Backup\\backup-log.txt",
-                   "robocopy": "robocopy mirror มีปัญหา → เปิด C:\\Backup\\backup-log.txt"}
+                   "payload": "Garmin response/payload ผิดรูปแบบหรือไม่ครบ — ดู sync log",
+                   "drift": "data quality/schema drift — ดู deepsync log",
+                   "db": "สำเนา garmin.db ไม่สำเร็จ → เปิด C:\\Backup\\run-performance-logs\\backup-log.txt",
+                   "robocopy": "robocopy mirror มีปัญหา → เปิด C:\\Backup\\run-performance-logs\\backup-log.txt"}
     _lane_dir = DB_PATH.parent / "sync_lane"
-    _lane_files = sorted(_lane_dir.glob("*.json")) if _lane_dir.exists() else []
+    _lane_paths = dict(expected_lane_status_paths(_lane_dir, _LANE_LABEL))
     # ไฟล์รวมแบบเดิม = fallback ให้ระบบที่ยังไม่ได้รัน sync รอบใหม่หลังอัพเกรด
-    if not _lane_files and (DB_PATH.parent / "sync_status.json").exists():
-        _lane_files = [DB_PATH.parent / "sync_status.json"]
+    _legacy_status = DB_PATH.parent / "sync_status.json"
+    if not any(_lane_paths.values()) and _legacy_status.exists():
+        try:
+            _legacy_lane = json.loads(_legacy_status.read_text(encoding="utf-8")).get("lane")
+        except Exception:
+            _legacy_lane = None
+        if _legacy_lane in _lane_paths:
+            _lane_paths[_legacy_lane] = _legacy_status
     _lane_lines = []
     _old_warn_lines = []
-    for _f in _lane_files:
+    for _lane, _f in _lane_paths.items():
+        _label = _LANE_LABEL[_lane]
+        if _f is None:
+            _lane_lines.append(f"❓ {_label}: ยังไม่พบประวัติการรัน")
+            continue
         try:
             _sync = json.loads(_f.read_text(encoding="utf-8"))
+            _run_at, _results = validate_lane_status(_sync, _lane)
         except Exception as e:
             st.caption(f"อ่าน {_f.name} ไม่ได้: {e}")
+            _lane_lines.append(f"❓ {_label}: อ่านสถานะไม่ได้")
             continue
-        _label = _LANE_LABEL.get(_sync.get("lane", ""), _f.stem)
         _when = _sync["run_at"][:16].replace("T", " ")
-        _fail = [r for r in _sync["results"] if not r["ok"]]
-        _warn = [r for r in _sync["results"] if r["ok"] and r.get("warnings")]
-        _age_min = None
+        _fail = [r for r in _results if not r.get("ok", False)]
+        _warn = [r for r in _results if r.get("ok", False) and r.get("warnings")]
         try:
-            _age_min = (datetime.datetime.now()
-                        - datetime.datetime.fromisoformat(_sync["run_at"])).total_seconds() / 60
-        except Exception:
-            pass
+            _now_for_lane = datetime.datetime.now(tz=_run_at.tzinfo) if _run_at.tzinfo else datetime.datetime.now()
+            _age_min = (_now_for_lane - _run_at).total_seconds() / 60
+        except (OverflowError, TypeError):
+            _age_min = None
         if _fail:
             st.error(f"❌ sync {_label} รอบ {_when} ล้มเหลว: "
-                     + " · ".join(f"**{r['slug']}** ({_reason_txt.get(r['reason'], 'ดู log')})"
+                     + " · ".join(f"**{r.get('slug', 'ไม่ทราบนักกีฬา')}** "
+                                  f"({_reason_txt.get(r.get('reason'), 'ดู log')})"
                                   for r in _fail))
         # sanity warning = สภาพข้อมูล "ณ รอบนั้น" ไม่ใช่สถานะปัจจุบัน — รอบที่เก่ากว่า 1 วัน
         # คือประวัติศาสตร์ ไม่ใช่งานของวันนี้ ต้องลดชั้นลงกล่องพับ ไม่งั้นสายที่รันนาน ๆ ที
         # (deep รายเดือน / reconcile รายสัปดาห์) แปะแถบเหลืองค้างหน้าจอเป็นสัปดาห์จนคนเลิกอ่าน
         _stale_warn = _age_min is not None and _age_min > SANITY_WARN_FRESH_MIN
         for r in _warn:
-            _msg = (f"🧐 **{r['slug']}** — sanity check (sync {_label} รอบ {_when}): "
-                    + " | ".join(r["warnings"]))
+            _warning_values = r["warnings"] if isinstance(r["warnings"], list) else [r["warnings"]]
+            _msg = (f"🧐 **{r.get('slug', 'ไม่ทราบนักกีฬา')}** — sanity check "
+                    f"(sync {_label} รอบ {_when}): "
+                    + " | ".join(map(str, _warning_values)))
             if _stale_warn:
                 _old_warn_lines.append(_msg)
             else:
                 st.warning(_msg)
         # สายที่ "เงียบหายไป" อันตรายกว่าสายที่ล้มเหลว เพราะไม่มีอะไรฟ้อง — กาไว้ให้เห็นตรงนี้
         # (เพดานเดียวกับ watchdog ใน notify_sync.ps1 — ดู LANE_STALE_LIMIT_MIN ด้านบน)
-        _limit_min = LANE_STALE_LIMIT_MIN.get(_sync.get("lane", ""))
+        _limit_min = LANE_STALE_LIMIT_MIN[_lane]
         _quiet = _limit_min is not None and _age_min is not None and _age_min > _limit_min
         _mark = "❌" if _fail else ("⏰" if _quiet else "✅")
         _lane_lines.append(f"{_mark} {_label}: {_when}"
@@ -1214,8 +1398,7 @@ with tab_team:
         sleep_snap = latest_field(w, "sleep_score")
         rhr_snap = latest_field(w, "resting_hr")
         hrv_snap = latest_field(w, "hrv_last_night")
-        bb_high_snap = latest_field(w, "body_battery_high")
-        bb_now_snap = latest_field(w, "bb_most_recent")
+        bb_display_snap, bb_completed_snap = body_battery_snapshots(w, today)
         ready_snap = latest_field(
             w,
             "training_readiness",
@@ -1223,13 +1406,8 @@ with tab_team:
         )
         train_snap = latest_field(w, "training_status")
 
-        # วันนี้แสดงระดับล่าสุดระหว่างวัน; วันก่อนหน้าแสดง high ของวันเพื่อไม่ปนความหมาย
-        bb_display_snap = (
-            bb_now_snap
-            if bb_now_snap and bb_now_snap.get("date") == today
-            else bb_high_snap
-        )
-        bb = bb_high_snap["value"] if bb_high_snap else float("nan")
+        # วันนี้แสดงระดับล่าสุดระหว่างวัน; ธงใช้ high ล่าสุดของวันที่จบแล้วแยกกัน
+        bb = bb_completed_snap["value"] if bb_completed_snap else float("nan")
         bb_now = bb_display_snap["value"] if bb_display_snap else float("nan")
         sleep = sleep_snap["value"] if sleep_snap else float("nan")
         rhr = rhr_snap["value"] if rhr_snap else float("nan")
@@ -1248,8 +1426,6 @@ with tab_team:
             if pd.notna(rhr) and len(baseline) >= 7:
                 rhr_delta = rhr - baseline.mean()
 
-        # วันนี้ไม่ใช่วันเต็มเสมอ ไม่ใช้ fetched_at (UTC) มาเทียบกับวันที่ไทย
-        day_complete = bool(bb_high_snap and bb_high_snap.get("date") < today)
         core_snaps = [bb_display_snap, sleep_snap, rhr_snap, hrv_snap]
         fresh_core_count = sum(
             1 for snapshot in core_snaps
@@ -1263,8 +1439,9 @@ with tab_team:
             flags.append(f"โหลดพุ่ง ACWR {acwr:.2f}")
         elif pd.notna(acwr) and acwr > 1.3:
             flags.append(f"โหลดขาขึ้น ACWR {acwr:.2f}")
-        if (pd.notna(bb) and bb < 40 and day_complete
-                and field_age_days(bb_high_snap, today) <= 1):
+        if (pd.notna(bb) and bb < 40 and bb_completed_snap
+                and field_age_days(bb_completed_snap, today) is not None
+                and 0 <= field_age_days(bb_completed_snap, today) <= 1):
             flags.append(f"Body Battery ต่ำ ({bb:.0f})")
         if pd.notna(sleep) and sleep < 60 and field_age_days(sleep_snap, today) <= 1:
             flags.append(f"นอนแย่ ({sleep:.0f})")
@@ -1460,14 +1637,7 @@ with tab_today:
             icon=":material/sync:",
         )
 
-    bb_now_snap = latest_field(recent_wellness, "bb_most_recent")
-    bb_high_snap = latest_field(recent_wellness, "body_battery_high")
-    if bb_now_snap and (
-        not bb_high_snap or bb_now_snap.get("date") >= bb_high_snap.get("date")
-    ):
-        bb_snap = bb_now_snap
-    else:
-        bb_snap = bb_high_snap
+    bb_snap, _ = body_battery_snapshots(recent_wellness, today)
     sleep_snap = latest_field(recent_wellness, "sleep_score")
     rhr_snap = latest_field(recent_wellness, "resting_hr")
     hrv_snap = latest_field(recent_wellness, "hrv_last_night")
@@ -1649,9 +1819,10 @@ with tab_health:
 
         if any(result["excluded_today"] for result in average_results.values()):
             st.caption(
-                "Sleep และ RHR รวมค่าของวันนี้ซึ่งสรุปหลังจบคืนแล้ว; Body Battery สูงสุดและ "
-                "Stress ไม่นับวันนี้ซึ่งยังเปลี่ยนระหว่างวัน ส่วนกราฟ/ตารางยังแสดงวันนี้ "
-                "พร้อมเส้นประ และ denominator ใต้การ์ดจึงต่างกันตามชนิด metric"
+                "Sleep, RHR และอัตราหายใจขณะนอนรวมค่าของวันนี้ซึ่งสรุปหลังจบคืนแล้ว; "
+                "Body Battery สูงสุด, Stress, อัตราหายใจขณะตื่น, floors และ kcal "
+                "ไม่นับวันนี้ซึ่งยังเปลี่ยนระหว่างวัน ส่วนกราฟ/ตารางยังแสดงวันนี้พร้อมเส้นประ "
+                "และ denominator ใต้การ์ดจึงต่างกันตามชนิด metric"
             )
 
         quality_flags = wellness_quality_flags(wellness_df)
@@ -1675,7 +1846,7 @@ with tab_health:
             health_colors = {"sleep_score": C_BLUE, "body_battery_high": C_GREEN}
             for column, label in health_series:
                 fig_health.add_trace(go.Scatter(
-                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                     mode="lines+markers", name=label, connectgaps=False,
                     line=dict(color=health_colors[column]),
                     hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
@@ -1687,7 +1858,7 @@ with tab_health:
             mark_partial_today(fig_health, today, start_date, end_date)
             st.plotly_chart(fig_health, width="stretch")
             plotted_counts = " · ".join(
-                f"{label} {wellness_df[column].notna().sum()}/{len(wellness_df)} จุด"
+                f"{label} {wellness_plot_df[column].notna().sum()}/{len(wellness_plot_df)} จุด"
                 for column, label in health_series
             )
             st.caption(plotted_counts + " · ช่องว่างคือ Garmin ไม่มีค่า; กราฟไม่เชื่อมเส้นข้าม NULL")
@@ -1702,7 +1873,7 @@ with tab_health:
             for column, label in stress_ready_series:
                 secondary = column == "training_readiness"
                 fig_stress.add_trace(go.Scatter(
-                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                     mode="lines+markers", name=label, connectgaps=False,
                     line=dict(color=C_GREEN if secondary else C_RED),
                     hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
@@ -1741,7 +1912,7 @@ with tab_health:
                 secondary = column != "resting_hr"
                 color = C_RED if column == "resting_hr" else (C_BLUE if column == "hrv_last_night" else C_GREEN)
                 fig_hrv.add_trace(go.Scatter(
-                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                     mode="lines+markers", name=label, connectgaps=False,
                     line=dict(color=color, dash="dot" if column == "hrv_weekly_avg" else "solid"),
                     hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
@@ -1756,15 +1927,17 @@ with tab_health:
 
         # --- ค่าเฉลี่ยเสริม พร้อม sample count เหมือนการ์ดหลัก ---
         extra_specs = [
-            ("หายใจตอนตื่น", "avg_waking_respiration", " brpm"),
-            ("หายใจตอนนอน", "avg_sleep_respiration", " brpm"),
-            ("Stress สูงสุดเฉลี่ย", "max_stress", ""),
-            ("Floors/วัน", "floors_ascended", ""),
-            ("Active kcal/วัน", "active_kilocalories", " kcal"),
+            ("หายใจตอนตื่น", "avg_waking_respiration", " brpm", True),
+            ("หายใจตอนนอน", "avg_sleep_respiration", " brpm", False),
+            ("Stress สูงสุดเฉลี่ย", "max_stress", "", True),
+            ("Floors/วัน", "floors_ascended", "", True),
+            ("Active kcal/วัน", "active_kilocalories", " kcal", True),
         ]
         extra_results = []
-        for label, column, unit in extra_specs:
-            result = period_metric(wellness_df, column, today, True, start_date, end_date)
+        for label, column, unit, exclude_today in extra_specs:
+            result = period_metric(
+                wellness_df, column, today, exclude_today, start_date, end_date
+            )
             if pd.notna(result["mean"]):
                 extra_results.append((label, unit, result))
         if extra_results:
@@ -1785,7 +1958,7 @@ with tab_health:
             fig_resp = go.Figure()
             for column, label in respiration_series:
                 fig_resp.add_trace(go.Scatter(
-                    x=wellness_df["calendar_date"], y=wellness_df[column],
+                    x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                     mode="lines+markers", name=label, connectgaps=False,
                     hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.1f}} brpm<extra></extra>",
                 ))
@@ -1867,7 +2040,7 @@ with tab_health:
 
             if has_any_value(wellness_df, ["training_readiness"]):
                 fig_ready = go.Figure(go.Scatter(
-                    x=wellness_df["calendar_date"], y=wellness_df["training_readiness"],
+                    x=wellness_plot_df["calendar_date"], y=wellness_plot_df["training_readiness"],
                     mode="lines+markers", name="Training Readiness", connectgaps=False,
                     line=dict(color=C_GREEN),
                     hovertemplate="%{x|%d %b}<br>Readiness: %{y:.0f}<extra></extra>",
@@ -1880,7 +2053,7 @@ with tab_health:
                 mark_partial_today(fig_ready, today, start_date, end_date)
                 st.plotly_chart(fig_ready, width="stretch")
 
-            recovery_minutes = recovery_minutes_series(wellness_df)
+            recovery_minutes = recovery_minutes_series(wellness_plot_df)
             if recovery_minutes.notna().any():
                 recovery_labels = recovery_minutes.map(
                     lambda value: fmt_recovery_time(value) if pd.notna(value) else "ไม่มีข้อมูล"
@@ -1888,7 +2061,7 @@ with tab_health:
                 fig_recovery = go.Figure(go.Scatter(
                     # Keep every calendar row: NaN in y now creates the intended
                     # visible gap because connectgaps=False instead of being masked out.
-                    x=wellness_df["calendar_date"],
+                    x=wellness_plot_df["calendar_date"],
                     y=recovery_minutes / 60,
                     customdata=recovery_labels,
                     mode="lines+markers", name="Recovery Time", connectgaps=False,
@@ -2028,7 +2201,7 @@ with tab_train:
         runs_df = activity_df[activity_df["activity_type"].isin(RUN_TYPES)]
 
         total_distance = runs_df["distance_km"].sum()
-        avg_pace_raw = runs_df["avg_pace_min_per_km"].mean()
+        avg_pace_raw = aggregate_pace_min_per_km(runs_df)
         total_hours = runs_df["duration_sec"].sum() / 3600
 
         with st.container(horizontal=True):
@@ -2041,15 +2214,22 @@ with tab_train:
         st.subheader("โหลดสะสมและความเสี่ยง (ACWR)")
         acwr_start = start_date - datetime.timedelta(days=56)
         daily_wl, wl_metric, wl_unit = load_daily_workload(athlete_id, acwr_start.isoformat(), end_date.isoformat())
-        acwr_df = compute_acwr(daily_wl, end_date)
-        acwr_view = acwr_df[(acwr_df["date"] >= pd.Timestamp(start_date)) & acwr_df["acwr"].notna()]
+        first_workload_date = (
+            load_first_activity_date(athlete_id)
+            if wl_metric == "training_load"
+            else load_first_run_date(athlete_id)
+        )
+        history_start = max(acwr_start, first_workload_date) if first_workload_date else acwr_start
+        acwr_df = compute_acwr(daily_wl, end_date, history_start=history_start)
+        acwr_view = acwr_df[acwr_df["date"] >= pd.Timestamp(start_date)]
+        acwr_valid = acwr_view.dropna(subset=["acwr"])
         _src = "Garmin training_load (รวม cross-training)" if wl_metric == "training_load" else "ระยะทางวิ่ง"
         _afmt = "%.0f" if wl_metric == "training_load" else "%.1f"
 
-        if acwr_view.empty:
-            st.info("ประวัติยังไม่ถึง 28 วัน — ยังคำนวณ ACWR ไม่ได้")
+        if acwr_valid.empty:
+            st.info("ยังไม่มีฐานโหลด 28 วันที่มากกว่าศูนย์พอคำนวณ ACWR")
         else:
-            latest_acwr = acwr_view.iloc[-1]
+            latest_acwr = acwr_valid.iloc[-1]
             emoji, txt = acwr_status(latest_acwr["acwr"])
             with st.container(horizontal=True):
                 st.metric("ACWR ล่าสุด", f"{latest_acwr['acwr']:.2f}", delta=f"{emoji} {txt}",
@@ -2057,7 +2237,7 @@ with tab_train:
                 st.metric("โหลด 7 วัน (Acute)", f"{latest_acwr['acute']:{_afmt[1:]}} {wl_unit}", border=True)
                 st.metric("ฐาน 28 วัน (Chronic)", f"{latest_acwr['chronic']:{_afmt[1:]}} {wl_unit}/สัปดาห์", border=True)
 
-            y_max = max(2.0, float(acwr_view["acwr"].max()) * 1.15)
+            y_max = max(2.0, float(acwr_valid["acwr"].max()) * 1.15)
             fig_acwr = go.Figure()
             bands = [
                 (0.0, 0.8, C_NEUTRAL, 0.35, "ต่ำกว่าฐาน"),
@@ -2072,6 +2252,7 @@ with tab_train:
             fig_acwr.add_trace(go.Scatter(
                 x=acwr_view["date"], y=acwr_view["acwr"], mode="lines+markers",
                 line=dict(color=C_BLUE, width=2), marker=dict(size=6), name="ACWR",
+                connectgaps=False,
                 hovertemplate="%{x|%d %b}<br>ACWR %{y:.2f}<extra></extra>",
             ))
             fig_acwr.update_layout(
@@ -2087,10 +2268,10 @@ with tab_train:
         st.subheader("สัดส่วนความหนักการซ้อม (กฎ 80/20)")
         zone_cols = ["hr_zone1_sec", "hr_zone2_sec", "hr_zone3_sec", "hr_zone4_sec", "hr_zone5_sec"]
         have_zone_cols = set(zone_cols).issubset(activity_df.columns)
-        zdf = activity_df[activity_df[zone_cols].notna().any(axis=1)] if have_zone_cols else activity_df.iloc[0:0]
+        zdf = usable_hr_zone_rows(activity_df, zone_cols) if have_zone_cols else activity_df.iloc[0:0]
 
         if not zdf.empty:
-            z = zdf[zone_cols].fillna(0).sum()
+            z = zdf[zone_cols].apply(pd.to_numeric, errors="coerce").clip(lower=0).fillna(0).sum()
             buckets = {
                 INTENSITY_ORDER[0]: (z["hr_zone1_sec"] + z["hr_zone2_sec"]) / 60,   # Z1-2 เบา
                 INTENSITY_ORDER[1]: z["hr_zone3_sec"] / 60,                          # Z3 กลาง
@@ -2211,16 +2392,24 @@ with tab_progress:
     # ขึ้นเฉพาะวันที่มีวิ่ง outdoor) ถ้าอ่านจาก vo2 ค่าจะหายทุกครั้งที่วันล่าสุดไม่ได้วิ่ง
     _fit_age = (wellness_df["fitness_age"].dropna()
                 if "fitness_age" in wellness_df else pd.Series(dtype=float))
-    if not vo2.empty:
-        first_v, last_v = vo2["vo2max_trend"].iloc[0], vo2["vo2max_trend"].iloc[-1]
+    if not vo2.empty or not _fit_age.empty:
         with st.container(horizontal=True):
-            st.metric("VO2max ล่าสุด (Garmin)", f"{last_v:.1f}",
-                      delta=f"{last_v - first_v:+.1f} เทียบต้นช่วง", border=True)
+            if not vo2.empty:
+                first_v, last_v = vo2["vo2max_trend"].iloc[0], vo2["vo2max_trend"].iloc[-1]
+                st.metric("VO2max ล่าสุด (Garmin)", f"{last_v:.1f}",
+                          delta=f"{last_v - first_v:+.1f} เทียบต้นช่วง", border=True)
             if not _fit_age.empty:
                 st.metric("Fitness Age", fmt_num(_fit_age.iloc[-1]), border=True)
-        fig_vo2 = px.line(vo2, x="calendar_date", y="vo2max_trend", markers=True,
-                          labels={"vo2max_trend": "VO2max", "calendar_date": "วันที่"},
-                          title="แนวโน้ม VO2max (ค่าประเมินรายวันของ Garmin)")
+    if not vo2.empty:
+        fig_vo2 = go.Figure(go.Scatter(
+            x=wellness_plot_df["calendar_date"], y=wellness_plot_df["vo2max_trend"],
+            mode="lines+markers", name="VO2max", connectgaps=False,
+            hovertemplate="%{x|%d %b}<br>VO2max: %{y:.1f}<extra></extra>",
+        ))
+        fig_vo2.update_layout(
+            title="แนวโน้ม VO2max (ค่าประเมินรายวันของ Garmin)",
+            xaxis_title="วันที่", yaxis_title="VO2max", showlegend=False,
+        )
         st.plotly_chart(fig_vo2, width="stretch")
     else:
         st.info("ไม่มีข้อมูล VO2max ในช่วงที่เลือก (นาฬิกาอัปเดตเฉพาะวันที่มีวิ่ง GPS)")
@@ -2293,9 +2482,16 @@ with tab_progress:
                 h_last = eh["hill_score_overall"].dropna()
                 st.metric("Hill Score ล่าสุด", f"{h_last.iloc[-1]:.0f}", border=True)
         if eh["endurance_score"].notna().any():
-            fig_end = px.line(eh, x="calendar_date", y="endurance_score", markers=True,
-                              labels={"endurance_score": "Endurance Score", "calendar_date": "วันที่"},
-                              title="แนวโน้ม Endurance Score (ความอึดสะสม)")
+            fig_end = go.Figure(go.Scatter(
+                x=wellness_plot_df["calendar_date"],
+                y=wellness_plot_df["endurance_score"],
+                mode="lines+markers", name="Endurance Score", connectgaps=False,
+                hovertemplate="%{x|%d %b}<br>Endurance Score: %{y:.0f}<extra></extra>",
+            ))
+            fig_end.update_layout(
+                title="แนวโน้ม Endurance Score (ความอึดสะสม)",
+                xaxis_title="วันที่", yaxis_title="Endurance Score", showlegend=False,
+            )
             st.plotly_chart(fig_end, width="stretch")
     # ---------------- Personal records ----------------
     st.subheader("สถิติส่วนตัวจาก Garmin")
@@ -2474,16 +2670,7 @@ with tab_splits:
             else:
                 # --- วิเคราะห์ครึ่งแรก vs ครึ่งหลัง (จับอาการแผ่วปลาย) ---
                 if len(splits) >= 2:
-                    half = len(splits) // 2
-                    h1, h2 = splits.iloc[:half], splits.iloc[half:]
-
-                    def _weighted_pace(part):
-                        km = part["distance_m"].sum() / 1000
-                        return (part["duration_sec"].sum() / 60) / km if km > 0 else float("nan")
-
-                    p1, p2 = _weighted_pace(h1), _weighted_pace(h2)
-                    hr1 = (h1["avg_hr"] * h1["duration_sec"]).sum() / h1["duration_sec"].sum() if h1["avg_hr"].notna().any() else float("nan")
-                    hr2 = (h2["avg_hr"] * h2["duration_sec"]).sum() / h2["duration_sec"].sum() if h2["avg_hr"].notna().any() else float("nan")
+                    p1, p2, hr1, hr2 = analyze_distance_halves(splits)
 
                     split_pct = (p2 - p1) / p1 * 100 if pd.notna(p1) and pd.notna(p2) and p1 > 0 else float("nan")
                     if pd.isna(split_pct):

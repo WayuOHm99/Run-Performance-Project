@@ -22,18 +22,21 @@ consistent แม้ dashboard เปิดค้าง/sync กำลังเ�
 
 exit code: 0 = สำเร็จ | 1 = สำรองไม่สำเร็จ (bat จะเรียก notify ให้เด้ง toast)
 
-Healthchecks.io (pilot เฉพาะสายนี้ — 6 ส.ค. 69): ตั้ง env var HEALTHCHECK_BACKUP_URL
-เป็น check URL ของ Healthchecks.io แล้วรอบนี้จะ ping /start ตอนเริ่ม, ping URL เปล่า
-ตอนสำเร็จ, ping /fail ตอนล้มเหลว — ไม่ตั้งค่าไว้ = ไม่ ping เลย (เงียบ ไม่ error)
-ping เป็น best-effort ล้วน ๆ ไม่มีทางเปลี่ยน exit code ข้างต้นได้
+Healthchecks.io (pilot เฉพาะสายนี้ — 6 ส.ค. 69): production อ่าน check URL จาก
+DPAPI CurrentUser file ในโฟลเดอร์ data ก่อนเสมอ; env var HEALTHCHECK_BACKUP_URL เป็น fallback
+ชั่วคราวสำหรับ migration/test เท่านั้น. รอบนี้ ping /start ตอนเริ่ม, URL เปล่าตอนสำเร็จ,
+และ /fail ตอนล้มเหลว — ไม่ตั้งค่าไว้ = ไม่ ping. ping เป็น best-effort ล้วน ๆ และไม่มี
+ทางเปลี่ยน exit code ของงาน backup หลัก
 """
 
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import datetime
 from pathlib import Path
 
@@ -44,9 +47,28 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent      # ...\garmin
-DB_PATH = PROJECT_ROOT / "data" / "garmin.db"
-LANE_STATUS = PROJECT_ROOT / "data" / "sync_lane" / "backup.json"
+DATA_DIR = PROJECT_ROOT / "data"
+DB_PATH = DATA_DIR / "garmin.db"
+LANE_STATUS = DATA_DIR / "sync_lane" / "backup.json"
 KEEP_DAILY = 7
+
+
+def use_data_dir(path) -> Path:
+    """ชี้ DB ต้นทางและสถานะ backup ไป data dir เดียวกัน แล้วคืนค่าเดิม.
+
+    ปลายทางสำรองยังมาจาก ``--dest``/``--daily`` ตามเดิม; จุดฉีดนี้ครอบเฉพาะ
+    ไฟล์ต้นทางที่เป็นของ Garmin pipeline เพื่อให้เทสและงานซ้อมไม่แตะข้อมูลจริง.
+    """
+    global DATA_DIR, DB_PATH, LANE_STATUS
+    previous = DATA_DIR
+    DATA_DIR = Path(path)
+    DB_PATH = DATA_DIR / "garmin.db"
+    LANE_STATUS = DATA_DIR / "sync_lane" / "backup.json"
+    return previous
+
+
+if os.environ.get("GARMIN_DATA_DIR"):
+    use_data_dir(os.environ["GARMIN_DATA_DIR"])
 
 # ── Healthchecks.io pilot (สาย backup เท่านั้น — 6 ส.ค. 69) ──────────────────
 # ตรวจแค่ "Backup Task เริ่ม/จบ/ล้มเหลวตรงเวลาไหม" จากภายนอกเครื่อง — เสริมจาก
@@ -54,14 +76,83 @@ KEEP_DAILY = 7
 #
 # กติกาที่ต้องคุ้มครองเสมอ (ห้ามฝ่าฝืน):
 #   1) ห้ามส่งข้อมูลนักกีฬา/Garmin payload/token/path ภายใน/ข้อมูลสุขภาพออกไปเด็ดขาด —
-#      ยิง GET เปล่า ๆ ไปที่ URL ที่ผู้ใช้ตั้งเองผ่าน env var เท่านั้น ไม่มี body/query
-#   2) ห้าม log หรือแสดง URL เอง (ผู้ใช้เป็นคนตั้งค่าเอง ไม่ใช่ความลับของเรา แต่ก็ไม่มี
-#      เหตุผลต้องพิมพ์ซ้ำ) — ข้อความที่พิมพ์บอกแค่ผลสำเร็จ/ไม่สำเร็จของการ ping
+#      ยิง GET เปล่า ๆ ไปที่ URL ใน DPAPI (หรือ migration env fallback) ไม่มี body/query
+#   2) URL เป็น bearer secret: ผู้ที่รู้ค่าสามารถ spoof สถานะ backup ได้ จึงห้าม log หรือ
+#      แสดงค่าเด็ดขาด — ข้อความที่พิมพ์บอกแค่ผลสำเร็จ/ไม่สำเร็จของการ ping
 #   3) Healthchecks.io ล่ม/เน็ตขาด ต้องไม่ทำให้ backup ล้มตาม — ทุก error ในนี้ถูกกลืน
 #      เงียบเสมอ ไม่มีทาง exception หลุดออกจากฟังก์ชันพวกนี้ได้เลย
 #   4) ไม่เปลี่ยน exit code หลักของ backup_db.py — การ ping เป็นแค่ผลข้างเคียง (best-effort)
 HEALTHCHECK_ENV_VAR = "HEALTHCHECK_BACKUP_URL"
 HEALTHCHECK_TIMEOUT_SEC = 5
+HEALTHCHECK_DPAPI_FILE = ".healthcheck-backup-url.dpapi"
+
+
+def _dpapi_unprotect(ciphertext: bytes) -> str:
+    """Decrypt a Windows DPAPI CurrentUser blob without spawning a shell."""
+    if os.name != "nt":
+        raise OSError("Windows DPAPI is unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+
+    raw = (ctypes.c_ubyte * len(ciphertext)).from_buffer_copy(ciphertext)
+    input_blob = DataBlob(len(ciphertext), raw)
+    output_blob = DataBlob()
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.POINTER(DataBlob),
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(DataBlob),
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    if not crypt32.CryptUnprotectData(
+        ctypes.byref(input_blob), None, None, None, None, 0,
+        ctypes.byref(output_blob),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        plaintext = ctypes.string_at(output_blob.pbData, output_blob.cbData)
+        return plaintext.decode("utf-8")
+    finally:
+        kernel32.LocalFree(output_blob.pbData)
+
+
+def get_healthcheck_url() -> str:
+    """Resolve the URL from process env or a CurrentUser-DPAPI protected file."""
+    if os.name == "nt":
+        secret_path = DATA_DIR / HEALTHCHECK_DPAPI_FILE
+        try:
+            protected = _dpapi_unprotect(secret_path.read_bytes()).strip()
+            if protected:
+                return protected
+        except Exception:
+            pass
+    return os.environ.get(HEALTHCHECK_ENV_VAR, "").strip()
+
+
+def _valid_healthcheck_url(url: str) -> bool:
+    """Allow only credential-like HTTPS path URLs without side channels."""
+    try:
+        parsed = urlsplit(url)
+        return (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.query == ""
+            and parsed.fragment == ""
+            and parsed.port in (None, 443)
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _healthcheck_ping(url: str, timeout: float = HEALTHCHECK_TIMEOUT_SEC) -> bool:
@@ -82,12 +173,15 @@ def _healthcheck_ping(url: str, timeout: float = HEALTHCHECK_TIMEOUT_SEC) -> boo
 def notify_healthcheck(kind: str) -> None:
     """ping Healthchecks.io ของสาย backup — kind: "start" | "success" | "fail"
 
-    อ่าน URL จาก env var ทุกครั้งที่เรียก (ไม่ใช่ค่าคงที่ตอน import) เพื่อให้เทส inject
-    ผ่าน os.environ ได้ตรง ๆ — ไม่ตั้ง env var ไว้ = เงียบ ข้ามไปเฉย ๆ ไม่ error/ไม่ print
+    อ่าน DPAPI CurrentUser file ทุกครั้งก่อน แล้วจึง fallback ไป env สำหรับ migration/test
+    — ไม่พบทั้งคู่ = เงียบ ข้ามไปเฉย ๆ ไม่ error/ไม่ print
     """
     try:
-        base = os.environ.get(HEALTHCHECK_ENV_VAR, "").strip()
+        base = get_healthcheck_url()
         if not base:
+            return
+        if not _valid_healthcheck_url(base):
+            print("   ⚠️  healthcheck config ไม่ปลอดภัย/ผิดรูปแบบ (ต้องเป็น HTTPS)")
             return
         base = base.rstrip("/")
         suffix = {"start": "/start", "fail": "/fail", "success": ""}.get(kind, "")
@@ -108,11 +202,19 @@ def snapshot(src: Path, dest: Path) -> int:
     เราเขียนโฟลเดอร์นั้นได้อยู่แล้ว และคำสั่งในนี้อ่านอย่างเดียวล้วน
     ต้องปิด connection ให้ครบก่อน replace เสมอ — Windows ไม่ให้ rename ไฟล์ที่ยังเปิดค้าง
     """
+    src = Path(src)
+    dest = Path(dest)
+    if not src.is_file():
+        raise FileNotFoundError(f"ไม่พบฐานข้อมูลต้นทาง: {src}")
+    if src.resolve() == dest.resolve():
+        raise ValueError("ต้นทางและปลายทาง garmin.db ต้องเป็นคนละไฟล์")
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".db.tmp")
     tmp.unlink(missing_ok=True)
 
-    source = sqlite3.connect(str(src), timeout=60)
+    source_uri = src.resolve().as_uri() + "?mode=rw"
+    source = sqlite3.connect(source_uri, uri=True, timeout=60)
     try:
         target = sqlite3.connect(str(tmp))
         try:
@@ -143,13 +245,27 @@ def rotate_daily(daily_dir: Path, snapshot_path: Path) -> None:
     """
     daily_dir.mkdir(parents=True, exist_ok=True)
     today = daily_dir / f"garmin-{datetime.now():%Y%m%d}.db"
-    today.write_bytes(snapshot_path.read_bytes())
+    tmp = today.with_suffix(".db.tmp")
+    tmp.unlink(missing_ok=True)
+    try:
+        shutil.copyfile(snapshot_path, tmp)
+        check = sqlite3.connect(str(tmp))
+        try:
+            if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError("สำเนารายวัน integrity_check ไม่ผ่าน")
+        finally:
+            check.close()
+        tmp.replace(today)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    # Delete old generations only after today's verified file is atomically visible.
     old = sorted(daily_dir.glob("garmin-*.db"))[:-KEEP_DAILY]
     for f in old:
         f.unlink(missing_ok=True)
 
 
-def write_status(run_at: datetime, ok: bool, reason: str, warnings: list) -> None:
+def write_status(run_at: datetime, ok: bool, reason: str, warnings: list) -> bool:
     """รูปแบบเดียวกับที่ fetch_all.py เขียน — dashboard/notify_sync อ่านไฟล์เดียวกันได้เลย
     (slug ใช้ชื่อสายแทนชื่อนักกีฬา เพราะสายนี้ไม่ได้แยกรายคน)"""
     payload = json.dumps({
@@ -164,8 +280,10 @@ def write_status(run_at: datetime, ok: bool, reason: str, warnings: list) -> Non
         tmp = LANE_STATUS.with_suffix(".json.tmp")
         tmp.write_text(payload, encoding="utf-8")
         tmp.replace(LANE_STATUS)
+        return True
     except Exception as e:
         print(f"⚠️  เขียน backup.json ไม่สำเร็จ: {e}")
+        return False
 
 
 def main() -> int:
@@ -186,7 +304,10 @@ def main() -> int:
 
     # robocopy: 0-7 = ปกติ (0 ไม่มีอะไรเปลี่ยน, 1 คัดลอกแล้ว, 2/4 มี extra/mismatch) | >=8 = ล้มเหลว
     if args.robocopy_exit >= 8:
-        warnings.append(f"robocopy mirror ล้มเหลว (exit {args.robocopy_exit}) — ดู C:\\Backup\\backup-log.txt")
+        warnings.append(
+            f"robocopy mirror ล้มเหลว (exit {args.robocopy_exit}) — "
+            "ดู C:\\Backup\\run-performance-logs\\backup-log.txt"
+        )
 
     print(f"📦 สำรอง {DB_PATH} → {dest_dir}")
     try:
@@ -198,21 +319,23 @@ def main() -> int:
         return 1
 
     print(f"   ✅ garmin.db snapshot สำเร็จ ({rows} กิจกรรม)")
+    daily_ok = True
     if args.daily:
         try:
             rotate_daily(Path(args.daily), dest_dir / "garmin.db")
             print(f"   ✅ สำเนารายวัน → {args.daily} (เก็บ {KEEP_DAILY} ชุดล่าสุด)")
         except Exception as e:
-            # หมุนไฟล์รายวันพลาดไม่ใช่เรื่องคอขาดบาดตาย — สำเนาหลักได้แล้ว บอกไว้เฉย ๆ
-            # (ไม่กระทบเกณฑ์ success/fail ของ healthcheck — snapshot+verification+robocopy
-            # ผ่านครบคือเกณฑ์เดียว ตามที่ตกลงไว้)
+            daily_ok = False
             warnings.append(f"หมุนสำเนารายวันไม่สำเร็จ: {e}")
-            print(f"   ⚠️  {warnings[-1]}")
+            print(f"   ❌ {warnings[-1]}")
 
-    # success/fail ที่นี่คือ "ผลสุดท้ายของรอบ" จุดเดียว (snapshot+verification ผ่านแล้ว
-    # จากด้านบน เหลือแค่ตัดสินจาก robocopy) — ไม่มีทางถูกเรียกซ้ำกับ path ข้างบน
-    ok = args.robocopy_exit < 8
-    write_status(run_at, ok, "ok" if ok else "robocopy", warnings)
+    # A configured daily generation is part of the backup contract, not a warning:
+    # reporting external success would otherwise hide the loss of restore history.
+    ok = args.robocopy_exit < 8 and daily_ok
+    reason = "ok" if ok else ("robocopy" if args.robocopy_exit >= 8 else "daily")
+    status_written = write_status(run_at, ok, reason, warnings)
+    if not status_written:
+        ok = False
     notify_healthcheck("success" if ok else "fail")
     return 0 if ok else 1
 

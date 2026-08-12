@@ -10,12 +10,55 @@ Password is NEVER stored anywhere.
 """
 
 import os
+import re
+import subprocess
 import sys
 from getpass import getpass
 from pathlib import Path
 
 # Resolve project root (one level up from scripts/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ACL_SCRIPT = PROJECT_ROOT.parent / "scripts" / "harden_private_acl.ps1"
+_ATHLETE_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9_'-]{0,62}[a-z0-9])?\Z")
+
+
+def validate_athlete_slug(value: str) -> str:
+    """Return a safe token-directory slug while preserving legacy apostrophes."""
+    slug = value.strip().lower()
+    if not _ATHLETE_SLUG.fullmatch(slug):
+        raise ValueError(
+            "use 1-64 lowercase English letters/numbers with internal _, - or ' only"
+        )
+    return slug
+
+
+def harden_garmin_private_dirs() -> None:
+    """Fail closed if Windows cannot make token/data roots owner-only."""
+    if os.name != "nt":
+        return
+    if not ACL_SCRIPT.is_file():
+        raise RuntimeError(f"ACL hardening script not found: {ACL_SCRIPT}")
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ACL_SCRIPT),
+            "-Scope",
+            "Garmin",
+            "-Recurse",
+        ],
+        capture_output=True,
+        text=False,
+        timeout=60,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Windows ACL hardening failed; token creation stopped before credentials were written"
+        )
 
 def main():
     print("=" * 50)
@@ -24,9 +67,16 @@ def main():
     print()
 
     # 1. Athlete name
-    athlete_name = input("Athlete name (e.g. wayuo): ").strip().lower()
-    if not athlete_name:
-        print("❌ Athlete name cannot be empty.")
+    try:
+        athlete_name = validate_athlete_slug(input("Athlete slug (e.g. dan or p'kao): "))
+    except ValueError as exc:
+        print(f"❌ Invalid athlete slug: {exc}.")
+        sys.exit(1)
+
+    try:
+        harden_garmin_private_dirs()
+    except Exception as exc:
+        print(f"❌ Cannot secure the token directory: {exc}")
         sys.exit(1)
 
     token_dir = PROJECT_ROOT / "tokens" / athlete_name

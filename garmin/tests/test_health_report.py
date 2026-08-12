@@ -6,9 +6,9 @@ dashboard.py / notify_sync.ps1 จริงของโปรเจกต์ เ
 import importlib.util
 import io
 import json
+import os
 import shutil
 import sqlite3
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -132,6 +132,53 @@ class ScheduledTaskChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
         findings = hr.check_scheduled_tasks(provider=provider, now=now)
         wellness = [f for f in findings if f.check == "scheduled_task:Run-Performance-Garmin-Wellness"]
         self.assertEqual(wellness[0].level, hr.OK)
+
+    def test_nonzero_last_result_is_error_even_when_old_lane_status_is_ok(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        self.write_lane_status("fast", now - timedelta(minutes=2), ok=True)
+
+        findings = hr.check_scheduled_tasks(
+            provider=lambda name: (
+                "Last Run Time: 8/6/2026 11:58:00 AM\n"
+                "Last Result: 5\nStatus: Ready\n"
+            ),
+            now=now,
+        )
+        fast = find(findings, "scheduled_task:Run-Performance-Garmin-Fast")[0]
+        self.assertEqual(fast.level, hr.ERROR)
+        self.assertIn("LastTaskResult=5", fast.message)
+
+    def test_missing_or_empty_lane_status_is_not_reported_ok(self):
+        findings = hr.check_scheduled_tasks(provider=lambda name: (
+            "Last Run Time: 8/6/2026 11:58:00 AM\n"
+            "Last Result: 0\nStatus: Ready\n"
+        ))
+        self.assertTrue(findings)
+        self.assertTrue(all(f.level == hr.WARNING for f in findings))
+
+    def test_malformed_lane_results_are_warning_not_crash_or_ok(self):
+        lane_dir = self.data_dir / "sync_lane"
+        lane_dir.mkdir(parents=True)
+        for lane in hr.EXPECTED_LANES:
+            (lane_dir / f"{lane}.json").write_text(
+                json.dumps({"run_at": "2026-08-06T11:58:00", "results": ["bad"]}),
+                encoding="utf-8",
+            )
+        findings = hr.check_scheduled_tasks(provider=lambda name: (
+            "Last Run Time: 8/6/2026 11:58:00 AM\n"
+            "Last Result: 0\nStatus: Ready\n"
+        ))
+        self.assertTrue(all(f.level == hr.WARNING for f in findings))
+
+    def test_disabled_expected_task_is_error(self):
+        now = datetime(2026, 8, 6, 12, 0, 0)
+        for lane in hr.EXPECTED_LANES:
+            self.write_lane_status(lane, now - timedelta(minutes=2), ok=True)
+        findings = hr.check_scheduled_tasks(provider=lambda name: (
+            "Last Run Time: 8/6/2026 11:58:00 AM\n"
+            "Last Result: 0\nStatus: Disabled\n"
+        ))
+        self.assertTrue(all(f.level == hr.ERROR for f in findings))
 
     def test_non_windows_provider_is_skipped_not_broken(self):
         # จำลอง "เครื่องนี้ไม่ใช่ Windows" แบบตายตัว ไม่ผูกกับ OS จริงที่รันเทส —
@@ -327,6 +374,17 @@ class DiskSpaceTests(unittest.TestCase):
         findings = hr.check_disk_space(disk_usage=boom)
         self.assertEqual(findings[0].level, hr.WARNING)
 
+    def test_backup_volume_is_checked_separately_from_live_data_volume(self):
+        usages = iter((
+            self._fake_usage(500, 300)("data"),
+            self._fake_usage(100, 1)("backup"),
+        ))
+        findings = hr.check_disk_space(disk_usage=lambda path: next(usages))
+        self.assertEqual(len(findings), 2)
+        self.assertEqual(findings[0].level, hr.OK)
+        self.assertEqual(findings[1].level, hr.ERROR)
+        self.assertEqual(findings[1].check, "disk_space:backup")
+
 
 class DatetimeNormalizationTests(IsolatedHealthDirMixin, unittest.TestCase):
     """เทส regression ของบั๊กจริงที่พังบน Windows: 'can't compare offset-naive and
@@ -448,6 +506,88 @@ class LaneLimitConsistencyRealFilesTest(unittest.TestCase):
         self.assertEqual(findings[0].level, hr.OK, msg=findings[0].message)
 
 
+class PrivateAclChecksTests(unittest.TestCase):
+    def test_exact_private_acl_is_ok(self):
+        findings = hr.check_private_acls(provider=lambda: {
+            "ok": True,
+            "available": True,
+            "scanned": 17,
+            "problems": [],
+        })
+        self.assertEqual(findings[0].level, hr.OK)
+        self.assertIn("17", findings[0].message)
+
+    def test_acl_drift_is_error_without_disclosing_private_paths(self):
+        findings = hr.check_private_acls(provider=lambda: {
+            "ok": False,
+            "available": True,
+            "scanned": 17,
+            "problems": [
+                {"path": r"D:\\private\\athlete-name", "code": "unexpected_ace"},
+                {"path": r"D:\\private\\athlete-name", "code": "wrong_owner"},
+            ],
+        })
+        self.assertEqual(findings[0].level, hr.ERROR)
+        self.assertIn("unexpected_ace", findings[0].message)
+        self.assertNotIn("athlete-name", findings[0].message)
+
+    def test_acl_check_unavailable_off_windows_is_warning(self):
+        def unavailable():
+            raise hr.PrivateAclUnavailable("not Windows")
+
+        findings = hr.check_private_acls(provider=unavailable)
+        self.assertEqual(findings[0].level, hr.WARNING)
+
+    def test_default_provider_is_read_only_recursive_and_checks_task_users(self):
+        completed = type("Completed", (), {
+            "returncode": 0,
+            "stdout": b'{"ok":true,"available":true,"scanned":4,"problems":[]}',
+            "stderr": b"",
+        })()
+        with (
+            mock.patch.object(hr.os, "name", "nt"),
+            mock.patch.object(hr.subprocess, "run", return_value=completed) as run,
+        ):
+            payload = hr.default_private_acl_provider()
+
+        self.assertTrue(payload["ok"])
+        command = run.call_args.args[0]
+        self.assertIn("-CheckOnly", command)
+        self.assertIn("-Recurse", command)
+        self.assertIn("-CheckTaskPrincipals", command)
+        self.assertNotIn("-Targets", command)
+
+
+class HealthcheckSecretStorageChecksTests(unittest.TestCase):
+    def test_dpapi_only_storage_is_ok(self):
+        findings = hr.check_healthcheck_secret_storage(
+            provider=lambda: {"dpapi_present": True, "machine_value_present": False}
+        )
+        self.assertEqual(findings[0].level, hr.OK)
+
+    def test_machine_scope_copy_is_error_without_printing_value(self):
+        findings = hr.check_healthcheck_secret_storage(
+            provider=lambda: {"dpapi_present": True, "machine_value_present": True}
+        )
+        self.assertEqual(findings[0].level, hr.ERROR)
+        self.assertIn("machine-scope", findings[0].message)
+        self.assertNotIn("hc-ping.com", findings[0].message)
+
+    def test_missing_optional_configuration_is_warning(self):
+        findings = hr.check_healthcheck_secret_storage(
+            provider=lambda: {"dpapi_present": False, "machine_value_present": False}
+        )
+        self.assertEqual(findings[0].level, hr.WARNING)
+
+    @unittest.skipUnless(os.name == "nt", "Windows registry metadata test")
+    def test_presence_probe_does_not_need_to_read_value_data(self):
+        self.assertFalse(
+            hr._machine_environment_value_present(
+                "RUN_PERFORMANCE_SYNTHETIC_VALUE_THAT_DOES_NOT_EXIST"
+            )
+        )
+
+
 class ReportOutputTests(IsolatedHealthDirMixin, unittest.TestCase):
     def test_exit_code_zero_when_no_error(self):
         fixed = [hr.Finding("x", hr.OK, "fine"), hr.Finding("y", hr.WARNING, "meh")]
@@ -508,8 +648,17 @@ class ProductionDataIsolationTests(unittest.TestCase):
             prev_data = hr.use_data_dir(data_dir)
             prev_backup = hr.use_backup_dir(backup_dir)
             try:
-                hr.run_all_checks(schtasks_provider=lambda name: (_ for _ in ()).throw(
-                    hr.SchtasksUnavailable("test")))
+                hr.run_all_checks(
+                    schtasks_provider=lambda name: (_ for _ in ()).throw(
+                        hr.SchtasksUnavailable("test")
+                    ),
+                    acl_provider=lambda: {
+                        "ok": True, "available": True, "scanned": 0, "problems": []
+                    },
+                    healthcheck_storage_provider=lambda: {
+                        "dpapi_present": False, "machine_value_present": False
+                    },
+                )
             finally:
                 hr.use_data_dir(prev_data)
                 hr.use_backup_dir(prev_backup)

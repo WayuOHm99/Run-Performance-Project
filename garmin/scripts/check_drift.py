@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""ตรวจ coverage, schema drift, partial snapshots และค่าผิดช่วงแบบ read-only.
+"""ตรวจ coverage, schema drift, partial snapshots และค่าผิดช่วงแบบ read-only โดยปริยาย.
+
+Scheduled Task ใช้ ``--record-deep-status`` เพื่อบันทึกเฉพาะผลล้มเหลวลง deep.json
+แบบ atomic; ถ้าไม่ใส่ flag นี้สคริปต์จะไม่เขียนไฟล์ใด ๆ.
 
 ใช้:
     python scripts/check_drift.py
@@ -146,6 +149,37 @@ def collect(conn: sqlite3.Connection, rows, *, today=None):
     return athletes, all_findings
 
 
+def record_deep_lane_failure(findings: list) -> None:
+    """Persist data-quality/drift failure in the deep lane atomically."""
+    path = DATA_DIR / "sync_lane" / "deep.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("lane") != "deep":
+        raise ValueError("deep lane status is missing or malformed")
+    results = payload.get("results")
+    if not isinstance(results, list) or not results or not all(
+        isinstance(item, dict) and type(item.get("ok")) is bool
+        for item in results
+    ):
+        raise ValueError("deep lane results are missing or malformed")
+
+    results = [item for item in results if item.get("reason") != "drift"]
+    results.append({
+        "slug": "data quality/schema drift",
+        "ok": False,
+        "reason": "drift",
+        "warnings": [f"พบข้อมูลน่าสงสัย {len(findings)} จุด; ดู deepsync log"],
+    })
+    payload["results"] = results
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--athlete", default=None, help="slug เจาะจง (ไม่ใส่ = ทุกคน)")
@@ -155,6 +189,11 @@ def main(argv=None) -> int:
         type=date.fromisoformat,
         default=None,
         help="วันไทย YYYY-MM-DD สำหรับตรวจย้อนหลังแบบทำซ้ำได้ (ค่าเริ่มต้น = วันนี้ Asia/Bangkok)",
+    )
+    parser.add_argument(
+        "--record-deep-status",
+        action="store_true",
+        help="บันทึก finding ลง sync_lane/deep.json แบบ atomic (ใช้โดย Scheduled Task)",
     )
     args = parser.parse_args(argv)
 
@@ -196,6 +235,25 @@ def main(argv=None) -> int:
     finally:
         conn.close()
 
+    if args.athlete and not rows:
+        message = f"ไม่พบนักกีฬา slug={args.athlete!r}"
+        if args.json:
+            print(json.dumps({
+                "ok": False,
+                "error": message,
+                "today_bangkok": dq.bangkok_today(args.today).isoformat(),
+            }, ensure_ascii=False))
+        else:
+            print(f"❌ {message}")
+        return 1
+
+    lane_status_error = None
+    if args.record_deep_status and findings:
+        try:
+            record_deep_lane_failure(findings)
+        except Exception as exc:
+            lane_status_error = str(exc)
+
     if args.json:
         payload = {
             "ok": not findings,
@@ -209,6 +267,8 @@ def main(argv=None) -> int:
                 "errors": sum(f["level"] == "ERROR" for f in findings),
             },
         }
+        if lane_status_error:
+            payload["lane_status_error"] = lane_status_error
         print(json.dumps(
             dq.json_safe(payload), ensure_ascii=False, indent=2, allow_nan=False,
         ))
@@ -232,6 +292,8 @@ def main(argv=None) -> int:
             print("   ✅ ไม่พบ drift, partial snapshot หรือค่าผิดช่วง")
 
     print("\n" + "=" * 72)
+    if lane_status_error:
+        print(f"❌ บันทึกสถานะ deep lane ไม่สำเร็จ: {lane_status_error}")
     if findings:
         print(f"⚠️  รวมพบ {len(findings)} จุดน่าสงสัย — ตรวจ Garmin Cloud/parser ก่อนแก้ข้อมูล")
     else:

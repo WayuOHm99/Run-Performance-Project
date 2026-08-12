@@ -8,6 +8,7 @@ dashboard.py import ตรง ๆ ไม่ได้ (มันรัน streaml
 
 import ast
 import importlib.util
+import math
 import re
 import shutil
 import sqlite3
@@ -45,10 +46,12 @@ class _FakeStreamlit:
 def extract_load_splits(db_path):
     tree = ast.parse(DASHBOARD_SRC)
     picked = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name == "load_splits"]
-    assert len(picked) == 1, "ไม่พบ load_splits ใน dashboard.py"
+              if isinstance(n, ast.FunctionDef)
+              and n.name in {"connect_db", "load_splits"}]
+    assert {node.name for node in picked} == {"connect_db", "load_splits"}, \
+        "ไม่พบ connect_db/load_splits ใน dashboard.py"
     ns = {"st": _FakeStreamlit, "sqlite3": sqlite3, "pd": pd,
-          "DB_PATH": str(db_path), "CACHE_TTL_SEC": 0}
+          "DB_PATH": Path(db_path), "CACHE_TTL_SEC": 0}
     exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
     return ns["load_splits"]
 
@@ -62,6 +65,16 @@ def extract_session_candidates():
     ns = {}
     exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
     return ns["prepare_session_candidates"]
+
+
+def extract_distance_half_analysis():
+    tree = ast.parse(DASHBOARD_SRC)
+    picked = [n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == "analyze_distance_halves"]
+    assert len(picked) == 1, "ไม่พบ analyze_distance_halves ใน dashboard.py"
+    ns = {"pd": pd, "math": math}
+    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
+    return ns["analyze_distance_halves"]
 
 
 def extract_prep_block():
@@ -151,6 +164,53 @@ class ShortSplitDisplayTests(unittest.TestCase):
         # กิจกรรมที่ยังไม่ถูกดึง splits จริง ๆ = แถวว่าง → ข้อความ "ยังไม่ได้ดึง" ถูกต้อง
         splits = run_splits_tab(self.load_splits(self.ACTIVITY_ID + 1))
         self.assertTrue(splits.empty)
+
+
+class EqualDistanceHalfTests(unittest.TestCase):
+    def test_midpoint_crossing_lap_is_fractionally_allocated_by_distance(self):
+        splits = pd.DataFrame({
+            "distance_m": [800.0, 400.0],
+            "duration_sec": [240.0, 240.0],
+            "avg_hr": [160.0, None],
+        })
+
+        p1, p2, hr1, hr2 = extract_distance_half_analysis()(splits)
+
+        self.assertAlmostEqual(p1, 5.0)
+        self.assertAlmostEqual(p2, 8.3333333333)
+        self.assertAlmostEqual(hr1, 160.0)
+        # Only the 200 m portion with a real HR contributes to this denominator.
+        self.assertAlmostEqual(hr2, 160.0)
+
+    def test_missing_hr_duration_does_not_dilute_the_other_half(self):
+        splits = pd.DataFrame({
+            "distance_m": [500.0, 500.0],
+            "duration_sec": [150.0, 300.0],
+            "avg_hr": [160.0, None],
+        })
+
+        _, _, hr1, hr2 = extract_distance_half_analysis()(splits)
+
+        self.assertAlmostEqual(hr1, 160.0)
+        self.assertTrue(pd.isna(hr2))
+
+    def test_non_positive_hr_values_are_treated_as_missing(self):
+        splits = pd.DataFrame({
+            "distance_m": [500.0, 500.0],
+            "duration_sec": [150.0, 300.0],
+            "avg_hr": [0.0, -1.0],
+        })
+
+        _, _, hr1, hr2 = extract_distance_half_analysis()(splits)
+
+        self.assertTrue(pd.isna(hr1))
+        self.assertTrue(pd.isna(hr2))
+
+    def test_splits_tab_uses_equal_distance_analysis(self):
+        self.assertIn(
+            "p1, p2, hr1, hr2 = analyze_distance_halves(splits)",
+            DASHBOARD_SRC,
+        )
 
 
 class SessionCandidateTests(unittest.TestCase):

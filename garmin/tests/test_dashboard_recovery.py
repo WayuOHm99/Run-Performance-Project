@@ -2,12 +2,18 @@
 
 import ast
 import datetime
+import math
+import os
+import sqlite3
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+from streamlit.testing.v1 import AppTest
 
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +33,10 @@ def extract_helpers(*names):
     missing = wanted - found
     if missing:
         raise AssertionError(f"dashboard.py missing helper(s): {sorted(missing)}")
-    namespace = {"pd": pd, "datetime": datetime, "ZoneInfo": ZoneInfo}
+    namespace = {
+        "pd": pd, "datetime": datetime, "ZoneInfo": ZoneInfo,
+        "math": math, "Path": Path, "sqlite3": sqlite3,
+    }
     exec(
         compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
         namespace,
@@ -40,7 +49,9 @@ HELPERS = extract_helpers(
     "has_any_value",
     "available_series",
     "latest_field",
+    "body_battery_snapshots",
     "period_metric",
+    "calendar_aligned_frame",
     "fmt_recovery_time",
     "get_recovery_minutes",
     "recovery_minutes_series",
@@ -51,6 +62,11 @@ HELPERS = extract_helpers(
     "readiness_when",
     "wellness_quality_flags",
     "team_status",
+    "compute_acwr",
+    "aggregate_pace_min_per_km",
+    "usable_hr_zone_rows",
+    "expected_lane_status_paths",
+    "validate_lane_status",
 )
 
 
@@ -100,6 +116,34 @@ class LatestPerFieldTests(unittest.TestCase):
             "11:30",
             HELPERS["readiness_when"](latest, date(2026, 8, 9)),
         )
+
+    def test_body_battery_keeps_intraday_display_separate_from_completed_alert_value(self):
+        frame = pd.DataFrame({
+            "calendar_date": ["2026-08-08", "2026-08-09"],
+            "body_battery_high": [30, 55],
+            "bb_most_recent": [8, 50],
+        })
+
+        display, completed = HELPERS["body_battery_snapshots"](
+            frame, date(2026, 8, 9)
+        )
+
+        self.assertEqual((display["value"], display["date"]), (50, date(2026, 8, 9)))
+        self.assertEqual((completed["value"], completed["date"]), (30, date(2026, 8, 8)))
+
+    def test_body_battery_fallback_uses_completed_daily_high_not_prior_intraday_low(self):
+        frame = pd.DataFrame({
+            "calendar_date": ["2026-08-08"],
+            "body_battery_high": [75],
+            "bb_most_recent": [12],
+        })
+
+        display, completed = HELPERS["body_battery_snapshots"](
+            frame, date(2026, 8, 9)
+        )
+
+        self.assertEqual(display["value"], 75)
+        self.assertEqual(completed["value"], 75)
 
 
 class PeriodAverageTests(unittest.TestCase):
@@ -158,6 +202,91 @@ class PeriodAverageTests(unittest.TestCase):
         self.assertEqual(metric["count"], 2)
         self.assertEqual(metric["total_days"], 3)
         self.assertFalse(metric["excluded_today"])
+
+
+class TrainingMathTests(unittest.TestCase):
+    def test_period_pace_is_total_duration_over_total_valid_distance(self):
+        activities = pd.DataFrame({
+            "distance_m": [1_000, 9_000, 0, 5_000, None],
+            "duration_sec": [240, 3_240, 600, None, 1_800],
+            # Deliberately misleading session means: this column must not be averaged.
+            "avg_pace_min_per_km": [4, 6, 10, 10, 10],
+        })
+
+        pace = HELPERS["aggregate_pace_min_per_km"](activities)
+
+        self.assertAlmostEqual(pace, 5.8)
+
+    def test_acwr_counts_known_rest_days_before_the_first_recent_workload(self):
+        end = date(2026, 8, 9)
+        daily = pd.DataFrame({"date": [pd.Timestamp(end)], "value": [10.0]})
+
+        result = HELPERS["compute_acwr"](
+            daily, end, history_start=end - datetime.timedelta(days=27)
+        )
+
+        self.assertEqual(len(result), 28)
+        self.assertAlmostEqual(result.iloc[-1]["acute"], 10.0)
+        self.assertAlmostEqual(result.iloc[-1]["chronic"], 2.5)
+        self.assertAlmostEqual(result.iloc[-1]["acwr"], 4.0)
+
+    def test_zero_only_hr_zone_rows_are_not_treated_as_measurements(self):
+        columns = [f"hr_zone{i}_sec" for i in range(1, 6)]
+        activities = pd.DataFrame([
+            {"activity_id": 1, **dict.fromkeys(columns, 0)},
+            {"activity_id": 2, **dict.fromkeys(columns, None)},
+            {"activity_id": 3, **dict.fromkeys(columns, 0), "hr_zone2_sec": 900},
+        ])
+
+        usable = HELPERS["usable_hr_zone_rows"](activities, columns)
+
+        self.assertEqual(usable["activity_id"].tolist(), [3])
+
+
+class CalendarAndLaneTests(unittest.TestCase):
+    def test_calendar_alignment_inserts_an_explicit_nan_for_a_missing_day(self):
+        frame = pd.DataFrame({
+            "calendar_date": ["2026-08-07", "2026-08-09"],
+            "vo2max_trend": [48, 49],
+        })
+
+        aligned = HELPERS["calendar_aligned_frame"](
+            frame, "calendar_date", date(2026, 8, 7), date(2026, 8, 9)
+        )
+
+        self.assertEqual(len(aligned), 3)
+        self.assertEqual(aligned.loc[1, "calendar_date"].date(), date(2026, 8, 8))
+        self.assertTrue(pd.isna(aligned.loc[1, "vo2max_trend"]))
+
+    def test_lane_inventory_returns_every_expected_lane_even_when_files_are_missing(self):
+        expected = ["full", "fast", "wellness", "reconcile", "deep", "backup"]
+        with tempfile.TemporaryDirectory(prefix="dashboard-lanes-") as tmp:
+            lane_dir = Path(tmp)
+            (lane_dir / "full.json").write_text("{}", encoding="utf-8")
+
+            found = dict(HELPERS["expected_lane_status_paths"](lane_dir, expected))
+
+        self.assertEqual(list(found), expected)
+        self.assertEqual(found["full"].name, "full.json")
+        self.assertIsNone(found["fast"])
+        self.assertIsNone(found["backup"])
+
+    def test_lane_status_rejects_empty_malformed_or_mislabeled_results(self):
+        validate = HELPERS["validate_lane_status"]
+        base = {"lane": "fast", "run_at": "2026-08-11T08:50:02"}
+
+        for results in ([], ["not-a-result"], [{"slug": "tong"}], [{"ok": 1}]):
+            with self.subTest(results=results):
+                with self.assertRaises(ValueError):
+                    validate({**base, "results": results}, "fast")
+        with self.assertRaises(ValueError):
+            validate({**base, "lane": "full", "results": [{"ok": True}]}, "fast")
+
+        run_at, results = validate(
+            {**base, "results": [{"slug": "tong", "ok": True}]}, "fast"
+        )
+        self.assertEqual(run_at, datetime.datetime(2026, 8, 11, 8, 50, 2))
+        self.assertTrue(results[0]["ok"])
 
 
 class FormattingAndVisibilityTests(unittest.TestCase):
@@ -299,6 +428,56 @@ class FormattingAndVisibilityTests(unittest.TestCase):
         self.assertTrue(any("3 ชม." in flag for flag in flags))
 
 
+class DashboardDatabaseIsolationTests(unittest.TestCase):
+    @staticmethod
+    def _connect_function(db_path):
+        tree = ast.parse(DASHBOARD_SRC)
+        node = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "connect_db"
+        )
+        namespace = {"DB_PATH": Path(db_path), "sqlite3": sqlite3}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "dashboard.py", "exec"), namespace)
+        return namespace["connect_db"]
+
+    def test_read_only_connection_does_not_create_a_missing_database(self):
+        with tempfile.TemporaryDirectory(prefix="dashboard db # ") as tmp:
+            missing = Path(tmp) / "missing # database.db"
+
+            with self.assertRaises(sqlite3.OperationalError):
+                self._connect_function(missing)()
+
+            self.assertFalse(missing.exists())
+
+    def test_connection_handles_quoted_windows_paths_and_rejects_writes(self):
+        with tempfile.TemporaryDirectory(prefix="dashboard db # ") as tmp:
+            db_path = Path(tmp) / "garmin # test.db"
+            writer = sqlite3.connect(db_path)
+            writer.execute("CREATE TABLE marker (value INTEGER)")
+            writer.execute("INSERT INTO marker VALUES (7)")
+            writer.commit()
+            writer.close()
+
+            conn = self._connect_function(db_path)()
+            try:
+                self.assertEqual(conn.execute("SELECT value FROM marker").fetchone()[0], 7)
+                self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
+                with self.assertRaises(sqlite3.OperationalError):
+                    conn.execute("INSERT INTO marker VALUES (8)")
+            finally:
+                conn.close()
+
+    def test_app_respects_garmin_data_dir_and_does_not_create_missing_db(self):
+        with tempfile.TemporaryDirectory(prefix="dashboard-app-") as tmp:
+            expected_db = Path(tmp) / "garmin.db"
+            with patch.dict(os.environ, {"GARMIN_DATA_DIR": tmp}, clear=False):
+                app = AppTest.from_file(str(DASHBOARD_PATH)).run(timeout=15)
+
+            self.assertFalse(expected_db.exists())
+            self.assertFalse(list(app.exception))
+            self.assertTrue(any(str(expected_db) in item.value for item in app.error))
+
+
 class DashboardSourceIntegrationTests(unittest.TestCase):
     """Prove the tested helpers are wired into the deployed Streamlit script."""
 
@@ -309,6 +488,14 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
                 f'latest_field(recent_wellness, "{column}")',
                 DASHBOARD_SRC,
             )
+        self.assertIn(
+            "bb_snap, _ = body_battery_snapshots(recent_wellness, today)",
+            DASHBOARD_SRC,
+        )
+        self.assertIn(
+            "bb_display_snap, bb_completed_snap = body_battery_snapshots(w, today)",
+            DASHBOARD_SRC,
+        )
         self.assertIn(
             "สถานะโหลดต้องเตือนแม้ wellness วันนี้ยังไม่มา",
             DASHBOARD_SRC,
@@ -345,6 +532,8 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
         ):
             self.assertIn(assignment, DASHBOARD_SRC)
         self.assertGreaterEqual(DASHBOARD_SRC.count("connectgaps=False"), 6)
+        self.assertIn("wellness_plot_df = calendar_aligned_frame(", DASHBOARD_SRC)
+        self.assertIn('x=wellness_plot_df["calendar_date"]', DASHBOARD_SRC)
         self.assertIn('"sleep_score": "คะแนนการนอน"', DASHBOARD_SRC)
         self.assertIn('"body_battery_high": "Body Battery สูงสุดของวัน"', DASHBOARD_SRC)
 
@@ -372,10 +561,10 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
 
     def test_recovery_trend_keeps_null_calendar_rows_for_real_plotly_gaps(self):
         self.assertIn(
-            "recovery_minutes = recovery_minutes_series(wellness_df)",
+            "recovery_minutes = recovery_minutes_series(wellness_plot_df)",
             DASHBOARD_SRC,
         )
-        self.assertIn('x=wellness_df["calendar_date"]', DASHBOARD_SRC)
+        self.assertIn('x=wellness_plot_df["calendar_date"]', DASHBOARD_SRC)
         self.assertIn("y=recovery_minutes / 60", DASHBOARD_SRC)
         self.assertNotIn("wellness_df.loc[recovery_mask", DASHBOARD_SRC)
 
@@ -391,6 +580,57 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
         self.assertIn('selected_columns.append("last_seen_at_utc")', DASHBOARD_SRC)
         self.assertIn("device_inventory_labels(records, stale_days=90)", DASHBOARD_SRC)
         self.assertIn("กรองรายการที่ยืนยันว่า last_seen เกิน 90 วัน", DASHBOARD_SRC)
+
+    def test_training_math_and_hr_zone_fallbacks_use_valid_measurements(self):
+        self.assertIn("avg_pace_raw = aggregate_pace_min_per_km(runs_df)", DASHBOARD_SRC)
+        self.assertIn("history_start=history_start", DASHBOARD_SRC)
+        self.assertIn("zdf = usable_hr_zone_rows(activity_df, zone_cols)", DASHBOARD_SRC)
+        self.assertIn('acwr_valid = acwr_view.dropna(subset=["acwr"])', DASHBOARD_SRC)
+        self.assertNotIn(
+            'acwr_df[(acwr_df["date"] >= pd.Timestamp(start_date)) & acwr_df["acwr"].notna()]',
+            DASHBOARD_SRC,
+        )
+
+    def test_fitness_age_is_not_conditioned_on_vo2_availability(self):
+        self.assertIn("if not vo2.empty or not _fit_age.empty:", DASHBOARD_SRC)
+        self.assertNotIn("if not vo2.empty:\n        first_v", DASHBOARD_SRC)
+
+    def test_all_expected_sync_lanes_are_rendered(self):
+        self.assertIn(
+            "_lane_paths = dict(expected_lane_status_paths(_lane_dir, _LANE_LABEL))",
+            DASHBOARD_SRC,
+        )
+        self.assertIn("ยังไม่พบประวัติการรัน", DASHBOARD_SRC)
+
+    def test_diagnostics_point_to_the_hardened_private_log_directory(self):
+        self.assertIn(
+            r"C:\\Backup\\run-performance-logs\\garmin-sync-<สาย>.log",
+            DASHBOARD_SRC,
+        )
+        self.assertIn(
+            r"C:\\Backup\\run-performance-logs\\backup-log.txt",
+            DASHBOARD_SRC,
+        )
+        self.assertNotIn(r"C:\\Backup\\backup-log.txt", DASHBOARD_SRC)
+        self.assertIn(
+            '"drift": "data quality/schema drift — ดู deepsync log"',
+            DASHBOARD_SRC,
+        )
+        self.assertIn(
+            '"payload": "Garmin response/payload ผิดรูปแบบหรือไม่ครบ — ดู sync log"',
+            DASHBOARD_SRC,
+        )
+
+    def test_sleep_respiration_is_treated_as_a_finalized_overnight_metric(self):
+        self.assertIn(
+            '("หายใจตอนนอน", "avg_sleep_respiration", " brpm", False)',
+            DASHBOARD_SRC,
+        )
+
+    def test_database_access_is_environment_scoped_and_read_only(self):
+        self.assertIn('os.environ.get("GARMIN_DATA_DIR"', DASHBOARD_SRC)
+        self.assertIn('?mode=ro', DASHBOARD_SRC)
+        self.assertEqual(DASHBOARD_SRC.count("sqlite3.connect("), 1)
 
 
 if __name__ == "__main__":

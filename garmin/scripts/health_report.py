@@ -49,6 +49,9 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # ...\garmin
+ACL_SCRIPT = PROJECT_ROOT.parent / "scripts" / "harden_private_acl.ps1"
+HEALTHCHECK_ENV_VAR = "HEALTHCHECK_BACKUP_URL"
+HEALTHCHECK_DPAPI_FILE = ".healthcheck-backup-url.dpapi"
 
 # ⚠️ path ที่ "อ่านได้" ต้องแตกจาก DATA_DIR/BACKUP_DIR เดียว — pattern เดียวกับ
 # fetch_all.py (use_data_dir) กัน CI/เทสอ่านผิดโฟลเดอร์ (เทสนี้ไม่เขียนอะไรอยู่แล้ว
@@ -218,9 +221,16 @@ def _lane_run_at(lane: str):
 def _lane_ok(lane: str):
     """คืน (ok: bool, failed_results: list) หรือ None ถ้าไม่มีสถานะให้ดู"""
     data = _read_json(_lane_status_path(lane))
-    if not data:
+    if not isinstance(data, dict):
         return None
-    results = data.get("results") or []
+    results = data.get("results")
+    if not isinstance(results, list) or not results:
+        return None
+    if not all(
+        isinstance(item, dict) and type(item.get("ok")) is bool
+        for item in results
+    ):
+        return None
     failed = [r for r in results if not r.get("ok", True)]
     return (len(failed) == 0, failed)
 
@@ -287,6 +297,170 @@ def _decode_windows_output(raw) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+# ── Private Windows ACLs (read-only verification) ───────────────────
+
+class PrivateAclUnavailable(Exception):
+    """The exact Windows DACL cannot be inspected on this platform."""
+
+
+def default_private_acl_provider() -> dict:
+    """Run the repository ACL verifier in check-only mode and return its JSON."""
+    if os.name != "nt":
+        raise PrivateAclUnavailable("not Windows")
+    if not ACL_SCRIPT.is_file():
+        raise RuntimeError("ACL verifier script is missing")
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ACL_SCRIPT),
+                "-Scope",
+                "All",
+                "-CheckOnly",
+                "-Recurse",
+                "-CheckTaskPrincipals",
+                "-Json",
+            ],
+            capture_output=True,
+            text=False,
+            timeout=180,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("powershell.exe is unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ACL verification timed out") from exc
+
+    output = _decode_windows_output(result.stdout).strip()
+    try:
+        payload = json.loads(output)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("ACL verifier returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("ACL verifier JSON is not an object")
+    if result.returncode != 0 and payload.get("ok"):
+        payload["ok"] = False
+        payload.setdefault("problems", []).append({"code": "verifier_exit_code"})
+    return payload
+
+
+def check_private_acls(provider=None) -> list:
+    """Verify the five private roots without leaking athlete/file names."""
+    provider = provider or default_private_acl_provider
+    try:
+        payload = provider()
+    except PrivateAclUnavailable as exc:
+        return [Finding("private_acl", WARNING, f"ตรวจไม่ได้ (skipped): {exc}")]
+    except Exception as exc:
+        return [Finding("private_acl", ERROR, f"ตัวตรวจ Windows ACL ล้มเหลว: {exc}")]
+
+    if not isinstance(payload, dict):
+        return [Finding("private_acl", ERROR, "ตัวตรวจ Windows ACL คืนข้อมูลผิดรูปแบบ")]
+    scanned = int(payload.get("scanned") or 0)
+    if payload.get("ok") is True and payload.get("available") is not False:
+        return [Finding(
+            "private_acl", OK,
+            f"ACL ส่วนตัวถูกต้องครบ {scanned} paths (รวม Scheduled Task principals)",
+        )]
+
+    problems = payload.get("problems") or []
+    codes = sorted({
+        str(item.get("code", "unknown"))
+        for item in problems if isinstance(item, dict)
+    })
+    code_text = ", ".join(codes) if codes else "unknown"
+    return [Finding(
+        "private_acl", ERROR,
+        f"พบ ACL/Task principal ไม่ปลอดภัย {len(problems)} จุดใน {scanned} paths "
+        f"(ประเภท: {code_text})",
+    )]
+
+
+class HealthcheckStorageUnavailable(Exception):
+    """Presence-only registry inspection is unavailable on this platform."""
+
+
+def _machine_environment_value_present(name: str) -> bool:
+    """Query only registry value metadata; never read the bearer value bytes."""
+    import ctypes
+    from ctypes import wintypes
+    import winreg
+
+    subkey = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey, 0, winreg.KEY_QUERY_VALUE) as key:
+        value_type = wintypes.DWORD()
+        size = wintypes.DWORD()
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.RegQueryValueExW.argtypes = [
+            wintypes.HKEY, wintypes.LPCWSTR, ctypes.c_void_p,
+            ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.RegQueryValueExW.restype = wintypes.LONG
+        result = advapi32.RegQueryValueExW(
+            wintypes.HKEY(int(key)), name, None,
+            ctypes.byref(value_type), None, ctypes.byref(size),
+        )
+    if result == 0:
+        return True
+    if result == 2:  # ERROR_FILE_NOT_FOUND
+        return False
+    raise ctypes.WinError(result)
+
+
+def default_healthcheck_storage_provider() -> dict:
+    if os.name != "nt":
+        raise HealthcheckStorageUnavailable("not Windows")
+    secret_path = DATA_DIR / HEALTHCHECK_DPAPI_FILE
+    dpapi_present = secret_path.is_file() and secret_path.stat().st_size > 0
+    return {
+        "dpapi_present": dpapi_present,
+        "machine_value_present": _machine_environment_value_present(
+            HEALTHCHECK_ENV_VAR
+        ),
+    }
+
+
+def check_healthcheck_secret_storage(provider=None) -> list:
+    """Report storage posture without exposing or decrypting the bearer URL."""
+    provider = provider or default_healthcheck_storage_provider
+    try:
+        state = provider()
+    except HealthcheckStorageUnavailable as exc:
+        return [Finding(
+            "healthcheck_secret_storage", WARNING,
+            f"ตรวจไม่ได้ (skipped): {exc}",
+        )]
+    except Exception as exc:
+        return [Finding(
+            "healthcheck_secret_storage", ERROR,
+            f"ตรวจที่เก็บ Healthchecks secret ไม่สำเร็จ: {exc}",
+        )]
+
+    dpapi_present = state.get("dpapi_present") is True
+    machine_present = state.get("machine_value_present") is True
+    if machine_present:
+        return [Finding(
+            "healthcheck_secret_storage", ERROR,
+            "ยังมี machine-scope Healthchecks bearer ที่ผู้ใช้เครื่องอื่นอ่านได้; "
+            "ให้รัน migrate_healthcheck_secret.ps1 -RemoveMachineValue แบบ Administrator",
+        )]
+    if not dpapi_present:
+        return [Finding(
+            "healthcheck_secret_storage", WARNING,
+            "ไม่พบ DPAPI CurrentUser Healthchecks config (external backup monitor ปิดอยู่)",
+        )]
+    return [Finding(
+        "healthcheck_secret_storage", OK,
+        "Healthchecks config อยู่ใน DPAPI CurrentUser และไม่มี machine-scope copy",
+    )]
+
+
 def parse_schtasks_output(raw: str) -> dict:
     """แยก field จากผล `/FO LIST /V` (บรรทัดแบบ 'Key:    Value')"""
     fields = {}
@@ -300,6 +474,21 @@ def parse_schtasks_output(raw: str) -> dict:
         "last_result": fields.get("Last Result"),
         "status": fields.get("Status"),
     }
+
+
+def _parse_task_result(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() in {"N/A", "NEVER"}:
+        return None
+    try:
+        return int(text, 0)
+    except ValueError:
+        try:
+            return int(text)
+        except ValueError:
+            return None
 
 
 def check_scheduled_tasks(provider=None, now=None) -> list:
@@ -317,23 +506,50 @@ def check_scheduled_tasks(provider=None, now=None) -> list:
         info = parse_schtasks_output(raw)
         last_run = info.get("last_run_time")
         last_result = info.get("last_result")
+        status = (info.get("status") or "").strip()
         never_run = not last_run or last_run.strip().upper() in ("N/A", "NEVER", "")
+
+        if status.casefold() == "disabled":
+            findings.append(Finding(
+                f"scheduled_task:{task_name}", ERROR,
+                f"Scheduled Task ถูกปิด (Status={status})",
+            ))
+            continue
 
         if never_run:
             findings.append(Finding(f"scheduled_task:{task_name}", WARNING,
                                      f"ยังไม่เคยรัน (Last Run Time = {last_run or 'N/A'})"))
             continue
 
-        # LastTaskResult เชื่อไม่ได้เดี่ยว ๆ — bat จบด้วย notify ที่ exit 0 เสมอ (ดู CLAUDE.md)
-        # ต้อง cross-check กับสถานะสายจริงที่ fetch_all.py/backup_db.py เขียนเสมอ
+        # Wrappers propagate the worker result all the way through .bat + .vbs, while
+        # sync_lane confirms the application-level result.  Both signals must agree.
         lane_status = _lane_ok(lane)
-        note = " (cross-check กับ sync_lane เพราะ LastTaskResult เชื่อเดี่ยว ๆ ไม่ได้)"
+        result_code = _parse_task_result(last_result)
+        note = " (cross-check กับ sync_lane)"
         if lane_status is not None and lane_status[0] is False:
             reasons = ", ".join(r.get("reason", "?") for r in lane_status[1]) or "ไม่ทราบสาเหตุ"
             findings.append(Finding(
                 f"scheduled_task:{task_name}", ERROR,
                 f"LastRunTime={last_run} LastTaskResult={last_result} "
                 f"แต่สถานะสาย '{lane}' รายงานล้มเหลว ({reasons}){note}",
+            ))
+        elif result_code is None:
+            findings.append(Finding(
+                f"scheduled_task:{task_name}", WARNING,
+                f"LastTaskResult อ่านไม่ได้ ({last_result or 'N/A'}){note}",
+            ))
+        elif result_code != 0 and not (
+                result_code == 0x41301 and status.casefold() == "running"):
+            findings.append(Finding(
+                f"scheduled_task:{task_name}", ERROR,
+                f"LastRunTime={last_run} LastTaskResult={last_result} "
+                f"(ตัว worker/launcher คืน non-zero){note}",
+            ))
+        elif lane_status is None:
+            findings.append(Finding(
+                f"scheduled_task:{task_name}", WARNING,
+                f"LastRunTime={last_run} LastTaskResult={last_result} "
+                f"แต่ไม่มี sync_lane status ที่สมบูรณ์ให้ยืนยัน{note}",
             ))
         else:
             findings.append(Finding(
@@ -605,22 +821,34 @@ def check_data_quality(now=None) -> list:
 
 def check_disk_space(disk_usage=None) -> list:
     disk_usage = disk_usage or shutil.disk_usage
-    anchor = DATA_DIR if DATA_DIR.exists() else Path(DATA_DIR.anchor or ".")
-    try:
-        usage = disk_usage(str(anchor))
-    except OSError as e:
-        return [Finding("disk_space", WARNING, f"เช็คพื้นที่ดิสก์ไม่ได้ ({e})")]
+    findings = []
+    for label, path in (("data", DATA_DIR), ("backup", BACKUP_DIR)):
+        anchor = path if path.exists() else Path(path.anchor or ".")
+        try:
+            usage = disk_usage(str(anchor))
+        except OSError as e:
+            findings.append(Finding(
+                f"disk_space:{label}", WARNING,
+                f"เช็คพื้นที่ดิสก์ของ {label} ไม่ได้ ({e})",
+            ))
+            continue
 
-    free_gb = usage.free / (1024 ** 3)
-    total_gb = usage.total / (1024 ** 3) if usage.total else 0
-    free_pct = (usage.free / usage.total * 100) if usage.total else 0
-    msg = f"เหลือ {free_gb:.1f} GB ({free_pct:.1f}%) จากทั้งหมด {total_gb:.0f} GB"
+        free_gb = usage.free / (1024 ** 3)
+        total_gb = usage.total / (1024 ** 3) if usage.total else 0
+        free_pct = (usage.free / usage.total * 100) if usage.total else 0
+        msg = (
+            f"{label}: เหลือ {free_gb:.1f} GB ({free_pct:.1f}%) "
+            f"จากทั้งหมด {total_gb:.0f} GB"
+        )
 
-    if free_gb < DISK_ERROR_FREE_GB or free_pct < DISK_ERROR_FREE_PCT:
-        return [Finding("disk_space", ERROR, msg)]
-    if free_gb < DISK_WARN_FREE_GB or free_pct < DISK_WARN_FREE_PCT:
-        return [Finding("disk_space", WARNING, msg)]
-    return [Finding("disk_space", OK, msg)]
+        if free_gb < DISK_ERROR_FREE_GB or free_pct < DISK_ERROR_FREE_PCT:
+            level = ERROR
+        elif free_gb < DISK_WARN_FREE_GB or free_pct < DISK_WARN_FREE_PCT:
+            level = WARNING
+        else:
+            level = OK
+        findings.append(Finding(f"disk_space:{label}", level, msg))
+    return findings
 
 
 # ── 9. ความสอดคล้องของ 6 สาย: dashboard.py เทียบ notify_sync.ps1 ─────
@@ -670,7 +898,8 @@ def check_lane_limit_consistency(dashboard_path=None, watchdog_path=None) -> lis
 # ── รวมทุกเช็ค + CLI ─────────────────────────────────────────────
 
 def run_all_checks(*, now=None, schtasks_provider=None, disk_usage=None,
-                    dashboard_path=None, watchdog_path=None) -> list:
+                    dashboard_path=None, watchdog_path=None,
+                    acl_provider=None, healthcheck_storage_provider=None) -> list:
     now = _resolve_now(now)
     findings = []
     findings += check_scheduled_tasks(provider=schtasks_provider, now=now)
@@ -681,6 +910,10 @@ def run_all_checks(*, now=None, schtasks_provider=None, disk_usage=None,
     findings += check_data_quality(now=now)
     findings += check_disk_space(disk_usage=disk_usage)
     findings += check_lane_limit_consistency(dashboard_path=dashboard_path, watchdog_path=watchdog_path)
+    findings += check_private_acls(provider=acl_provider)
+    findings += check_healthcheck_secret_storage(
+        provider=healthcheck_storage_provider
+    )
     return findings
 
 

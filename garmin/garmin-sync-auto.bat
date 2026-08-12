@@ -7,9 +7,17 @@ rem in the .py/.ps1 files, not here.
 rem IMPORTANT: every sync lane logs to its OWN file. When two lanes shared one log,
 rem cmd.exe could not open the redirect target and the whole command line was skipped
 rem (python never ran, the round vanished silently). See scripts\prep_log.ps1.
-set "LOG=C:\Backup\garmin-sync-full.log"
+set "LOG=C:\Backup\run-performance-logs\garmin-sync-full.log"
+powershell -NoProfile -ExecutionPolicy Bypass -File "..\scripts\harden_private_acl.ps1" -Scope Logs -Recurse >nul 2>&1
+set "ACL_EXIT=%ERRORLEVEL%"
+if not "%ACL_EXIT%"=="0" exit /b %ACL_EXIT%
+powershell -NoProfile -ExecutionPolicy Bypass -File "..\scripts\harden_private_acl.ps1" -Scope Garmin -Recurse >nul 2>&1
+set "ACL_EXIT=%ERRORLEVEL%"
+if not "%ACL_EXIT%"=="0" exit /b %ACL_EXIT%
 rem rotate the log when oversized + write this round's ISO start marker for notify
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\prep_log.ps1" -LogPath "%LOG%" -Marker "data\sync_run_start.txt"
+set "PREP_EXIT=%ERRORLEVEL%"
+if not "%PREP_EXIT%"=="0" exit /b %PREP_EXIT%
 echo ---- FULL %date% %time% ---->> "%LOG%"
 rem --catch-up-slots: the task fires hourly, this decides which round is real, so a PC
 rem asleep at 08:00 still gets the 08:00 full sync when it wakes (exit 75 = skipped).
@@ -20,8 +28,9 @@ rem Drop the start marker when we skip: the watchdog reads a marker with no matc
 rem status as "started and never finished", and a skipped round is not a dead one.
 if "%SYNC_EXIT%"=="75" goto skipped
 rem toast alert on failure / bad token / suspicious data (silent when OK); pass exit code
+:notify
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\notify_sync.ps1" -SyncExit %SYNC_EXIT% -Lane full >> "%LOG%" 2>&1
-exit /b 0
+exit /b %SYNC_EXIT%
 
 :skipped
 del /q "data\sync_run_start.txt" >nul 2>&1

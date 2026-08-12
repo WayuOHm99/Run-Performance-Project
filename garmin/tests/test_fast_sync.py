@@ -1,8 +1,11 @@
 import ast
 import importlib.util
+import os
+import types
 import re
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -63,7 +66,7 @@ def create_activity_db():
     conn.execute(
         f"""CREATE TABLE fact_activity_split (
             {split_columns},
-            PRIMARY KEY (activity_id, split_num)
+            PRIMARY KEY (activity_id, split_num) ON CONFLICT REPLACE
         )"""
     )
     return conn
@@ -120,6 +123,168 @@ def synthetic_activity(activity_id=101, distance=5000):
 
 
 class FastActivityTests(unittest.TestCase):
+    def test_activity_id_normalizer_rejects_non_sqlite_integer_values(self):
+        for value in (True, 1.5, 2**63, str(2**63)):
+            with self.subTest(value=value):
+                self.assertIsNone(backfill._normalize_activity_id(value))
+
+    def test_invalid_activity_collection_never_reconciles_existing_rows(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, activity_type, start_time_local,
+                   duration_sec, deleted_at
+               ) VALUES (99, 1, 'running', '2030-01-02 06:00:00', 600, NULL)"""
+        )
+        garmin = SyntheticGarmin({})
+
+        with self.assertRaises(RuntimeError):
+            backfill.fetch_and_insert_activities(
+                garmin,
+                conn,
+                1,
+                backfill.date(2030, 1, 2),
+                backfill.date(2030, 1, 2),
+            )
+
+        deleted_at = conn.execute(
+            "SELECT deleted_at FROM fact_activity WHERE activity_id = 99"
+        ).fetchone()[0]
+        self.assertIsNone(deleted_at)
+
+    def test_string_activity_id_is_canonicalized_before_reconcile(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        activity = synthetic_activity(activity_id="123", distance=0)
+        activity["activityType"] = {"typeKey": "cycling"}
+        garmin = SyntheticGarmin([activity])
+
+        backfill.fetch_and_insert_activities(
+            garmin,
+            conn,
+            1,
+            backfill.date(2030, 1, 2),
+            backfill.date(2030, 1, 2),
+        )
+
+        row = conn.execute(
+            "SELECT typeof(activity_id), deleted_at FROM fact_activity WHERE activity_id = 123"
+        ).fetchone()
+        self.assertEqual(row, ("integer", None))
+
+    def test_reconcile_keeps_offset_timestamp_on_its_local_calendar_date(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, start_time_local, deleted_at
+               ) VALUES (123, 1, '2030-01-02T00:30:00+07:00', NULL)"""
+        )
+
+        marked, restored = backfill.reconcile_activities(
+            conn,
+            1,
+            backfill.date(2030, 1, 2),
+            backfill.date(2030, 1, 2),
+            set(),
+        )
+
+        self.assertEqual((marked, restored), ([123], []))
+
+    def test_partial_split_refresh_preserves_existing_metrics(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO fact_activity (activity_id, athlete_id) VALUES (20, 1)"
+        )
+        conn.execute(
+            """INSERT INTO fact_activity_split (
+                   activity_id, split_num, distance_m, duration_sec,
+                   avg_hr, avg_cadence, avg_power
+               ) VALUES (20, 1, 1000, 300, 155, 170, 250)"""
+        )
+        garmin = mock.Mock()
+        garmin.get_activity_splits.return_value = [
+            {"distance": 1000, "duration": 299}
+        ]
+
+        backfill.fetch_and_insert_splits(garmin, conn, 20)
+
+        metrics = conn.execute(
+            """SELECT avg_hr, avg_cadence, avg_power
+                 FROM fact_activity_split
+                WHERE activity_id = 20 AND split_num = 1"""
+        ).fetchone()
+        self.assertEqual(metrics, (155.0, 170.0, 250.0))
+
+    def test_split_refresh_removes_laps_no_longer_returned_by_garmin(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO fact_activity (activity_id, athlete_id) VALUES (20, 1)"
+        )
+        conn.executemany(
+            """INSERT INTO fact_activity_split (
+                   activity_id, split_num, distance_m, duration_sec, avg_hr
+               ) VALUES (20, ?, 1000, 300, 155)""",
+            [(1,), (2,)],
+        )
+        garmin = mock.Mock()
+        garmin.get_activity_splits.return_value = [
+            {"distance": 1000, "duration": 299, "averageHR": 156}
+        ]
+
+        backfill.fetch_and_insert_splits(garmin, conn, 20)
+
+        split_numbers = conn.execute(
+            """SELECT split_num FROM fact_activity_split
+                WHERE activity_id = 20 ORDER BY split_num"""
+        ).fetchall()
+        self.assertEqual(split_numbers, [(1,)])
+
+    def test_empty_split_list_clears_all_stale_laps(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO fact_activity (activity_id, athlete_id) VALUES (20, 1)"
+        )
+        conn.execute(
+            """INSERT INTO fact_activity_split (
+                   activity_id, split_num, distance_m, duration_sec
+               ) VALUES (20, 1, 1000, 300)"""
+        )
+        garmin = mock.Mock()
+        garmin.get_activity_splits.return_value = []
+
+        backfill.fetch_and_insert_splits(garmin, conn, 20)
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM fact_activity_split WHERE activity_id = 20"
+        ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_empty_lap_dto_collection_clears_all_stale_laps(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            "INSERT INTO fact_activity (activity_id, athlete_id) VALUES (20, 1)"
+        )
+        conn.execute(
+            """INSERT INTO fact_activity_split (
+                   activity_id, split_num, distance_m, duration_sec
+               ) VALUES (20, 1, 1000, 300)"""
+        )
+        garmin = mock.Mock()
+        garmin.get_activity_splits.return_value = {"lapDTOs": []}
+
+        backfill.fetch_and_insert_splits(garmin, conn, 20)
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM fact_activity_split WHERE activity_id = 20"
+        ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+
     def test_fast_sync_preserves_enrichment_and_fetches_missing_splits_once(self):
         conn = create_activity_db()
         self.addCleanup(conn.close)
@@ -443,6 +608,78 @@ class FastWellnessTests(unittest.TestCase):
         self.assertEqual(row, (22.1, 48.0))
 
 
+class BackfillStatusTests(IsolatedDataDirMixin, unittest.TestCase):
+    def test_activity_list_endpoint_failure_marks_the_sync_failed(self):
+        schema.init_schema(self.data_dir / "garmin.db")
+        project_root = self.data_dir / "project"
+        (project_root / "tokens" / "probe").mkdir(parents=True)
+
+        class FailingGarmin:
+            def login(self, _token_dir):
+                return None
+
+            def get_full_name(self):
+                return "Probe"
+
+            def get_activities_by_date(self, _start, _end):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+        fake_garminconnect = types.ModuleType("garminconnect")
+        fake_garminconnect.Garmin = FailingGarmin
+        argv = ["03_backfill.py", "--athlete", "probe", "--days", "0",
+                "--activities-only"]
+
+        with (
+            mock.patch.object(backfill, "PROJECT_ROOT", project_root),
+            mock.patch.object(backfill.time, "sleep"),
+            mock.patch.dict(sys.modules, {"garminconnect": fake_garminconnect}),
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            backfill.main()
+
+        payload = backfill.json.loads(
+            (backfill.STATUS_DIR / "probe.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual((payload["ok"], payload["reason"]), (False, "network"))
+
+    def test_malformed_activity_payload_is_reported_as_payload_failure(self):
+        schema.init_schema(self.data_dir / "garmin.db")
+        project_root = self.data_dir / "project"
+        (project_root / "tokens" / "probe").mkdir(parents=True)
+
+        class MalformedGarmin:
+            def login(self, _token_dir):
+                return None
+
+            def get_full_name(self):
+                return "Probe"
+
+            def get_activities_by_date(self, _start, _end):
+                return {}
+
+        fake_garminconnect = types.ModuleType("garminconnect")
+        fake_garminconnect.Garmin = MalformedGarmin
+        argv = ["03_backfill.py", "--athlete", "probe", "--days", "0",
+                "--activities-only"]
+
+        with (
+            mock.patch.object(backfill, "PROJECT_ROOT", project_root),
+            mock.patch.object(backfill.time, "sleep"),
+            mock.patch.dict(sys.modules, {"garminconnect": fake_garminconnect}),
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            backfill.main()
+
+        payload = backfill.json.loads(
+            (backfill.STATUS_DIR / "probe.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual((payload["ok"], payload["reason"]), (False, "payload"))
+
+
 class FetchAllOrchestrationTests(IsolatedDataDirMixin, unittest.TestCase):
     def test_main_uses_bounded_concurrency_and_keeps_status_order(self):
         athletes = ["athlete-a", "athlete-b", "athlete-c"]
@@ -502,6 +739,25 @@ class FetchAllOrchestrationTests(IsolatedDataDirMixin, unittest.TestCase):
         # สายถี่ต้องยอมแพ้เร็ว ไม่กอด sync.lock ไว้จนสายอื่นอดทั้งชั่วโมง
         self.assertEqual(set(timeouts), {fetch_all.ATHLETE_TIMEOUT_SEC["fast"]})
 
+    def test_status_write_failure_makes_the_round_fail(self):
+        @contextmanager
+        def fake_lock(_timeout):
+            yield True
+
+        result = {"slug": "probe", "ok": True, "reason": "ok", "warnings": []}
+        argv = ["fetch_all.py", "--days", "0", "--activities-only"]
+        with (
+            mock.patch.object(fetch_all, "list_athletes", return_value=["probe"]),
+            mock.patch.object(fetch_all, "run_athlete", return_value=result),
+            mock.patch.object(fetch_all, "run_lock", side_effect=fake_lock),
+            mock.patch.object(Path, "write_text", side_effect=OSError("disk full")),
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaises(SystemExit) as exited,
+        ):
+            fetch_all.main()
+
+        self.assertEqual(exited.exception.code, 1)
+
 
 class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
     """--catch-up-slots: Task ยิงทุกชั่วโมง แต่ต้องทำงานจริงแค่ช่องละครั้ง."""
@@ -510,10 +766,13 @@ class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
         super().setUp()
         self.slots = fetch_all.parse_slots("08:00,21:00")
 
-    def write_lane(self, run_at):
+    def write_lane(self, run_at, results=None):
         fetch_all.LANE_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {"run_at": run_at.isoformat(timespec="seconds")}
+        if results is not None:
+            payload["results"] = results
         (fetch_all.LANE_STATUS_DIR / "full.json").write_text(
-            fetch_all.json.dumps({"run_at": run_at.isoformat(timespec="seconds")}),
+            fetch_all.json.dumps(payload),
             encoding="utf-8",
         )
 
@@ -538,6 +797,23 @@ class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
         now = datetime(2030, 5, 6, 9, 40)
         self.write_lane(datetime(2030, 5, 5, 21, 3))
         self.assertIsNone(fetch_all.slot_already_done("full", self.slots, now))
+
+    def test_failed_round_does_not_consume_the_slot(self):
+        now = datetime(2030, 5, 6, 9, 0)
+        self.write_lane(
+            datetime(2030, 5, 6, 8, 1),
+            results=[{"slug": "probe", "ok": False, "reason": "network"}],
+        )
+
+        self.assertEqual(
+            fetch_all.pending_slots("full", self.slots, now),
+            [
+                datetime(2030, 5, 4, 21, 0),
+                datetime(2030, 5, 5, 8, 0),
+                datetime(2030, 5, 5, 21, 0),
+                datetime(2030, 5, 6, 8, 0),
+            ],
+        )
 
     def test_before_the_first_slot_falls_back_to_last_night(self):
         now = datetime(2030, 5, 6, 2, 0)
@@ -829,6 +1105,55 @@ class SanityWellnessGapTests(unittest.TestCase):
         self.assertLessEqual(warns[0].count("-"), 2 * backfill.WELLNESS_GAP_DAYS_LISTED)
 
 
+class SoftDeleteFilterTests(unittest.TestCase):
+    def test_sanity_check_ignores_deleted_activities(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, activity_type, start_time_local,
+                   duration_sec, deleted_at
+               ) VALUES (
+                   44, 1, 'running', '2030-01-02 06:00:00',
+                   0, '2030-01-03T00:00:00'
+               )"""
+        )
+
+        warnings = backfill.sanity_check(
+            conn,
+            1,
+            backfill.date(2030, 1, 2),
+            backfill.date(2030, 1, 2),
+            include_wellness=False,
+        )
+
+        self.assertEqual(warnings, [])
+
+    def test_sanity_check_keeps_offset_timestamp_on_its_local_calendar_date(self):
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, activity_type, start_time_local,
+                   duration_sec, deleted_at
+               ) VALUES (
+                   45, 1, 'running', '2030-01-02T00:30:00+07:00',
+                   0, NULL
+               )"""
+        )
+
+        warnings = backfill.sanity_check(
+            conn,
+            1,
+            backfill.date(2030, 1, 2),
+            backfill.date(2030, 1, 2),
+            include_wellness=False,
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("เวลารวมเป็น 0", warnings[0])
+
+
 class ProductionDataIsolationTests(IsolatedDataDirMixin, unittest.TestCase):
     """รัน unittest แล้วต้องไม่แตะ garmin/data ของจริงเลยสักไฟล์.
 
@@ -869,6 +1194,17 @@ class ProductionDataIsolationTests(IsolatedDataDirMixin, unittest.TestCase):
             with self.subTest(module=module.__name__):
                 self.assertEqual(module.DATA_DIR, self.data_dir)
                 self.assertNotEqual(module.DATA_DIR, PRODUCTION_DATA_DIR)
+
+    def test_schema_default_database_follows_garmin_data_dir(self):
+        expected_data_dir = self.data_dir / "schema-isolated"
+        with mock.patch.dict(
+            os.environ, {"GARMIN_DATA_DIR": str(expected_data_dir)}
+        ):
+            isolated_schema = load_script(
+                "garmin_schema_isolation_probe", "02_init_schema.py"
+            )
+
+        self.assertEqual(isolated_schema.DB_PATH, expected_data_dir / "garmin.db")
 
     def test_every_writable_path_derives_from_the_data_dir(self):
         # กันกรณีเพิ่มไฟล์สถานะใหม่แล้วลืมให้มันแตกจาก DATA_DIR — ตัวที่หลุดจะรอดการ
@@ -926,6 +1262,77 @@ class ProductionDataIsolationTests(IsolatedDataDirMixin, unittest.TestCase):
                 # จะไม่อยู่ใน before — ข้ามไป เพราะนั่นคือของจริงไม่ใช่ฝีมือเทส)
                 if before.get(path) is not None:
                     self.assertEqual(before[path], after)
+
+
+class CheckDbCliTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="garmin-check-db-"))
+        self.addCleanup(shutil.rmtree, self.temp_dir, True)
+        self.script_root = self.temp_dir / "copy"
+        (self.script_root / "scripts").mkdir(parents=True)
+        (self.script_root / "data").mkdir()
+        shutil.copy2(
+            GARMIN_ROOT / "scripts" / "check_db.py",
+            self.script_root / "scripts" / "check_db.py",
+        )
+
+    def test_missing_isolated_database_is_not_created_in_any_location(self):
+        isolated_data = self.temp_dir / "isolated-data"
+        isolated_data.mkdir()
+        env = {**os.environ, "GARMIN_DATA_DIR": str(isolated_data)}
+
+        result = subprocess.run(
+            [sys.executable, str(self.script_root / "scripts" / "check_db.py")],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((isolated_data / "garmin.db").exists())
+        self.assertFalse((self.script_root / "data" / "garmin.db").exists())
+
+    def test_activity_sample_excludes_soft_deleted_rows(self):
+        isolated_data = self.temp_dir / "isolated-data"
+        db_path = isolated_data / "garmin.db"
+        schema.init_schema(db_path)
+        conn = sqlite3.connect(db_path)
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO dim_athlete (
+                   athlete_id, slug, display_name
+               ) VALUES (1, 'probe', 'Probe')"""
+        )
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, activity_type, start_time_local,
+                   duration_sec, deleted_at
+               ) VALUES (1, 1, 'active_probe', '2030-01-01 06:00:00', 60, NULL)"""
+        )
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, activity_type, start_time_local,
+                   duration_sec, deleted_at
+               ) VALUES (
+                   2, 1, 'deleted_probe', '2030-01-02 06:00:00',
+                   60, '2030-01-03T00:00:00'
+               )"""
+        )
+        conn.commit()
+        env = {**os.environ, "GARMIN_DATA_DIR": str(isolated_data)}
+
+        result = subprocess.run(
+            [sys.executable, str(self.script_root / "scripts" / "check_db.py")],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("active_probe", result.stdout)
+        self.assertNotIn("deleted_probe", result.stdout)
 
 
 if __name__ == "__main__":

@@ -2,11 +2,11 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 echo ==========================================
-echo   เพิ่มนักกีฬาใหม่ - สร้าง Garmin Token
+echo   ADD ATHLETE - CREATE GARMIN TOKEN
 echo ==========================================
 echo.
-echo จะถาม: ชื่อ (พิมพ์เป็น slug อังกฤษ เช่น dan) / อีเมล / รหัส Garmin
-echo รหัสจะไม่แสดงบนจอ (ปกติ) และไม่ถูกบันทึกลงไฟล์
+echo You will be asked for an ASCII athlete slug, email, and Garmin password.
+echo The password stays hidden and is never saved.
 echo.
 ".venv\Scripts\python.exe" scripts\01_generate_token.py
 echo.

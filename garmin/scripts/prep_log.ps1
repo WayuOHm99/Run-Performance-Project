@@ -8,7 +8,7 @@
 #   แก้ด้วย log แยกไฟล์ต่อสาย + ตัวนี้ดูแลหมุนไฟล์ไม่ให้โตไม่จำกัด
 #
 # ใช้: powershell -File scripts\prep_log.ps1 -LogPath <ไฟล์ log> [-Marker <ไฟล์ marker>]
-# กติกา: ห้ามทำให้ .bat ล้ม — ทุกอย่างในนี้กลืน error และ exit 0 เสมอ
+# ถ้าเตรียม log/marker ไม่ได้ ต้องคืน non-zero ให้ Task Scheduler เห็นทันที
 # ไฟล์นี้ต้องเซฟเป็น UTF-8 มี BOM (PS 5.1 อ่านไทยไม่มี BOM แล้ว parser พัง)
 
 param(
@@ -17,7 +17,7 @@ param(
     [int]$MaxMB = 5
 )
 
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
 
 try {
     $dir = Split-Path -Parent $LogPath
@@ -41,7 +41,8 @@ try {
     }
 }
 catch {
-    # เงียบไว้ — log/marker พังไม่ควรทำให้รอบ sync ไม่ได้รัน
+    Write-Error "prep_log failed: $($_.Exception.Message)"
+    exit 1
 }
 
 exit 0

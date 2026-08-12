@@ -22,13 +22,21 @@ for %%I in ("%~dp0..") do set "SRC=%%~fI"
 set "GARMIN=%SRC%\garmin"
 set "DEST=C:\Backup\Run-Performance"
 set "DAILY=C:\Backup\garmin-db-daily"
-set "LOG=C:\Backup\backup-log.txt"
+set "LOG=C:\Backup\run-performance-logs\backup-log.txt"
 if not exist "C:\Backup" mkdir "C:\Backup"
 
 rem Rotate the log and drop a start marker, so the watchdog in notify_sync.ps1 can
 rem tell "started and never finished" from "never started". A killed run cannot
 rem report itself - the marker is the only trace it leaves behind.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SRC%\scripts\harden_private_acl.ps1" -Scope Logs -Recurse >nul 2>&1
+set "ACL_EXIT=%ERRORLEVEL%"
+if not "%ACL_EXIT%"=="0" exit /b %ACL_EXIT%
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SRC%\scripts\harden_private_acl.ps1" -Scope Backup -Recurse >nul 2>&1
+set "ACL_EXIT=%ERRORLEVEL%"
+if not "%ACL_EXIT%"=="0" exit /b %ACL_EXIT%
 powershell -NoProfile -ExecutionPolicy Bypass -File "%GARMIN%\scripts\prep_log.ps1" -LogPath "%LOG%" -Marker "%GARMIN%\data\sync_backup_run_start.txt"
+set "PREP_EXIT=%ERRORLEVEL%"
+if not "%PREP_EXIT%"=="0" exit /b %PREP_EXIT%
 echo ==== BACKUP %date% %time% ====>> "%LOG%"
 
 robocopy "%SRC%" "%DEST%" /MIR /XF .env garmin.db garmin.db-wal garmin.db-shm /XD __pycache__ .venv node_modules /R:2 /W:5 /NP /NDL /LOG+:"%LOG%"
@@ -37,6 +45,7 @@ set "ROBO_EXIT=%ERRORLEVEL%"
 "%GARMIN%\.venv\Scripts\python.exe" "%GARMIN%\scripts\backup_db.py" --dest "%DEST%\garmin\data" --daily "%DAILY%" --robocopy-exit %ROBO_EXIT% >> "%LOG%" 2>&1
 set "BACKUP_EXIT=%ERRORLEVEL%"
 
+:notify
 powershell -NoProfile -ExecutionPolicy Bypass -File "%GARMIN%\scripts\notify_sync.ps1" -SyncExit %BACKUP_EXIT% -Lane backup -StartMarker "sync_backup_run_start.txt" >> "%LOG%" 2>&1
 
 if "%BACKUP_EXIT%"=="0" goto ok
@@ -48,4 +57,4 @@ echo.
 echo [OK] Backup done - %DEST% + db snapshot + %DAILY%
 :done
 if /I not "%~1"=="auto" pause
-exit /b 0
+exit /b %BACKUP_EXIT%
