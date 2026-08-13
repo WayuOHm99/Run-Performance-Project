@@ -250,6 +250,7 @@ class PowerShellEncodingTests(unittest.TestCase):
         self.assertNotIn("New-TimeSpan -Days 36500)", source)
         self.assertIn("New-TimeSpan -Days 3650)", source)
 
+    @unittest.skipUnless(os.name == "nt", "Windows Scheduled Task contract")
     def test_scheduler_retries_only_slow_critical_lanes(self):
         policies = {
             "Run-Performance-Backup": (3, "PT15M"),
