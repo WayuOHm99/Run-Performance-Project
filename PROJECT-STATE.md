@@ -1,6 +1,6 @@
 # Run Performance — Current State
 
-Last updated: 2026-08-09
+Last updated: 2026-08-13
 
 ## Goal
 Garmin → Python Sync → SQLite → Streamlit Dashboard
@@ -31,12 +31,18 @@ Primary goals:
 - Reconcile
 - DeepSync
 - Backup: 22:00
+- Encrypted Off-device Backup: 22:30
+- Restore Drill: every 4 weeks
+- Privacy-safe System Heartbeat: every 2 hours
 - Full Sync catch-up enabled if computer was off
 - Catch-up lookback: 48 hours
 
 ## Monitoring / Safety
 - SQLite WAL
 - Automated local backup
+- Restic off-device backup to a private GitHub Release; only verified local backup generations are accepted.
+- Restore drills download the off-device repository, restore it, and run SQLite `quick_check`.
+- GitHub Actions checks a privacy-safe aggregate heartbeat hourly; athlete findings never leave the machine.
 - Healthchecks.io monitors Backup
 - GitHub Actions CI
 - Production data/tokens are not committed to Git
@@ -45,6 +51,12 @@ Primary goals:
 - Health reporting also surfaces per-athlete core-field coverage, sentinel/range violations, and invalid field relationships such as Body Battery high below low.
 
 ## Important Recent Changes
+- 2026-08-13 — Off-device durability and external monitoring
+  - Restic snapshots use DPAPI CurrentUser locally and a GitHub Actions recovery secret; no plaintext password file exists.
+  - The encrypted repository retains 7 daily, 8 weekly, and 12 monthly snapshots; the release keeps the newest 3 repository archives.
+  - A guarded manual workflow verifies the asset digest, restores the latest snapshot, validates SQLite, and retains the private recovery artifact for 7 days.
+  - `health_report.py` treats missing, failed, or stale off-site backup/restore proof as an error; the published heartbeat contains counts only.
+
 - 2026-08-09 — Wellness/recovery correctness hardening
   - Fast wellness can repair yesterday's late Garmin Cloud snapshot, with a six-hour per-athlete/day cooldown.
   - Full/deep wellness upserts preserve existing values when an endpoint temporarily returns no value.
@@ -83,7 +95,6 @@ Primary goals:
 - Never use a general minimum-distance threshold again.
 
 ## Deferred
-- Off-device backup
 - Cloud/VPS migration
 - Sentry / additional monitoring
 - Larger infrastructure changes

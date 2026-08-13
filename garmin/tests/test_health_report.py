@@ -194,6 +194,27 @@ class ScheduledTaskChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
             self.assertIn("skipped", f.message)
             self.assertNotEqual(f.level, hr.ERROR)
 
+    def test_failed_windows_query_for_expected_task_is_error(self):
+        def provider(task_name):
+            raise hr.ScheduledTaskQueryFailed(f"missing:{task_name}")
+
+        findings = hr.check_scheduled_tasks(provider=provider)
+
+        self.assertEqual(len(findings), len(hr.SCHEDULED_TASKS))
+        self.assertTrue(all(f.level == hr.ERROR for f in findings))
+
+    def test_task_scheduler_not_yet_run_code_is_warning(self):
+        findings = hr.check_scheduled_tasks(provider=lambda name: (
+            "Last Run Time: 11/30/1999 12:00:00 AM\n"
+            "Last Result: 267011\nStatus: Ready\n"
+        ))
+
+        restore = find(
+            findings, "scheduled_task:Run-Performance-RestoreDrill"
+        )[0]
+        self.assertEqual(restore.level, hr.WARNING)
+        self.assertIn("ยังไม่เคยรัน", restore.message)
+
 
 class LaneFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
     def test_stale_lane_is_error(self):
@@ -216,6 +237,57 @@ class LaneFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
         deep = find(findings, "lane_freshness:deep")
         self.assertEqual(deep[0].level, hr.WARNING)
 
+
+class RecoveryFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def write_operation(self, operation, run_at, *, ok=True, reason="ok"):
+        lane_dir = self.data_dir / "sync_lane"
+        lane_dir.mkdir(parents=True, exist_ok=True)
+        (lane_dir / f"{operation}.json").write_text(
+            json.dumps({"run_at": run_at.isoformat(), "ok": ok, "reason": reason}),
+            encoding="utf-8",
+        )
+
+    def test_recent_successful_backup_and_restore_are_ok(self):
+        now = datetime(2026, 8, 13, 12, 0, 0)
+        self.write_operation("offsite_backup", now - timedelta(hours=2))
+        self.write_operation("restore_drill", now - timedelta(days=2))
+
+        findings = hr.check_recovery_freshness(now=now)
+
+        self.assertTrue(all(item.level == hr.OK for item in findings))
+
+    def test_failed_offsite_backup_is_error_even_when_fresh(self):
+        now = datetime(2026, 8, 13, 12, 0, 0)
+        self.write_operation(
+            "offsite_backup", now - timedelta(minutes=5),
+            ok=False, reason="upload_failed",
+        )
+        self.write_operation("restore_drill", now - timedelta(days=2))
+
+        finding = find(
+            hr.check_recovery_freshness(now=now), "recovery:offsite_backup"
+        )[0]
+
+        self.assertEqual(finding.level, hr.ERROR)
+        self.assertIn("upload_failed", finding.message)
+
+    def test_stale_restore_drill_is_error(self):
+        now = datetime(2026, 8, 13, 12, 0, 0)
+        self.write_operation("offsite_backup", now - timedelta(hours=2))
+        self.write_operation("restore_drill", now - timedelta(days=36))
+
+        finding = find(
+            hr.check_recovery_freshness(now=now), "recovery:restore_drill"
+        )[0]
+
+        self.assertEqual(finding.level, hr.ERROR)
+
+    def test_missing_proof_is_error_not_a_green_heartbeat(self):
+        findings = hr.check_recovery_freshness(
+            now=datetime(2026, 8, 13, 12, 0, 0)
+        )
+
+        self.assertTrue(all(item.level == hr.ERROR for item in findings))
 
 class UnfinishedRunTests(IsolatedHealthDirMixin, unittest.TestCase):
     def test_started_and_never_finished_is_error(self):

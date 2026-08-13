@@ -1,0 +1,84 @@
+name: Restore encrypted offsite backup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-offsite-backup
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out trusted validator
+        uses: actions/checkout@v4
+
+      - name: Require recovery secret
+        shell: pwsh
+        env:
+          RESTIC_PASSWORD: ${{ secrets.RESTIC_REPOSITORY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RESTIC_PASSWORD)) {
+            throw 'RESTIC_REPOSITORY_PASSWORD is not configured'
+          }
+
+      - name: Install Restic
+        shell: pwsh
+        run: choco install restic -y --no-progress
+
+      - name: Download newest encrypted repository
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'run-performance-recovery'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $release = gh release view offsite-backup --json assets | ConvertFrom-Json
+          $asset = $release.assets |
+            Where-Object name -Like 'restic-repository-*.zip' |
+            Sort-Object createdAt |
+            Select-Object -Last 1
+          if (-not $asset) { throw 'No encrypted Restic repository asset found' }
+          gh release download offsite-backup --pattern $asset.name --dir $root
+          $archive = Join-Path $root $asset.name
+          $expectedHash = [string]$asset.digest -replace '^sha256:', ''
+          $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if (-not $expectedHash -or $actualHash -ne $expectedHash.ToLowerInvariant()) {
+            throw 'Downloaded repository asset failed SHA-256 verification'
+          }
+          Expand-Archive -LiteralPath $archive `
+            -DestinationPath (Join-Path $root 'repository') -Force
+          "RECOVERY_ROOT=$root" >> $env:GITHUB_ENV
+
+      - name: Restore latest snapshot
+        shell: pwsh
+        env:
+          RESTIC_PASSWORD: ${{ secrets.RESTIC_REPOSITORY_PASSWORD }}
+        run: |
+          $repository = Join-Path $env:RECOVERY_ROOT 'repository'
+          $target = Join-Path $env:RECOVERY_ROOT 'restored'
+          $env:RESTIC_REPOSITORY = $repository
+          restic snapshots --compact
+          restic restore latest --target $target
+          $database = Get-ChildItem $target -Recurse -File -Filter 'garmin-*.db' |
+            Sort-Object Name | Select-Object -Last 1
+          if (-not $database) {
+            $database = Get-ChildItem $target -Recurse -File -Filter 'garmin.db' |
+              Select-Object -First 1
+          }
+          if (-not $database) { throw 'Restored Garmin database not found' }
+          python garmin/scripts/validate_sqlite_backup.py --json $database.FullName
+
+      - name: Upload recovered files
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-performance-restored-${{ github.run_id }}
+          path: ${{ env.RECOVERY_ROOT }}\restored
+          if-no-files-found: error
+          retention-days: 7

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""health_report.py — ตรวจสุขภาพระบบ Garmin sync ทั้ง 6 สาย แบบ READ-ONLY เท่านั้น
+"""health_report.py — ตรวจ 6 sync lanes + off-site durability แบบ READ-ONLY เท่านั้น
 
 กฎเหล็ก (ห้ามฝ่าฝืนแม้แต่บรรทัดเดียว):
   - ห้ามเขียนหรือแก้ garmin.db (เปิดแบบ mode=ro เท่านั้น)
@@ -158,6 +158,18 @@ STALE_MARKER = {
 RUN_GRACE_MIN = {"full": 30, "fast": 10, "wellness": 10, "reconcile": 60, "deep": 90, "backup": 60}
 EXPECTED_LANES = {"full", "fast", "wellness", "reconcile", "deep", "backup"}
 
+# งาน durability อยู่นอก 6 sync lanes ด้านบน จึงไม่เอาไปปนกับค่าที่ต้องตรงกับ
+# dashboard/notify_sync แต่ health report ต้องเฝ้าให้เหมือนกัน ไม่เช่นนั้น off-site
+# backup ล้มแล้ว external heartbeat ยังเขียวได้
+RECOVERY_STALE_LIMIT_MIN = {
+    "offsite_backup": 30 * 60,
+    "restore_drill": 35 * 24 * 60,
+}
+RECOVERY_LABEL = {
+    "offsite_backup": "สำรองข้อมูลเข้ารหัสนอกเครื่อง (ทุกคืน 22:30)",
+    "restore_drill": "ทดสอบกู้คืนจริง (ทุก 4 สัปดาห์)",
+}
+
 SCHEDULED_TASKS = [
     "Run-Performance-Garmin-Fast",
     "Run-Performance-Garmin-Wellness",
@@ -165,6 +177,8 @@ SCHEDULED_TASKS = [
     "Run-Performance-Backup",
     "Run-Performance-Garmin-Reconcile",
     "Run-Performance-Garmin-DeepSync",
+    "Run-Performance-OffsiteBackup",
+    "Run-Performance-RestoreDrill",
 ]
 TASK_LANE = {
     "Run-Performance-Garmin-Fast": "fast",
@@ -173,6 +187,8 @@ TASK_LANE = {
     "Run-Performance-Backup": "backup",
     "Run-Performance-Garmin-Reconcile": "reconcile",
     "Run-Performance-Garmin-DeepSync": "deep",
+    "Run-Performance-OffsiteBackup": "offsite_backup",
+    "Run-Performance-RestoreDrill": "restore_drill",
 }
 
 BACKUP_WARN_HOURS = 30    # ตรงกับ LANE_STALE_LIMIT_MIN["backup"] (1800 นาที)
@@ -223,6 +239,14 @@ def _lane_ok(lane: str):
     data = _read_json(_lane_status_path(lane))
     if not isinstance(data, dict):
         return None
+
+    # งาน off-site/restore เป็น operation เดียว จึงเขียน ``ok`` ที่ระดับบนแทน
+    # results รายคนแบบ Garmin lanes
+    if type(data.get("ok")) is bool:
+        if data["ok"]:
+            return (True, [])
+        return (False, [{"reason": str(data.get("reason") or "unknown")}])
+
     results = data.get("results")
     if not isinstance(results, list) or not results:
         return None
@@ -249,8 +273,12 @@ def _read_marker(name: str):
 # แทนที่จะเรียก schtasks จริง ทำให้รันบนเครื่องไหนก็ได้ (รวมเครื่องที่ไม่ใช่ Windows)
 
 class SchtasksUnavailable(Exception):
-    """schtasks ใช้ไม่ได้ (ไม่ใช่ Windows / หา schtasks ไม่เจอ / query ล้มเหลว)
+    """schtasks ใช้ไม่ได้ (ไม่ใช่ Windows / หา executable ไม่เจอ / timeout)
     — ไม่ใช่สัญญาณว่าระบบเสีย แค่ตรวจสายนี้ไม่ได้บนเครื่องนี้"""
+
+
+class ScheduledTaskQueryFailed(Exception):
+    """Windows ตอบ query ของ task ที่คาดว่าต้องมีไม่สำเร็จ."""
 
 
 def default_schtasks_provider(task_name: str) -> str:
@@ -272,8 +300,12 @@ def default_schtasks_provider(task_name: str) -> str:
     except subprocess.TimeoutExpired as e:
         raise SchtasksUnavailable(f"schtasks ค้าง: {e}") from e
     if result.returncode != 0:
-        detail = _decode_windows_output(result.stderr).strip() or "schtasks คืน error"
-        raise SchtasksUnavailable(detail)
+        detail = (
+            _decode_windows_output(result.stderr).strip()
+            or _decode_windows_output(result.stdout).strip()
+            or "schtasks คืน error"
+        )
+        raise ScheduledTaskQueryFailed(detail)
     return _decode_windows_output(result.stdout)
 
 
@@ -498,6 +530,12 @@ def check_scheduled_tasks(provider=None, now=None) -> list:
         lane = TASK_LANE[task_name]
         try:
             raw = provider(task_name)
+        except ScheduledTaskQueryFailed as e:
+            findings.append(Finding(
+                f"scheduled_task:{task_name}", ERROR,
+                f"query Scheduled Task ที่ระบบต้องมีไม่สำเร็จ: {e}",
+            ))
+            continue
         except SchtasksUnavailable as e:
             findings.append(Finding(f"scheduled_task:{task_name}", WARNING,
                                      f"ตรวจไม่ได้ (skipped): {e} — ไม่ถือว่าระบบเสีย"))
@@ -507,7 +545,12 @@ def check_scheduled_tasks(provider=None, now=None) -> list:
         last_run = info.get("last_run_time")
         last_result = info.get("last_result")
         status = (info.get("status") or "").strip()
-        never_run = not last_run or last_run.strip().upper() in ("N/A", "NEVER", "")
+        result_code = _parse_task_result(last_result)
+        never_run = (
+            not last_run
+            or last_run.strip().upper() in ("N/A", "NEVER", "")
+            or result_code == 0x41303  # Task Scheduler: task has not yet run
+        )
 
         if status.casefold() == "disabled":
             findings.append(Finding(
@@ -524,7 +567,6 @@ def check_scheduled_tasks(provider=None, now=None) -> list:
         # Wrappers propagate the worker result all the way through .bat + .vbs, while
         # sync_lane confirms the application-level result.  Both signals must agree.
         lane_status = _lane_ok(lane)
-        result_code = _parse_task_result(last_result)
         note = " (cross-check กับ sync_lane)"
         if lane_status is not None and lane_status[0] is False:
             reasons = ", ".join(r.get("reason", "?") for r in lane_status[1]) or "ไม่ทราบสาเหตุ"
@@ -585,6 +627,62 @@ def check_lane_freshness(now=None) -> list:
         else:
             findings.append(Finding(f"lane_freshness:{lane}", OK,
                                      f"{label}: รอบล่าสุดเมื่อ {age_min:.0f} นาทีก่อน"))
+    return findings
+
+
+def check_recovery_freshness(now=None) -> list:
+    """เฝ้า off-site backup และ restore drill โดยไม่ปน inventory 6 sync lanes."""
+    now = _resolve_now(now)
+    findings = []
+    for operation, limit_min in RECOVERY_STALE_LIMIT_MIN.items():
+        label = RECOVERY_LABEL[operation]
+        run_at = _lane_run_at(operation)
+        status = _lane_ok(operation)
+        check = f"recovery:{operation}"
+
+        if run_at is None:
+            findings.append(Finding(
+                check, ERROR,
+                f"{label}: ยังไม่มีผลพิสูจน์ใน sync_lane/{operation}.json",
+            ))
+            continue
+        if run_at is UNPARSEABLE:
+            findings.append(Finding(
+                check, ERROR,
+                f"{label}: run_at อ่านรูปแบบเวลาไม่ได้",
+            ))
+            continue
+        if status is None:
+            findings.append(Finding(
+                check, ERROR,
+                f"{label}: ไฟล์สถานะเสียหรือไม่มีค่า ok แบบ boolean",
+            ))
+            continue
+        if not status[0]:
+            reasons = ", ".join(str(item.get("reason", "?")) for item in status[1])
+            findings.append(Finding(
+                check, ERROR,
+                f"{label}: รอบล่าสุดล้มเหลว ({reasons or 'ไม่ทราบสาเหตุ'})",
+            ))
+            continue
+
+        age_min = (now - run_at).total_seconds() / 60
+        if age_min > limit_min:
+            findings.append(Finding(
+                check, ERROR,
+                f"{label}: ผลพิสูจน์ล่าสุดเก่า {age_min / 1440:.1f} วัน "
+                f"(เกินเพดาน {limit_min / 1440:.0f} วัน)",
+            ))
+        elif age_min > limit_min * 0.8:
+            findings.append(Finding(
+                check, WARNING,
+                f"{label}: ผลพิสูจน์ใกล้หมดอายุ ({age_min / 1440:.1f} วัน)",
+            ))
+        else:
+            findings.append(Finding(
+                check, OK,
+                f"{label}: พิสูจน์สำเร็จล่าสุด {_fmt_local(run_at)}",
+            ))
     return findings
 
 
@@ -904,6 +1002,7 @@ def run_all_checks(*, now=None, schtasks_provider=None, disk_usage=None,
     findings = []
     findings += check_scheduled_tasks(provider=schtasks_provider, now=now)
     findings += check_lane_freshness(now=now)
+    findings += check_recovery_freshness(now=now)
     findings += check_unfinished_runs(now=now)
     findings += check_backup(now=now)
     findings += check_db_integrity()

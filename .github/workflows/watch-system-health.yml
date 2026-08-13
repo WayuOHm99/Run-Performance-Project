@@ -1,0 +1,41 @@
+name: Watch local system heartbeat
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watch-system-health
+  cancel-in-progress: true
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download privacy-safe heartbeat
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download system-health --pattern system-health.json --dir "$RUNNER_TEMP"
+
+      - name: Require a fresh healthy report
+        shell: pwsh
+        run: |
+          $heartbeat = Get-Content (Join-Path $env:RUNNER_TEMP 'system-health.json') -Raw |
+            ConvertFrom-Json
+          $generatedAt = [DateTimeOffset]::Parse($heartbeat.generated_at)
+          $age = [DateTimeOffset]::UtcNow - $generatedAt.ToUniversalTime()
+          if ($age.TotalMinutes -lt -10) {
+            throw "Local system heartbeat timestamp is in the future"
+          }
+          if ($age.TotalHours -gt 3) {
+            throw "Local system heartbeat is stale ($([math]::Round($age.TotalHours, 1)) hours)"
+          }
+          if ([int]$heartbeat.summary.error -gt 0 -or $heartbeat.status -ne 'ok') {
+            throw "Local health report contains $($heartbeat.summary.error) error(s)"
+          }
+          Write-Host "Heartbeat is fresh: OK=$($heartbeat.summary.ok) WARNING=$($heartbeat.summary.warning) ERROR=0"

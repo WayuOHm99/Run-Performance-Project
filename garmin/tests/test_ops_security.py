@@ -191,6 +191,8 @@ class CiCoverageTests(unittest.TestCase):
             "garmin.tests.test_health_report.HealthcheckSecretStorageChecksTests",
             source,
         )
+        self.assertIn("garmin.tests.test_offsite_backup", source)
+        self.assertIn("garmin.tests.test_system_heartbeat", source)
 
 
 class PowerShellEncodingTests(unittest.TestCase):
@@ -245,8 +247,38 @@ class PowerShellEncodingTests(unittest.TestCase):
             source,
         )
         self.assertRegex(source, r"if \(\$failed -gt 0\) \{ exit 1 \}\s*exit 0\s*\Z")
-        self.assertNotIn("New-TimeSpan -Days 3650)", source)
-        self.assertIn("New-TimeSpan -Days 36500)", source)
+        self.assertNotIn("New-TimeSpan -Days 36500)", source)
+        self.assertIn("New-TimeSpan -Days 3650)", source)
+
+    def test_scheduler_retries_only_slow_critical_lanes(self):
+        policies = {
+            "Run-Performance-Backup": (3, "PT15M"),
+            "Run-Performance-Garmin-Reconcile": (2, "PT30M"),
+            "Run-Performance-Garmin-DeepSync": (2, "PT1H"),
+            "Run-Performance-OffsiteBackup": (3, "PT30M"),
+            "Run-Performance-RestoreDrill": (1, "PT2H"),
+            "Run-Performance-SystemHealth": (2, "PT15M"),
+        }
+        for task_name, (count, interval) in policies.items():
+            with self.subTest(task_name=task_name):
+                completed = subprocess.run(
+                    [
+                        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-File", str(PROJECT_ROOT / "scripts" / "setup_scheduled_tasks.ps1"),
+                        "-DryRun", "-TaskName", task_name,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+                self.assertIn(
+                    f"retry: {count} ครั้ง ระยะห่าง {interval}",
+                    completed.stdout,
+                )
 
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell integration test")

@@ -51,7 +51,7 @@ $tasks = @(
         # ชนกันทีไรสายนี้ต้องข้ามรอบเพราะ sync.lock เสียเที่ยวเปล่า
         Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:05' `
                             -RepetitionInterval (New-TimeSpan -Minutes 15) `
-                            -RepetitionDuration (New-TimeSpan -Days 36500)) }
+                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
         Optional    = $false
     },
     @{
@@ -64,7 +64,7 @@ $tasks = @(
         # เหลื่อมจาก Fast (:05/:20/:35/:50) และจาก full sync (ต้นชั่วโมง) กันแย่ง sync.lock
         Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:12' `
                             -RepetitionInterval (New-TimeSpan -Minutes 30) `
-                            -RepetitionDuration (New-TimeSpan -Days 36500)) }
+                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
         Optional    = $false
     },
     @{
@@ -80,7 +80,7 @@ $tasks = @(
         # (เจอจริง 2 ส.ค. 69: เครื่องหลับตอน 08:00 → รอบตามที่ 09:04 ตายเพราะ log ชนกัน → ไม่มี full sync ทั้งวัน)
         Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:00' `
                             -RepetitionInterval (New-TimeSpan -Hours 1) `
-                            -RepetitionDuration (New-TimeSpan -Days 36500)) }
+                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
         Optional    = $false
     },
     @{
@@ -92,6 +92,8 @@ $tasks = @(
         Exe         = 'wscript.exe'
         Script      = Join-Path $scripts 'backup-hidden.vbs'
         TimeLimit   = 'PT4H'         # เดิม 72 ชม. = งานที่ค้างจะกอดยาวข้ามคืนถัดไป
+        RetryCount  = 3
+        RetryInterval = 'PT15M'
         # ⚠️ ต้องเป็น $true — เครื่องนี้เป็นโน้ตบุ๊ก (5 ส.ค. 69)
         #   เดิมตั้ง $false ด้วยเหตุผล "backup ใหญ่ ไม่ต้องรันตอนใช้แบต" ผลคือ Windows
         #   ได้สิทธิ์ทั้ง **ไม่เริ่ม** (DisallowStartIfOnBatteries) และ **ฆ่ากลางคัน**
@@ -111,6 +113,8 @@ $tasks = @(
         Exe         = 'wscript.exe'
         Script      = Join-Path $garmin 'garmin-reconcile-hidden.vbs'
         TimeLimit   = 'PT2H'
+        RetryCount  = 2
+        RetryInterval = 'PT30M'
         OnBattery   = $true
         # ตรึง anchor เป็นวันอาทิตย์เหมือน DeepSync — รายสัปดาห์ (WeeksInterval 1) อาการ
         # ยังไม่ออกเพราะทุกอาทิตย์เป็นรอบอยู่แล้ว แต่ถ้าวันหลังเปลี่ยนเป็นทุก 2/4 สัปดาห์
@@ -130,6 +134,8 @@ $tasks = @(
         Exe         = 'wscript.exe'
         Script      = Join-Path $garmin 'garmin-deepsync-hidden.vbs'
         TimeLimit   = 'PT4H'
+        RetryCount  = 2
+        RetryInterval = 'PT1H'
         OnBattery   = $true
         # Task Scheduler ไม่มี -Monthly ใน cmdlet → ใช้รายสัปดาห์ทุก 4 สัปดาห์แทน
         #
@@ -146,6 +152,51 @@ $tasks = @(
             $trigger.StartBoundary = '2026-08-02T10:30:00'
             $trigger
         }
+        Optional    = $true
+    },
+    @{
+        Name        = 'Run-Performance-OffsiteBackup'
+        Desc        = 'เข้ารหัสสำเนาที่ตรวจแล้วด้วย Restic และเก็บนอกเครื่องใน GitHub Release ทุกคืน 22:30'
+        Exe         = Join-Path $garmin '.venv\Scripts\pythonw.exe'
+        Script      = Join-Path $garmin 'scripts\offsite_backup.py'
+        ExtraArgs   = 'backup'
+        TimeLimit   = 'PT4H'
+        RetryCount  = 3
+        RetryInterval = 'PT30M'
+        OnBattery   = $true
+        Triggers    = { @(New-ScheduledTaskTrigger -Daily -At '22:30') }
+        Optional    = $true
+    },
+    @{
+        Name        = 'Run-Performance-RestoreDrill'
+        Desc        = 'ดาวน์โหลด Restic repository นอกเครื่องแล้ว restore + quick_check จริงทุก 4 สัปดาห์'
+        Exe         = Join-Path $garmin '.venv\Scripts\pythonw.exe'
+        Script      = Join-Path $garmin 'scripts\offsite_backup.py'
+        ExtraArgs   = 'restore-drill'
+        TimeLimit   = 'PT4H'
+        RetryCount  = 1
+        RetryInterval = 'PT2H'
+        OnBattery   = $true
+        Triggers    = {
+            $trigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 4 -DaysOfWeek Sunday -At '12:00'
+            $trigger.StartBoundary = '2026-08-02T12:00:00'
+            $trigger
+        }
+        Optional    = $true
+    },
+    @{
+        Name        = 'Run-Performance-SystemHealth'
+        Desc        = 'รัน health report และส่งเฉพาะสถานะรวมไป GitHub ทุก 2 ชั่วโมง'
+        Exe         = Join-Path $garmin '.venv\Scripts\pythonw.exe'
+        Script      = Join-Path $garmin 'scripts\system_heartbeat.py'
+        ExtraArgs   = 'publish'
+        TimeLimit   = 'PT10M'
+        RetryCount  = 2
+        RetryInterval = 'PT15M'
+        OnBattery   = $true
+        Triggers    = { @(New-ScheduledTaskTrigger -Once -At '00:25' `
+                            -RepetitionInterval (New-TimeSpan -Hours 2) `
+                            -RepetitionDuration (New-TimeSpan -Days 3650)) }
         Optional    = $true
     }
 )
@@ -219,6 +270,9 @@ foreach ($t in $tasks) {
     Write-Host "[ตั้ง]   $($t.Name)" -ForegroundColor Green
     Write-Host "         $($t.Exe) $argument"
     Write-Host "         $($t.Desc)" -ForegroundColor DarkGray
+    if ($t.RetryCount) {
+        Write-Host "         retry: $($t.RetryCount) ครั้ง ระยะห่าง $($t.RetryInterval)" -ForegroundColor DarkGray
+    }
 
     # สร้าง trigger ก่อนแล้วตรวจ anchor — ต้องกันตั้งแต่ก่อนลงทะเบียน เพราะพอลงไปแล้ว
     # อาการจะเงียบสนิท (task ขึ้น Ready ปกติ แค่ยิงผิดจังหวะ) กว่าจะรู้ต้อง export XML ดู
@@ -251,12 +305,18 @@ foreach ($t in $tasks) {
         $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
                         -LogonType Interactive -RunLevel Limited
 
-        $settings = New-ScheduledTaskSettingsSet `
-                        -MultipleInstances IgnoreNew `
-                        -StartWhenAvailable `
-                        -ExecutionTimeLimit ([System.Xml.XmlConvert]::ToTimeSpan($t.TimeLimit)) `
-                        -AllowStartIfOnBatteries:$t.OnBattery `
-                        -DontStopIfGoingOnBatteries:$t.OnBattery
+        $settingsArgs = @{
+            MultipleInstances        = 'IgnoreNew'
+            StartWhenAvailable       = $true
+            ExecutionTimeLimit       = [System.Xml.XmlConvert]::ToTimeSpan($t.TimeLimit)
+            AllowStartIfOnBatteries  = $t.OnBattery
+            DontStopIfGoingOnBatteries = $t.OnBattery
+        }
+        if ($t.RetryCount) {
+            $settingsArgs.RestartCount = $t.RetryCount
+            $settingsArgs.RestartInterval = [System.Xml.XmlConvert]::ToTimeSpan($t.RetryInterval)
+        }
+        $settings = New-ScheduledTaskSettingsSet @settingsArgs
 
         Register-ScheduledTask -TaskName $t.Name -Description $t.Desc `
             -Action $action -Trigger $triggers `

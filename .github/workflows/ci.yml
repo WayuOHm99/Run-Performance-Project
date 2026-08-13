@@ -102,4 +102,6 @@ jobs:
           garmin.tests.test_health_report.PrivateAclChecksTests
           garmin.tests.test_health_report.HealthcheckSecretStorageChecksTests
           garmin.tests.test_backup_healthcheck.HealthcheckSecretStorageTests
+          garmin.tests.test_offsite_backup
+          garmin.tests.test_system_heartbeat
           -v
