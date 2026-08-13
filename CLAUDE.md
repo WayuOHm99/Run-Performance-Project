@@ -29,7 +29,7 @@ Garmin Connect API  →  garmin\data\garmin.db  →  Streamlit Dashboard
 ```
 
 - **ตัดออกแล้ว (3 ส.ค. 69):** ระบบรับรูป/ข้อความจากกลุ่ม LINE (`sync_line.py` + Supabase Edge Function `line-webhook` + Task `Run-Performance-LineSync`), การเขียนข้อมูลขึ้น **Notion** ทั้งหมด, และเครื่องมือ CLI ที่พิมพ์ผลบน terminal (`day.py`, `04_weekly_review.py`)
-- **ห้ามต่อปลายทางใหม่โดยไม่ถาม** — ถ้าอยากได้มุมมองใหม่ให้เพิ่มใน dashboard. ข้อยกเว้นด้าน operations ที่อนุมัติแล้วมีเพียง (1) Restic backup ที่เข้ารหัสก่อนขึ้น private GitHub Release และ (2) heartbeat ที่ส่งเฉพาะจำนวน OK/WARNING/ERROR; workflow กู้คืนแบบ manual อาจสร้าง private artifact อายุ 7 วันตามคำสั่งผู้ใช้
+- **ห้ามต่อปลายทางใหม่โดยไม่ถาม** — ถ้าอยากได้มุมมองใหม่ให้เพิ่มใน dashboard. ข้อยกเว้นด้าน operations ที่อนุมัติแล้วมีเพียง (1) Restic backup ที่เข้ารหัสก่อนขึ้น private GitHub Release และ (2) heartbeat ที่ส่งเฉพาะจำนวน OK/WARNING/ERROR; workflow กู้คืนแบบ manual สร้าง private artifact อายุ 7 วันเฉพาะเมื่อผู้ใช้ opt in
 - **`garmin.db` = source of truth ของตัวเลขทั้งหมด** ส่วนค่าที่คนต้องตัดสิน (โซนซ้อม, LTHR, ผลเทสแลบ) อยู่ในไฟล์นี้และใน `dashboard.py` (`LTHR_BY_SLUG`)
 - **แยกงานแอปมือถือออกไปแล้ว (3 ส.ค. 69):** `platform\` + `docs\app\` ย้ายไปเป็น repo ของตัวเองที่ `D:\RunPerf-Platform` (GitHub: `WayuOHm99/RunPerformance-Platform`) พร้อมประวัติ git ครบ 98 commit — **repo นี้เหลือแค่ระบบ Garmin อย่างเดียว** ถ้าผู้จัดการทีมถามเรื่องแอปมือถือ ให้เปิดอีก repo ไม่ต้องสร้างใหม่ที่นี่
 

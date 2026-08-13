@@ -205,6 +205,12 @@ class OffsiteBackupCliTests(unittest.TestCase):
         self.assertIn("Get-FileHash", source)
         self.assertIn("restic restore latest", source)
         self.assertIn("actions/upload-artifact@v4", source)
+        self.assertIn("upload_recovered_files:", source)
+        self.assertIn("if: ${{ inputs.upload_recovered_files }}", source)
+        self.assertRegex(
+            source,
+            r"(?ms)upload_recovered_files:.*?default:\s*false",
+        )
         self.assertNotRegex(source, r"(?m)^    env:\s*$")
 
     def test_repository_archive_hash_is_streamed(self):

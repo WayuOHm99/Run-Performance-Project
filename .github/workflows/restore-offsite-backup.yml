@@ -2,6 +2,12 @@ name: Restore encrypted offsite backup
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_recovered_files:
+        description: Upload decrypted recovery artifact (private, retained 7 days)
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -76,6 +82,7 @@ jobs:
           python garmin/scripts/validate_sqlite_backup.py --json $database.FullName
 
       - name: Upload recovered files
+        if: ${{ inputs.upload_recovered_files }}
         uses: actions/upload-artifact@v4
         with:
           name: run-performance-restored-${{ github.run_id }}
