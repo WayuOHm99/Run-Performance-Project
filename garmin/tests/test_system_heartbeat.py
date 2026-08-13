@@ -49,6 +49,7 @@ class SystemHeartbeatCliTests(unittest.TestCase):
         source = workflow.read_text(encoding="utf-8")
         self.assertIn("cron: '17 * * * *'", source)
         self.assertIn("gh release download system-health", source)
+        self.assertIn('--repo "$GITHUB_REPOSITORY"', source)
         self.assertIn("TotalHours", source)
         self.assertIn("TotalMinutes -lt -10", source)
         self.assertIn("summary.error", source)

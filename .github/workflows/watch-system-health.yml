@@ -20,7 +20,11 @@ jobs:
       - name: Download privacy-safe heartbeat
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release download system-health --pattern system-health.json --dir "$RUNNER_TEMP"
+        run: >-
+          gh release download system-health
+          --repo "$GITHUB_REPOSITORY"
+          --pattern system-health.json
+          --dir "$RUNNER_TEMP"
 
       - name: Require a fresh healthy report
         shell: pwsh
