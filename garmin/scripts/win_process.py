@@ -25,7 +25,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from pathlib import Path
 
 
 # ไม่ให้ Windows สร้าง console ใหม่ให้โปรเซสลูกเลย (stdout/stderr ยังส่งผ่าน
@@ -37,6 +36,10 @@ CREATE_NO_WINDOW = 0x08000000
 TERMINATED_BY_CONSOLE = 0xC000013A
 
 _SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]*")
+# แยกชื่อไฟล์เองด้วย regex ไม่ใช้ pathlib.Path เพราะ path ที่ตัดคือ path ของ Windows
+# เสมอ แต่เทส/CI รันบน Linux ด้วย — ที่นั่น Path() ไม่ถือว่า '\' เป็นตัวคั่น เลยคืน
+# ทั้งก้อน 'c:\program files\github cli\gh' มาเป็นชื่อคำสั่ง (CI จับได้จริง 16 ส.ค. 69)
+_EXECUTABLE_NAME = re.compile(r"[^\\/]+\Z")
 
 
 def run(command, **kwargs):
@@ -52,7 +55,11 @@ def command_label(command, *, max_words: int = 3) -> str:
     เก็บเฉพาะชื่อไฟล์ + subcommand ที่เป็นคำล้วน ตัด path/tag/URL/ธงทิ้ง
     เพื่อให้รายงานบอกได้ว่า "พังตอนทำอะไร" โดยไม่หลุดชื่อ repo หรือ path จริง
     """
-    parts = [Path(str(command[0])).stem.lower()]
+    executable = _EXECUTABLE_NAME.search(str(command[0]))
+    name = executable.group(0) if executable else str(command[0])
+    if name.lower().endswith(".exe"):
+        name = name[:-len(".exe")]
+    parts = [name.lower()]
     for raw in command[1:]:
         if len(parts) >= max_words:
             break

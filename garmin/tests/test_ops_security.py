@@ -244,6 +244,11 @@ class WindowlessSubprocessTests(unittest.TestCase):
             win_process.command_label([r"C:\restic.exe", "backup", r"C:\Backup\garmin-db-daily"]),
             "restic backup",
         )
+        # เทส/CI รันบน Linux ด้วย — การตัดชื่อไฟล์ต้องไม่พึ่งตัวคั่น path ของ OS ที่รัน
+        self.assertEqual(
+            win_process.command_label(["/usr/bin/gh", "release", "view"]),
+            "gh release view",
+        )
         self.assertEqual(
             win_process.command_label(["powershell.exe", "-NoProfile", "-File", "x.ps1"]),
             "powershell",
