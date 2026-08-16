@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+cd /d "%~dp0.."
 rem NOTE: keep this .bat pure ASCII. The fast path fetches only today's activity
 rem summaries; the twice-daily full sync fills wellness, detail, weather and splits.
 rem Own log file per lane - a shared log made concurrent lanes drop whole rounds.

@@ -580,11 +580,6 @@ def _bounded_number(value, minimum=0, maximum=None):
     return value
 
 
-def _drop_sentinel(value):
-    """Backward-compatible helper retained for tests/callers: reject negatives."""
-    return _bounded_number(value)
-
-
 def _clean_text(value, max_length=500):
     """Keep a small printable text value from an API payload, or return NULL."""
     if not isinstance(value, str):

@@ -62,7 +62,7 @@ $tasks = @(
         Name        = 'Run-Performance-Garmin-Fast'
         Desc        = 'ดึง activity summary วันนี้จาก Garmin ทุก 15 นาที (ไม่มีหน้าต่าง)'
         Exe         = 'wscript.exe'
-        Script      = Join-Path $garmin 'garmin-fast-sync-hidden.vbs'
+        Script      = Join-Path $garmin 'tasks\garmin-fast-sync-hidden.vbs'
         TimeLimit   = 'PT10M'
         OnBattery   = $true
         # เริ่มนาที :05 (→ :05/:20/:35/:50) ไม่ให้ตรงกับ full sync ที่ยิงต้นชั่วโมง —
@@ -76,7 +76,7 @@ $tasks = @(
         Name        = 'Run-Performance-Garmin-Wellness'
         Desc        = 'ดึง wellness ที่ขยับระหว่างวัน (body battery/RHR/stress/HRV/นอน/readiness) ทุก 30 นาที'
         Exe         = 'wscript.exe'
-        Script      = Join-Path $garmin 'garmin-wellness-sync-hidden.vbs'
+        Script      = Join-Path $garmin 'tasks\garmin-wellness-sync-hidden.vbs'
         TimeLimit   = 'PT20M'
         OnBattery   = $true
         # เหลื่อมจาก Fast (:05/:20/:35/:50) และจาก full sync (ต้นชั่วโมง) กันแย่ง sync.lock
@@ -89,7 +89,7 @@ $tasks = @(
         Name        = 'Run-Performance-Garmin'
         Desc        = 'ดึงข้อมูล Garmin (กิจกรรม+wellness) ทุกคนลง garmin.db — ช่อง 08:00 + 21:00 (ยิงทุกชั่วโมงแล้วข้ามเองถ้าช่องนั้นทำแล้ว)'
         Exe         = 'wscript.exe'
-        Script      = Join-Path $garmin 'garmin-sync-hidden.vbs'
+        Script      = Join-Path $garmin 'tasks\garmin-sync-hidden.vbs'
         TimeLimit   = 'PT2H'
         OnBattery   = $true
         # ยิงทุกต้นชั่วโมง แล้วให้ --catch-up-slots 08:00,21:00 ใน .bat ตัดสินว่ารอบไหนของจริง
@@ -129,7 +129,7 @@ $tasks = @(
         Desc        = 'เช็คกิจกรรมที่ถูกลบฝั่ง Garmin ย้อน 90 วัน (soft delete) ทุกอาทิตย์ 09:30'
         # ต้องไม่มีหน้าต่างเหมือนสายอื่น — หน้าต่างที่ปิดได้ คือหน้าต่างที่จะโดนปิด
         Exe         = 'wscript.exe'
-        Script      = Join-Path $garmin 'garmin-reconcile-hidden.vbs'
+        Script      = Join-Path $garmin 'tasks\garmin-reconcile-hidden.vbs'
         TimeLimit   = 'PT2H'
         RetryCount  = 2
         RetryInterval = 'PT30M'
@@ -150,7 +150,7 @@ $tasks = @(
         # เคยเปิดจอดำแล้วโดนปิดกลางคันจริง (2 ส.ค. 69 exit 0xC000013A ค้างที่ Day 1/46)
         # รอบนี้กินเวลาหลายนาที ยิ่งเปิดค้างยิ่งเสี่ยง → ซ่อนหน้าต่างเหมือนสายอื่น
         Exe         = 'wscript.exe'
-        Script      = Join-Path $garmin 'garmin-deepsync-hidden.vbs'
+        Script      = Join-Path $garmin 'tasks\garmin-deepsync-hidden.vbs'
         TimeLimit   = 'PT4H'
         RetryCount  = 2
         RetryInterval = 'PT1H'

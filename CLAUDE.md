@@ -46,14 +46,28 @@ Garmin Connect API  →  garmin\data\garmin.db  →  Streamlit Dashboard
 
 ## โครงสร้างโฟลเดอร์
 
+**หลักการจัดของ: "ของประเภทเดียวกันอยู่ลิ้นชักเดียวกัน และทุกลิ้นชักมีป้ายชื่อ"** — เปิดโฟลเดอร์แล้วต้องเดาได้ทันทีว่าข้างในคืออะไร โดยไม่ต้องเปิดไฟล์อ่าน
+
 ```
 D:\Run-Performance-Project\
-  garmin\                 ← ระบบทั้งหมดอยู่ที่นี่ (ดึงข้อมูล + DB + dashboard)
-  scripts\                ← ตั้ง Scheduled Task + backup
-  docs\                   ← คู่มือใช้งาน + เช็คลิสต์ตรวจข้อมูล
-  run_dashboard.bat       ← เปิด dashboard
-  athletes\ , team_data\  ← คลังเก่าจากยุค LINE (แช่ไว้อ่านอย่างเดียว ไม่มีอะไรมาเติมแล้ว)
+├─ garmin\                  ← ระบบทั้งหมดอยู่ที่นี่ (ดึงข้อมูล + DB + dashboard)
+│  ├─ tasks\                ← ปุ่มสั่งงานของ Windows: .bat (คนกดเองได้) + .vbs (ตัวซ่อนหน้าต่างให้ Task Scheduler เรียก)
+│  ├─ scripts\              ← สมองของระบบ: โค้ด Python ที่ทำงานจริง + dashboard + ตัวตรวจสุขภาพระบบ
+│  ├─ tests\                ← กับดักกันพลาด: เทสที่ล็อกบทเรียนทุกครั้งที่เคยพัง ไม่ให้พังซ้ำ
+│  ├─ share\                ← ชุดขอ token ที่ส่งให้นักกีฬารันเอง
+│  ├─ data\                 ← 🔒 garmin.db + ไฟล์สถานะ sync (นอก git — ข้อมูลสุขภาพ)
+│  ├─ tokens\               ← 🔒 กุญแจเข้าบัญชี Garmin ของนักกีฬา (นอก git)
+│  ├─ .venv\                ← ห้องเครื่องของ Python (สร้างใหม่ได้เสมอ ไม่ต้องสำรอง)
+│  └─ เพิ่มนักกีฬา.bat        ← ปุ่มสำหรับคน: เพิ่มนักกีฬาใหม่
+├─ scripts\                 ← งานระดับเครื่อง: ตั้ง Scheduled Task, สำรองข้อมูล, ตั้งค่าความปลอดภัย
+├─ docs\                    ← คู่มือใช้งาน + เช็คลิสต์ตรวจข้อมูลรายเดือน
+├─ CLAUDE.md                ← สมองโค้ช + บทเรียนทั้งหมด (แหล่งความจริงเดียวของโปรเจกต์)
+└─ run_dashboard.bat        ← ปุ่มเปิด dashboard
 ```
+
+> **กติกาของราก `garmin\`: ให้มีแต่โฟลเดอร์กับปุ่มที่คนกดเอง** — launcher อัตโนมัติทั้ง 10 ไฟล์อยู่ใน `garmin\tasks\` (ย้ายมา 16 ส.ค. 69) ทุก `.bat` ในนั้นขึ้นต้นด้วย `cd /d "%~dp0.."` เพื่อกลับไปยืนที่ราก `garmin\` ก่อนทำงาน — path ที่เหลือข้างในจึงเขียนแบบเดิมได้ทั้งหมด. `.vbs` เรียก `.bat` ที่อยู่ข้าง ๆ ตัวเอง จึงไม่ต้องรู้ path ใคร. เทส `test_sync_batches_run_from_the_garmin_root_not_their_own_folder` ตรึงกติกานี้ไว้ (ย้ายไฟล์แล้วลืมแก้ = เทสแดงทันที ไม่ใช่พังเงียบตอนตี 3)
+>
+> **ล้างของที่ไม่ได้ใช้ออกแล้ว 16 ส.ค. 69:** `athletes\` + `team_data\` (คลังรูป/ข้อความยุค LINE 30 MB — จบบทบาทตั้งแต่ตัดระบบ LINE ออก), `PROJECT-STATE.md` (สรุประบบที่ทับซ้อนกับไฟล์นี้ = แหล่งความจริงที่สอง ซึ่งจะเพี้ยนจากของจริงเสมอ), `.venv-lock-test\` (venv ทิ้งขว้าง 306 MB ที่ถูก mirror ขึ้น backup ทุกคืน), log ยุคก่อนแยกไฟล์ต่อสาย และคอลัมน์ `recovery_time_hrs` ใน DB
 
 ## โมดูล Garmin — ตัวเลขจาก API ตรง
 
@@ -71,12 +85,12 @@ D:\Run-Performance-Project\
 | เพิ่มนักกีฬาใหม่ (ทางหลัก) | ดับเบิลคลิก `garmin\เพิ่มนักกีฬา.bat` (เรียก `01_generate_token.py`) | ผู้จัดการทีมกรอกอีเมล/รหัสผ่าน Garmin ของนักกีฬาเอง 3 อย่าง (ชื่อ/อีเมล/รหัส) → ได้ token ทันทีที่ `garmin\tokens\<slug>\` (รหัสผ่านไม่ถูกเก็บ) |
 | ขอ token แบบนักกีฬารันเอง (ทางเลือก) | `garmin\share\get_garmin_token.py` + `README_athlete.md` | ใช้เมื่อไม่สะดวกขอรหัสผ่านจากนักกีฬาตรงๆ — ส่งให้นักกีฬารันเองครั้งเดียว → ได้ `.zip` ส่งกลับมาแตกไว้ที่ `garmin\tokens\<slug>\` |
 | แตก token | วาง `garmin_tokens.json` ไว้ที่ `garmin\tokens\<slug>\` | slug ที่มีแล้ว: `tong`, `dan`, `p'kao` (พี่เก้า = Suwarong Vongsukda). **หมายเหตุ:** `p'kao` มี apostrophe → ปลอดภัยในสายอัตโนมัติ (auto-discover + subprocess list + SQL parameterized) แต่ถ้าสั่งเองใน shell ต้องครอบ `"p'kao"` |
-| **ดึงกิจกรรมล่าสุด (fast)** | `garmin\scripts\fetch_all.py --days 0 --activities-only --max-workers 3 --lock-timeout 120` | ดึง activity summary ของวันนี้ทุกคนแบบขนาน โดยไม่ยิง detail/weather/splits/wellness/extras; Task `Run-Performance-Garmin-Fast` รันทุก 15 นาที (นาที :05/:20/:35/:50) ผ่าน `garmin-fast-sync-hidden.vbs`. ถ้าชน sync รอบอื่นจะข้ามเงียบและลองใหม่รอบถัดไป |
-| **ดึง wellness ล่าสุด (fast)** | `garmin\scripts\fetch_all.py --days 0 --wellness-fast --max-workers 3 --lock-timeout 240` | ดึงค่าที่ขยับระหว่างวันของวันนี้ — stats + HRV + นอน + Training Readiness (4 endpoint/วัน แทน 9 ของ full sync). จากนั้นตรวจเมื่อวาน: ถ้าเป็น partial/ค่าหลักขาดหรือ Body Battery ผิดช่วง จะย้อนซ่อมเฉพาะวันนั้นด้วย stats+HRV+นอน+respiration+readiness และจำกัดลองซ้ำทุก **6 ชม.** (`repair_attempted_at_utc`). Task `Run-Performance-Garmin-Wellness` ทุก 30 นาที (:12/:42) ผ่าน `garmin-wellness-sync-hidden.vbs`. **ทั้ง fast และ full/deep merge รายคอลัมน์เฉพาะค่าที่ไม่ใช่ NULL** จึงไม่ให้ endpoint ว่างชั่วคราวล้างค่าดีเดิม |
-| ดึงทุกคน (daily) | `garmin\scripts\fetch_all.py --days 3 --catch-up-slots 08:00,21:00` | incremental, idempotent — Task `Run-Performance-Garmin` **ยิงทุกต้นชั่วโมง** ผ่าน `garmin-sync-hidden.vbs` แล้ว `--catch-up-slots` ตัดสินว่ารอบไหนของจริง: ทำงานแค่ **ช่อง 08:00 + 21:00 ช่องละครั้ง** รอบส่วนเกิน exit 75 เงียบ ๆ ไม่แตะ API เลย (log: `C:\Backup\run-performance-logs\garmin-sync-full.log`) — อยากดึงมือเองดับเบิลคลิก `garmin-sync-auto.bat` ได้ (โชว์จอดำ) |
+| **ดึงกิจกรรมล่าสุด (fast)** | `garmin\scripts\fetch_all.py --days 0 --activities-only --max-workers 3 --lock-timeout 120` | ดึง activity summary ของวันนี้ทุกคนแบบขนาน โดยไม่ยิง detail/weather/splits/wellness/extras; Task `Run-Performance-Garmin-Fast` รันทุก 15 นาที (นาที :05/:20/:35/:50) ผ่าน `garmin\tasks\garmin-fast-sync-hidden.vbs`. ถ้าชน sync รอบอื่นจะข้ามเงียบและลองใหม่รอบถัดไป |
+| **ดึง wellness ล่าสุด (fast)** | `garmin\scripts\fetch_all.py --days 0 --wellness-fast --max-workers 3 --lock-timeout 240` | ดึงค่าที่ขยับระหว่างวันของวันนี้ — stats + HRV + นอน + Training Readiness (4 endpoint/วัน แทน 9 ของ full sync). จากนั้นตรวจเมื่อวาน: ถ้าเป็น partial/ค่าหลักขาดหรือ Body Battery ผิดช่วง จะย้อนซ่อมเฉพาะวันนั้นด้วย stats+HRV+นอน+respiration+readiness และจำกัดลองซ้ำทุก **6 ชม.** (`repair_attempted_at_utc`). Task `Run-Performance-Garmin-Wellness` ทุก 30 นาที (:12/:42) ผ่าน `garmin\tasks\garmin-wellness-sync-hidden.vbs`. **ทั้ง fast และ full/deep merge รายคอลัมน์เฉพาะค่าที่ไม่ใช่ NULL** จึงไม่ให้ endpoint ว่างชั่วคราวล้างค่าดีเดิม |
+| ดึงทุกคน (daily) | `garmin\scripts\fetch_all.py --days 3 --catch-up-slots 08:00,21:00` | incremental, idempotent — Task `Run-Performance-Garmin` **ยิงทุกต้นชั่วโมง** ผ่าน `garmin\tasks\garmin-sync-hidden.vbs` แล้ว `--catch-up-slots` ตัดสินว่ารอบไหนของจริง: ทำงานแค่ **ช่อง 08:00 + 21:00 ช่องละครั้ง** รอบส่วนเกิน exit 75 เงียบ ๆ ไม่แตะ API เลย (log: `C:\Backup\run-performance-logs\garmin-sync-full.log`) — อยากดึงมือเองดับเบิลคลิก `garmin\tasks\garmin-sync-auto.bat` ได้ (โชว์จอดำ) |
 | backfill รายคน | `garmin\scripts\03_backfill.py --athlete <slug> --days 90` | ดึงย้อนหลังลึกครั้งแรกหลังได้ token ใหม่ — มี `--skip-activities` ไว้ re-backfill เฉพาะ wellness/extras (กันยิง API ซ้ำ เสี่ยง rate limit) + `--reconcile` เช็คกิจกรรมถูกลบ |
-| **เช็คกิจกรรมถูกลบ (รายสัปดาห์)** | `garmin\scripts\fetch_all.py --days 90 --reconcile` (bat: `garmin-reconcile-auto.bat`) | ดึงแค่รายชื่อ activityId จาก Garmin เทียบกับ DB → ตัวที่หายไปฝั่งแอป mark `deleted_at` (soft delete). daily fetch reconcile หน้าต่าง 3 วันให้เองอยู่แล้ว ตัวนี้กวาดย้อนไกล 90 วัน |
-| **deep resync wellness (รายเดือน)** | `garmin\scripts\fetch_all.py --days 45 --skip-activities` (bat: `garmin-deepsync-auto.bat`) | ดึง wellness/extras ย้อน 45 วันซ้ำ ดักค่าที่ Garmin คำนวณย้อนหลังทีหลัง (sleep/VO2max/training_status ที่มาช้าเกินหน้าต่าง daily 3 วัน) + รัน check_drift ต่อ |
+| **เช็คกิจกรรมถูกลบ (รายสัปดาห์)** | `garmin\scripts\fetch_all.py --days 90 --reconcile` (bat: `garmin\tasks\garmin-reconcile-auto.bat`) | ดึงแค่รายชื่อ activityId จาก Garmin เทียบกับ DB → ตัวที่หายไปฝั่งแอป mark `deleted_at` (soft delete). daily fetch reconcile หน้าต่าง 3 วันให้เองอยู่แล้ว ตัวนี้กวาดย้อนไกล 90 วัน |
+| **deep resync wellness (รายเดือน)** | `garmin\scripts\fetch_all.py --days 45 --skip-activities` (bat: `garmin\tasks\garmin-deepsync-auto.bat`) | ดึง wellness/extras ย้อน 45 วันซ้ำ ดักค่าที่ Garmin คำนวณย้อนหลังทีหลัง (sleep/VO2max/training_status ที่มาช้าเกินหน้าต่าง daily 3 วัน) + รัน check_drift ต่อ |
 | **ตรวจ data quality / schema drift** | `garmin\scripts\check_drift.py [--athlete <slug>] [--json]` | รายงาน coverage ต่อ field ทั้ง **7 วันและ 30 วันเต็มล่าสุด** (เวลา Asia/Bangkok), เทียบกับฐานเดิมโดยไม่ฟ้อง field ที่อุปกรณ์ไม่เคยส่ง พร้อมจับ partial wellness snapshot, ค่าเกินช่วง/ติดลบ/NaN/Inf และความสัมพันธ์ผิด เช่น BB high < low. `--json` ใช้กับงานอัตโนมัติ; exit 1 ถ้าพบจุดน่าสงสัย |
 | เช็ค DB | `garmin\scripts\check_db.py` | นับ row + ตัวอย่างล่าสุด |
 
@@ -137,12 +151,12 @@ D:\Run-Performance-Project\
 
 | Task | เวลา | ทำอะไร |
 |---|---|---|
-| `Run-Performance-Garmin-Fast` | ทุก 15 นาที (:05/:20/:35/:50) | ดึง activity summary ของวันนี้ (`garmin-fast-sync-hidden.vbs`) |
-| `Run-Performance-Garmin-Wellness` | ทุก 30 นาที (:12/:42) | ดึง wellness วันนี้ + ซ่อม partial ของเมื่อวานแบบมีเงื่อนไข/พัก 6 ชม. + watchdog เฝ้าสายที่เงียบหาย (`garmin-wellness-sync-hidden.vbs`) |
-| `Run-Performance-Garmin` | ทุกต้นชั่วโมง → ทำจริงช่อง 08:00 + 21:00 | ดึง Garmin ทุกคนลง `garmin.db` (`garmin-sync-hidden.vbs`) — รอบส่วนเกินข้ามเองด้วย `--catch-up-slots` |
+| `Run-Performance-Garmin-Fast` | ทุก 15 นาที (:05/:20/:35/:50) | ดึง activity summary ของวันนี้ (`garmin\tasks\garmin-fast-sync-hidden.vbs`) |
+| `Run-Performance-Garmin-Wellness` | ทุก 30 นาที (:12/:42) | ดึง wellness วันนี้ + ซ่อม partial ของเมื่อวานแบบมีเงื่อนไข/พัก 6 ชม. + watchdog เฝ้าสายที่เงียบหาย (`garmin\tasks\garmin-wellness-sync-hidden.vbs`) |
+| `Run-Performance-Garmin` | ทุกต้นชั่วโมง → ทำจริงช่อง 08:00 + 21:00 | ดึง Garmin ทุกคนลง `garmin.db` (`garmin\tasks\garmin-sync-hidden.vbs`) — รอบส่วนเกินข้ามเองด้วย `--catch-up-slots` |
 | `Run-Performance-Backup` | 22:00 | สร้าง local snapshot ที่ตรวจแล้วใน `C:\Backup` (`backup-hidden.vbs` → `สำรองข้อมูล.bat`) |
-| `Run-Performance-Garmin-Reconcile` | อาทิตย์ 09:30 | เช็คกิจกรรมถูกลบย้อน 90 วัน (`garmin-reconcile-hidden.vbs`) — ต้องใช้ `-IncludeOptional` |
-| `Run-Performance-Garmin-DeepSync` | ทุก 4 สัปดาห์ 10:30 | deep resync wellness + check_drift (`garmin-deepsync-hidden.vbs`) — ต้องใช้ `-IncludeOptional` |
+| `Run-Performance-Garmin-Reconcile` | อาทิตย์ 09:30 | เช็คกิจกรรมถูกลบย้อน 90 วัน (`garmin\tasks\garmin-reconcile-hidden.vbs`) — ต้องใช้ `-IncludeOptional` |
+| `Run-Performance-Garmin-DeepSync` | ทุก 4 สัปดาห์ 10:30 | deep resync wellness + check_drift (`garmin\tasks\garmin-deepsync-hidden.vbs`) — ต้องใช้ `-IncludeOptional` |
 | `Run-Performance-OffsiteBackup` | 22:30 | Restic backup จากสำเนา local ที่ตรวจแล้ว → encrypted GitHub Release |
 | `Run-Performance-RestoreDrill` | ทุก 4 สัปดาห์ อาทิตย์ 12:00 | ดาวน์โหลด asset ล่าสุด → restore → SQLite quick_check |
 | `Run-Performance-SystemHealth` | ทุก 2 ชั่วโมง (:25) | ส่ง heartbeat สรุปเท่านั้น; GitHub Actions เฝ้าความสดทุกชั่วโมง |

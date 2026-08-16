@@ -402,32 +402,24 @@ def fmt_recovery_time(minutes):
 
 
 def get_recovery_minutes(row):
-    """Read new schema first; legacy ``_hrs`` also contains raw API minutes."""
+    """Read Recovery Time in raw Garmin minutes."""
     if row is None:
         return float("nan")
-    new_value = row.get("recovery_time_min")
-    if pd.notna(new_value):
-        return new_value
-    return row.get("recovery_time_hrs", float("nan"))
+    value = row.get("recovery_time_min")
+    return value if pd.notna(value) else float("nan")
 
 
 def recovery_minutes_series(df):
     """Return Recovery Time minutes without dropping calendar rows that are NULL.
 
-    The new column wins per row; the misleadingly named legacy ``_hrs`` column is
-    a raw-minute fallback.  Keeping the original index lets Plotly render a real
-    gap when ``connectgaps=False`` instead of drawing across a missing day.
+    Keeping the original index lets Plotly render a real gap when
+    ``connectgaps=False`` instead of drawing a line across a missing day.
     """
     if df is None:
         return pd.Series(dtype=float)
-    values = pd.Series(float("nan"), index=df.index, dtype=float)
-    if "recovery_time_min" in df.columns:
-        values = pd.to_numeric(df["recovery_time_min"], errors="coerce")
-    if "recovery_time_hrs" in df.columns:
-        values = values.combine_first(
-            pd.to_numeric(df["recovery_time_hrs"], errors="coerce")
-        )
-    return values
+    if "recovery_time_min" not in df.columns:
+        return pd.Series(float("nan"), index=df.index, dtype=float)
+    return pd.to_numeric(df["recovery_time_min"], errors="coerce")
 
 
 def bangkok_date(now_utc=None):
@@ -1971,7 +1963,7 @@ with tab_health:
 
         # --- Garmin Readiness / Recovery: เปิดเมื่อ field ใด field หนึ่งมีค่า ไม่ผูกกับ ACWR factor ---
         readiness_section_fields = [
-            "training_readiness", "recovery_time_min", "recovery_time_hrs",
+            "training_readiness", "recovery_time_min",
             "acute_load", "acwr_percent", "hrv_factor_pct", "stress_history_pct",
             "readiness_sleep_factor_pct", "recovery_time_factor_pct",
             "training_status",
@@ -1983,8 +1975,6 @@ with tab_health:
                 ("readiness_timestamp_local", "readiness_timestamp_utc"),
             )
             recovery_snap = latest_field(wellness_df, "recovery_time_min")
-            if recovery_snap is None:
-                recovery_snap = latest_field(wellness_df, "recovery_time_hrs")
             acute_snap = latest_field(wellness_df, "acute_load")
             acwr_factor_snap = latest_field(wellness_df, "acwr_percent")
             ready_level = fmt_text(ready_snap["row"].get("readiness_level")) if ready_snap else ""
@@ -2165,8 +2155,6 @@ with tab_health:
             "endurance_score": "Endurance Score", "hill_score_overall": "Hill Score",
             "hill_score_strength": "Hill Strength", "hill_score_endurance": "Hill Endurance",
         }
-        if "recovery_time_min" not in wellness_df.columns and "recovery_time_hrs" in wellness_df.columns:
-            history_labels["recovery_time_hrs"] = "Recovery Time (นาที; schema เดิม)"
         history_columns = [
             column for column in history_labels
             if column in wellness_df.columns

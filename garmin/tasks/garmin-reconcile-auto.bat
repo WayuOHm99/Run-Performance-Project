@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+cd /d "%~dp0.."
 rem Weekly: detect activities deleted on Garmin's side over the last 90 days and mark
 rem deleted_at (fetches activity-id list only, no detail -> light API). Schedule weekly.
 rem Keep this .bat pure ASCII: Thai text breaks cmd.exe parsing.

@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+cd /d "%~dp0.."
 rem NOTE: keep this .bat pure ASCII. Fast wellness pulls today's intraday values
 rem (body battery / resting HR / stress / steps / HRV / sleep / training readiness)
 rem and updates them column-by-column, so nothing the full sync stored gets wiped.

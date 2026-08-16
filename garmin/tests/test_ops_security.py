@@ -19,6 +19,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 GARMIN_ROOT = PROJECT_ROOT / "garmin"
+TASKS_DIR = GARMIN_ROOT / "tasks"
 ACL_SCRIPT = PROJECT_ROOT / "scripts" / "harden_private_acl.ps1"
 
 
@@ -44,10 +45,21 @@ class WrapperExitPropagationTests(unittest.TestCase):
         "garmin-deepsync-auto.bat": "SYNC_EXIT",
     }
 
+    def test_sync_batches_run_from_the_garmin_root_not_their_own_folder(self):
+        """launcher อยู่ใน garmin\\tasks\\ แต่ทุก path ข้างในเขียนแบบอิงราก garmin
+
+        ถ้าใครย้ายไฟล์แล้วลืมแก้บรรทัด cd งานจะพังเงียบ ๆ แบบเดียวกับตอนเปลี่ยนชื่อ
+        โฟลเดอร์ 26 ก.ค. 69 — เทสนี้ตรึงข้อตกลงนั้นไว้
+        """
+        for filename in self.BAT_EXIT_VARS:
+            with self.subTest(filename=filename):
+                source = (TASKS_DIR / filename).read_text(encoding="utf-8-sig")
+                self.assertRegex(source, r'(?im)^cd /d "%~dp0\.\."\s*$')
+
     def test_sync_batches_propagate_real_result_after_notification(self):
         for filename, variable in self.BAT_EXIT_VARS.items():
             with self.subTest(filename=filename):
-                source = (GARMIN_ROOT / filename).read_text(encoding="utf-8-sig")
+                source = (TASKS_DIR / filename).read_text(encoding="utf-8-sig")
                 self.assertRegex(
                     source,
                     rf"(?im)^exit /b %{re.escape(variable)}%\s*$",
@@ -55,7 +67,7 @@ class WrapperExitPropagationTests(unittest.TestCase):
                 )
 
     def test_deep_sync_propagates_drift_failure_with_explicit_context(self):
-        source = (GARMIN_ROOT / "garmin-deepsync-auto.bat").read_text(
+        source = (TASKS_DIR / "garmin-deepsync-auto.bat").read_text(
             encoding="ascii"
         )
         self.assertRegex(source, r'(?im)^set "DRIFT_EXIT=%ERRORLEVEL%"\s*$')
@@ -67,7 +79,7 @@ class WrapperExitPropagationTests(unittest.TestCase):
     def test_sync_batches_fail_closed_on_recursive_garmin_acl_hardening(self):
         for filename in self.BAT_EXIT_VARS:
             with self.subTest(filename=filename):
-                source = (GARMIN_ROOT / filename).read_text(encoding="utf-8-sig")
+                source = (TASKS_DIR / filename).read_text(encoding="utf-8-sig")
                 self.assertRegex(
                     source,
                     r'(?i)harden_private_acl\.ps1" -Scope Garmin -Recurse',
@@ -110,7 +122,7 @@ class WrapperExitPropagationTests(unittest.TestCase):
     def test_hidden_launchers_return_child_exit_code(self):
         launchers = [
             PROJECT_ROOT / "scripts" / "backup-hidden.vbs",
-            *sorted(GARMIN_ROOT.glob("garmin-*-hidden.vbs")),
+            *sorted(TASKS_DIR.glob("garmin-*-hidden.vbs")),
         ]
         self.assertGreaterEqual(len(launchers), 6)
         for path in launchers:

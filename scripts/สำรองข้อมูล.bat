@@ -18,6 +18,12 @@ rem
 rem WHY .venv IS EXCLUDED: 418 MB of reproducible packages. The 2026-08-03 run was
 rem still grinding through the tree when it got killed (0xC000013A). Rebuild with
 rem   garmin\.venv\Scripts\python.exe -m pip install -r garmin\requirements.txt
+rem The pattern is .venv* on purpose: an abandoned throwaway env named
+rem .venv-lock-test (306 MB) was mirrored every night for weeks because the old
+rem exclusion matched the exact name .venv only, and git could not see it either
+rem (a venv ships its own .gitignore). .tmp is scratch space for tooling and is
+rem excluded for the same reason. Excluded directories are never deleted from the
+rem destination by /MIR, so clean leftovers there by hand once.
 for %%I in ("%~dp0..") do set "SRC=%%~fI"
 set "GARMIN=%SRC%\garmin"
 set "DEST=C:\Backup\Run-Performance"
@@ -39,7 +45,7 @@ set "PREP_EXIT=%ERRORLEVEL%"
 if not "%PREP_EXIT%"=="0" exit /b %PREP_EXIT%
 echo ==== BACKUP %date% %time% ====>> "%LOG%"
 
-robocopy "%SRC%" "%DEST%" /MIR /XF .env garmin.db garmin.db-wal garmin.db-shm /XD __pycache__ .venv node_modules /R:2 /W:5 /NP /NDL /LOG+:"%LOG%"
+robocopy "%SRC%" "%DEST%" /MIR /XF .env garmin.db garmin.db-wal garmin.db-shm /XD __pycache__ .venv* node_modules .tmp /R:2 /W:5 /NP /NDL /LOG+:"%LOG%"
 set "ROBO_EXIT=%ERRORLEVEL%"
 
 "%GARMIN%\.venv\Scripts\python.exe" "%GARMIN%\scripts\backup_db.py" --dest "%DEST%\garmin\data" --daily "%DAILY%" --robocopy-exit %ROBO_EXIT% >> "%LOG%" 2>&1

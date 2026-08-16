@@ -170,10 +170,6 @@ WELLNESS_COLUMNS = [
     ("acwr_factor_feedback", "TEXT"),
     ("hrv_factor_pct", "REAL"),
     ("hrv_factor_feedback", "TEXT"),
-    # Legacy only: old ingestion stored Garmin's raw minute value under this
-    # misleading name.  Keep it so older dashboard builds can still open the DB;
-    # new ingestion writes recovery_time_min and the migration below copies history.
-    ("recovery_time_hrs", "REAL"),
     ("recovery_time_min", "REAL"),
     ("recovery_time_factor_pct", "REAL"),
     ("recovery_time_factor_feedback", "TEXT"),
@@ -277,7 +273,10 @@ def _migrate_recovery_minutes(cur):
 
     `recovery_time_hrs` historically received Garmin's raw `recoveryTime`
     unchanged.  The raw value is minutes, so this is a rename/copy, not a unit
-    conversion.  Keep the legacy column untouched for older app versions.
+    conversion.  The live database no longer has the legacy column (dropped
+    2026-08-16 after every value was migrated), and the schema never creates it
+    again — but a database restored from an older backup still carries it, so
+    this one-way copy stays as a safety net and simply reports 0 otherwise.
     """
     columns = {row[1] for row in cur.execute("PRAGMA table_info(fact_daily_wellness)")}
     if not {"recovery_time_hrs", "recovery_time_min"}.issubset(columns):

@@ -71,9 +71,6 @@ WELLNESS_FIELDS = (
     "acwr_factor_feedback",
     "hrv_factor_pct",
     "recovery_time_min",
-    # Kept while old databases migrate.  Despite its old name, stored values
-    # are raw Garmin minutes and the dashboard treats it as a fallback only.
-    "recovery_time_hrs",
     "recovery_time_factor_pct",
     "recovery_time_change_phrase",
     "stress_history_pct",
@@ -171,7 +168,6 @@ RANGE_RULES = {
     "hrv_factor_pct": (0, 100),
     "stress_history_pct": (0, 100),
     "recovery_time_min": (0, 5_760),
-    "recovery_time_hrs": (0, 5_760),
 }
 
 
@@ -327,9 +323,10 @@ def coverage_for_athlete(
     rows: list[dict] = []
 
     wellness_columns = table_columns(conn, "fact_daily_wellness")
-    # `recovery_time_hrs` is a retired, misleading legacy name.  Once the
-    # correctly named minute column exists, monitoring it would create a planned
-    # 100% -> 0% drift alert because new ingestion intentionally stops writing it.
+    # `recovery_time_hrs` is a retired, misleading legacy name, dropped from the
+    # live database on 2026-08-16.  A database restored from an older backup
+    # still has it, and monitoring it there would raise a planned 100% -> 0%
+    # drift alert because ingestion intentionally stopped writing it.
     legacy_exclusions = (
         {"recovery_time_hrs"} if "recovery_time_min" in wellness_columns else set()
     )

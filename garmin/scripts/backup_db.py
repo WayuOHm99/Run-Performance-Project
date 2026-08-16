@@ -260,9 +260,13 @@ def rotate_daily(daily_dir: Path, snapshot_path: Path) -> None:
         tmp.unlink(missing_ok=True)
 
     # Delete old generations only after today's verified file is atomically visible.
-    old = sorted(daily_dir.glob("garmin-*.db"))[:-KEEP_DAILY]
-    for f in old:
-        f.unlink(missing_ok=True)
+    # ต้องลบ sidecar ของ WAL (-wal/-shm) ไปพร้อมกันด้วย: ทุกครั้งที่มีใครเปิดสำเนา
+    # ตรวจ (validate/quick_check ของ health report และ offsite backup) SQLite จะสร้าง
+    # `-shm` ทิ้งไว้ข้างไฟล์ — ถ้าลบแต่ `.db` ไฟล์กำพร้าจะกองสะสมไปเรื่อย ๆ ตลอดกาล
+    # (เจอจริง 16 ส.ค. 69: เหลือ sidecar ของ 4–7 ส.ค. ทั้งที่ .db ถูกหมุนทิ้งไปแล้ว)
+    for old in sorted(daily_dir.glob("garmin-*.db"))[:-KEEP_DAILY]:
+        for path in (old, *daily_dir.glob(f"{old.name}-*")):
+            path.unlink(missing_ok=True)
 
 
 def write_status(run_at: datetime, ok: bool, reason: str, warnings: list) -> bool:

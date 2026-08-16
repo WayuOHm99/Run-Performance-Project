@@ -300,32 +300,32 @@ class FormattingAndVisibilityTests(unittest.TestCase):
         self.assertEqual(HELPERS["fmt_recovery_time"](1), "1 นาที")
         self.assertEqual(HELPERS["fmt_recovery_time"](0), "0 นาที")
 
-    def test_new_recovery_column_wins_and_legacy_raw_minutes_remain_usable(self):
+    def test_recovery_reads_only_the_minute_column(self):
+        """คอลัมน์ legacy `recovery_time_hrs` ถูกลบทิ้งแล้ว (16 ส.ค. 69) — ถ้ามันโผล่มา
+        จาก DB เก่าที่ restore มา ต้องไม่ถูกอ่านปนเข้ามาเงียบ ๆ อีก"""
         self.assertEqual(
-            HELPERS["get_recovery_minutes"](
-                pd.Series({"recovery_time_min": 30, "recovery_time_hrs": 999})
-            ),
-            30,
+            HELPERS["get_recovery_minutes"](pd.Series({"recovery_time_min": 30})), 30
         )
-        self.assertEqual(
+        self.assertTrue(pd.isna(
             HELPERS["get_recovery_minutes"](
                 pd.Series({"recovery_time_min": None, "recovery_time_hrs": 90})
-            ),
-            90,
-        )
+            )
+        ))
 
     def test_recovery_trend_preserves_middle_null_and_falls_back_per_row(self):
         frame = pd.DataFrame({
             "calendar_date": ["2026-08-07", "2026-08-08", "2026-08-09"],
-            "recovery_time_min": [60, None, None],
-            "recovery_time_hrs": [999, None, 90],
+            "recovery_time_min": [60, None, 90],
+            "recovery_time_hrs": [999, 999, 999],
         })
 
         values = HELPERS["recovery_minutes_series"](frame)
 
-        self.assertEqual(values.iloc[0], 60)  # new schema wins
+        self.assertEqual(values.iloc[0], 60)
         self.assertTrue(pd.isna(values.iloc[1]))  # calendar gap must survive
-        self.assertEqual(values.iloc[2], 90)  # legacy raw-minute fallback
+        self.assertEqual(values.iloc[2], 90)
+        # คอลัมน์ legacy ต้องไม่ถูกดึงมาอุดช่องว่างอีก
+        self.assertEqual(len(values), 3)
 
     def test_dashboard_business_date_and_db_timestamp_are_bangkok_pinned(self):
         utc_evening = datetime.datetime(

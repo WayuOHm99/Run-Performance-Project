@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+cd /d "%~dp0.."
 rem Monthly: deep resync wellness/extras over the last 45 days (skip activities -> no
 rem duplicate API). Catches values Garmin recomputes late (sleep/VO2max/training_status
 rem beyond the daily 3-day window). Then run schema-drift check. Schedule monthly.

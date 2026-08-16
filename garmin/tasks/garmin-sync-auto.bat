@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
+cd /d "%~dp0.."
 rem NOTE: keep this .bat pure ASCII. Thai text in a .bat breaks cmd.exe parsing
 rem (multibyte bytes get mis-split into bogus commands, even inside rem). Thai belongs
 rem in the .py/.ps1 files, not here.

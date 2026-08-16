@@ -61,25 +61,6 @@ def use_data_dir(path) -> Path:
     return previous
 
 
-def _rate(cur, sql, params):
-    """Compatibility helper: return ``(COUNT(field), COUNT(*))``."""
-    row = cur.execute(sql, params).fetchone()
-    return int(row[0] or 0), int(row[1] or 0)
-
-
-def _judge(table, field, recent, prior):
-    """Compatibility wrapper for the original 30-day drift rule."""
-    return dq.judge_drift(table, field, recent, prior, horizon_days=30)
-
-
-def check_athlete(conn, slug, athlete_id, *, today=None):
-    """Return findings only, preserving the original public function shape."""
-    findings, _coverage = dq.check_athlete(
-        conn, slug, athlete_id, today=today,
-    )
-    return findings
-
-
 def _coverage_line(item: dict) -> str:
     recent_nn, recent_total = item["recent"]
     prior_nn, prior_total = item["prior"]
