@@ -125,6 +125,15 @@ PARTIAL_SNAPSHOT_FIELDS = (
     "avg_sleep_respiration",
 )
 
+# วันที่นาฬิกาไม่ได้ sync เข้าแอป Garmin เลย = ไม่มีอะไรให้เราดึงไม่ว่าจะยิงถี่แค่ไหน
+# (เพดานความสดของระบบคือจังหวะที่นักกีฬา sync ไม่ใช่ความถี่ polling ของเรา)
+# วันเดียวแบบนั้นเป็นเรื่องปกติของนักกีฬา ไม่ใช่ระบบพัง — ตี ERROR ทุกครั้งจะทำให้
+# health report/heartbeat แดงค้างจนกว่านักกีฬาจะเปิดแอป แล้ว "แดง" ก็จะแปลว่าอะไร
+# ไม่ได้อีกต่อไป (บทเรียน 5 ส.ค. 69: คำเตือนต้องทำอะไรได้วันนี้ ไม่งั้นคือ noise)
+# แต่เงียบต่อกันหลายวัน = ต้องตามจริงจัง จึงยกกลับเป็น ERROR ที่ขอบนี้
+DEVICE_SILENT_ERROR_DAYS = 3
+DEVICE_SILENT_MAX_LOOKBACK_DAYS = 30
+
 # Monitoring bounds are intentionally conservative.  They flag records for
 # review; ingestion owns the stricter decision about whether to discard input.
 RANGE_RULES = {
@@ -195,6 +204,47 @@ def completed_window(today: date, days: int, offset_days: int = 0) -> tuple[str,
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _has_activity_on(conn: sqlite3.Connection, athlete_id: int, day: str) -> bool:
+    """True ถ้ามีกิจกรรม (ที่ยังไม่ถูกลบ) ของวันนั้น = นาฬิกาส่งข้อมูลเข้ามาจริง."""
+    columns = table_columns(conn, "fact_activity")
+    if "start_time_local" not in columns:
+        return False
+    deleted = " AND deleted_at IS NULL" if "deleted_at" in columns else ""
+    row = conn.execute(
+        "SELECT 1 FROM fact_activity WHERE athlete_id = ? "
+        f"AND substr(start_time_local, 1, 10) = ?{deleted} LIMIT 1",
+        (athlete_id, day),
+    ).fetchone()
+    return row is not None
+
+
+def _wellness_silent_streak(
+    conn: sqlite3.Connection,
+    athlete_id: int,
+    fields: tuple[str, ...],
+    last_day: str,
+    *,
+    max_days: int = DEVICE_SILENT_MAX_LOOKBACK_DAYS,
+) -> int:
+    """นับวันติดต่อกันย้อนจาก ``last_day`` ที่ไม่มีค่า wellness หลักเลยสักตัว."""
+    if not fields:
+        return 0
+    condition = " OR ".join(f"{_identifier(name)} IS NOT NULL" for name in fields)
+    anchor = date.fromisoformat(last_day)
+    streak = 0
+    while streak < max_days:
+        day = (anchor - timedelta(days=streak)).isoformat()
+        row = conn.execute(
+            "SELECT 1 FROM fact_daily_wellness "
+            f"WHERE athlete_id = ? AND calendar_date = ? AND ({condition}) LIMIT 1",
+            (athlete_id, day),
+        ).fetchone()
+        if row is not None:
+            break
+        streak += 1
+    return streak
 
 
 def _identifier(name: str) -> str:
@@ -451,15 +501,23 @@ def partial_snapshot_findings(
     present = [field for field in expected if values[field] is not None]
     missing = [field for field in expected if values[field] is None]
     if not present:
+        # แยกให้ออกก่อนตัดสินความรุนแรง: "นาฬิกาไม่ได้ส่งอะไรมาเลยทั้งวัน" คนละเรื่อง
+        # กับ "วันนั้นมีข้อมูลเข้ามาแต่ wellness หายไป" — อย่างหลังคือ pipeline/endpoint
+        # น่าสงสัยจริง ต้องดังเต็มเสียง ส่วนอย่างแรกแก้ที่ตัวนักกีฬา (เปิดแอปให้ sync)
+        device_signal = _has_activity_on(conn, athlete_id, yesterday)
+        silent_days = _wellness_silent_streak(conn, athlete_id, monitored, yesterday)
+        severe = device_signal or silent_days >= DEVICE_SILENT_ERROR_DAYS
         return [{
             "kind": "missing_snapshot",
-            "level": "ERROR",
+            "level": "ERROR" if severe else "WARNING",
             "table": "wellness",
             "field": ",".join(missing),
             "calendar_date": yesterday,
             "missing": missing,
             "present": [],
             "reason": "row_missing" if row_missing else "row_empty",
+            "device_signal": device_signal,
+            "silent_days": silent_days,
         }]
 
     nightly_missing = {

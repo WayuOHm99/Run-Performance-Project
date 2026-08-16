@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -10,6 +11,15 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:  # รันปกติ (scripts/ อยู่ใน sys.path)
+    import win_process
+except ModuleNotFoundError:  # ถูกโหลดตรงด้วย importlib จาก cwd ไหนก็ได้
+    _wp_spec = importlib.util.spec_from_file_location(
+        "garmin_win_process", Path(__file__).with_name("win_process.py")
+    )
+    win_process = importlib.util.module_from_spec(_wp_spec)
+    _wp_spec.loader.exec_module(win_process)
 
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +53,7 @@ def summarize(report: dict) -> dict:
 
 
 def _run(command: list[str], *, cwd=None, timeout=180, allow_failure=False):
-    completed = subprocess.run(
+    completed = win_process.run(
         command,
         cwd=cwd,
         capture_output=True,
@@ -54,7 +64,12 @@ def _run(command: list[str], *, cwd=None, timeout=180, allow_failure=False):
         check=False,
     )
     if completed.returncode != 0 and not allow_failure:
-        raise HeartbeatError(f"command_failed:{Path(command[0]).name}")
+        # ชื่อคำสั่ง + สาเหตุ (แยก "โดนสั่งจบ" ออกจาก "จบเองแบบล้มเหลว") โดยไม่พก
+        # stdout/stderr ติดไปด้วย — heartbeat ห้ามพารายละเอียดออกนอกเครื่อง
+        raise HeartbeatError(
+            f"command_failed:{win_process.command_label(command)}:"
+            f"{win_process.exit_reason(completed.returncode)}"
+        )
     return completed
 
 

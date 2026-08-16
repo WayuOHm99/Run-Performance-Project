@@ -9,12 +9,21 @@ Saves token to tokens/<name>/garmin_tokens.json
 Password is NEVER stored anywhere.
 """
 
+import importlib.util
 import os
 import re
-import subprocess
 import sys
 from getpass import getpass
 from pathlib import Path
+
+try:  # normal run (scripts/ is on sys.path)
+    import win_process
+except ModuleNotFoundError:  # loaded directly by importlib from any cwd
+    _wp_spec = importlib.util.spec_from_file_location(
+        "garmin_win_process", Path(__file__).with_name("win_process.py")
+    )
+    win_process = importlib.util.module_from_spec(_wp_spec)
+    _wp_spec.loader.exec_module(win_process)
 
 # Resolve project root (one level up from scripts/)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +47,7 @@ def harden_garmin_private_dirs() -> None:
         return
     if not ACL_SCRIPT.is_file():
         raise RuntimeError(f"ACL hardening script not found: {ACL_SCRIPT}")
-    completed = subprocess.run(
+    completed = win_process.run(
         [
             "powershell.exe",
             "-NoProfile",

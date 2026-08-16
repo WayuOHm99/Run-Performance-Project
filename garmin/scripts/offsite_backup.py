@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -17,6 +18,15 @@ from pathlib import Path
 
 import backup_db
 from validate_sqlite_backup import validate as validate_sqlite
+
+try:  # รันปกติ (scripts/ อยู่ใน sys.path)
+    import win_process
+except ModuleNotFoundError:  # ถูกโหลดตรงด้วย importlib จาก cwd ไหนก็ได้
+    _wp_spec = importlib.util.spec_from_file_location(
+        "garmin_win_process", Path(__file__).with_name("win_process.py")
+    )
+    win_process = importlib.util.module_from_spec(_wp_spec)
+    _wp_spec.loader.exec_module(win_process)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +62,7 @@ def _cleanup_restore_tree(root: Path) -> None:
 
     environment = os.environ.copy()
     environment["RUN_PERF_RESTORE_CLEANUP_TARGET"] = str(resolved)
-    completed = subprocess.run(
+    completed = win_process.run(
         [
             "powershell.exe", "-NoProfile", "-Command",
             "$p=$env:RUN_PERF_RESTORE_CLEANUP_TARGET; "
@@ -112,7 +122,7 @@ def _run(
     command: list[str], *, env=None, cwd=None, timeout=14_400,
     allow_failure=False,
 ):
-    completed = subprocess.run(
+    completed = win_process.run(
         command,
         env=env,
         cwd=cwd,
@@ -124,9 +134,19 @@ def _run(
         check=False,
     )
     if completed.returncode != 0 and not allow_failure:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()
-        suffix = detail[-1][:300] if detail else f"exit_{completed.returncode}"
-        raise OffsiteBackupError(f"command_failed:{Path(command[0]).name}:{suffix}")
+        # ระบุให้ได้ว่า "พังตอนทำอะไร" (gh release upload ≠ gh repo view) และแยก
+        # "โดนสั่งจบจากข้างนอก" ออกจาก "คำสั่งตอบว่าล้มเหลว" — รอบที่โดนฆ่ามัก
+        # ไม่มี stderr เลย ถ้าไม่บอกตรง ๆ จะเหลือแค่ตัวเลข exit ที่อ่านไม่ออก
+        label = win_process.command_label(command)
+        if win_process.was_terminated(completed.returncode):
+            suffix = win_process.exit_reason(completed.returncode)
+        else:
+            detail = (completed.stderr or completed.stdout).strip().splitlines()
+            suffix = (
+                detail[-1][:300] if detail
+                else win_process.exit_reason(completed.returncode)
+            )
+        raise OffsiteBackupError(f"command_failed:{label}:{suffix}")
     return completed
 
 

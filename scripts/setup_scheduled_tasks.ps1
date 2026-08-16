@@ -12,6 +12,7 @@
 #   เพิ่ม -IncludeOptional เพื่อตั้ง reconcile รายสัปดาห์ + deepsync รายเดือนด้วย
 #   เพิ่ม -TaskName <ชื่อ> เพื่อตั้งเฉพาะ task ที่ระบุ
 #   เพิ่ม -DryRun เพื่อดูว่าจะตั้งอะไรบ้างโดยไม่แตะของจริง
+#   เพิ่ม -Json เพื่อให้ผลลัพธ์เป็น JSON สำหรับเครื่องอ่าน (เทส/health check)
 #
 # หมายเหตุ
 #   - path ทุกอันคำนวณจากตำแหน่งไฟล์นี้ ไม่ hardcode → ย้ายโฟลเดอร์แล้วรันซ้ำก็จบ
@@ -22,18 +23,35 @@
 param(
     [switch]$IncludeOptional,
     [string]$TaskName,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Json
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---------------- โหมดผลลัพธ์ ----------------
+# ⚠️ ข้อความไทยที่พิมพ์ออก stdout ถูกเข้ารหัสตาม code page ของ console ที่เรียกมา
+# ถ้าคนเรียกไม่ได้ chcp 65001 ไว้ (เช่นเทสที่ยิง powershell.exe ตรง ๆ จาก Python)
+# ตัวไทยจะกลายเป็น '?' ทั้งหมด — เจอจริง 16 ส.ค. 69: เทสหา "retry: 3 ครั้ง ระยะห่าง PT15M"
+# ไม่เจอ แล้วขึ้นแดง 6 เคสทั้งที่สคริปต์นี้ถูกต้องทุกบรรทัด
+# บทเรียน: **อย่าให้เครื่องต้องอ่านภาษาคน** — เครื่องอ่าน -Json (ASCII key คงที่),
+# คนอ่านข้อความไทยเหมือนเดิม
+$speak = -not $Json
+$plan  = New-Object System.Collections.ArrayList
+
+function Say {
+    param([string]$Text = '', $Color)
+    if (-not $script:speak) { return }
+    if ($Color) { Write-Host $Text -ForegroundColor $Color } else { Write-Host $Text }
+}
 
 $root    = Split-Path -Parent $PSScriptRoot
 $scripts = Join-Path $root 'scripts'
 $garmin  = Join-Path $root 'garmin'
 
-Write-Host ""
-Write-Host "โฟลเดอร์โปรเจกต์: $root" -ForegroundColor Cyan
-Write-Host ""
+Say
+Say "โฟลเดอร์โปรเจกต์: $root" Cyan
+Say
 
 # ---------------- นิยามงานทั้งหมด ----------------
 # ExecutionTimeLimit ต่างกันตามงาน: สายถี่สั้น (fast/wellness), Garmin full ยาวได้ (ยิง API หลายคน)
@@ -243,6 +261,36 @@ function Test-WeeklyTriggerAnchor {
 
 $ok = 0; $skipped = 0; $failed = 0
 
+# บันทึกผลของ task หนึ่งตัวลงแผน (ผลลัพธ์แบบเครื่องอ่าน — key เป็น ASCII เสมอ)
+function Add-PlanEntry {
+    param($Task, [string]$Status, [string]$Argument = '', $Triggers = @(), $Problems = @())
+
+    $anchors = @()
+    foreach ($tr in $Triggers) {
+        $dow = $tr.PSObject.Properties['DaysOfWeek']
+        if ($dow -and $dow.Value) {
+            $anchors += [ordered]@{
+                startBoundary = ([datetime]$tr.StartBoundary).ToString('yyyy-MM-ddTHH:mm:ss')
+                dayOfWeek     = ([datetime]$tr.StartBoundary).DayOfWeek.ToString()
+                weeksInterval = $(if ($tr.WeeksInterval) { [int]$tr.WeeksInterval } else { 1 })
+            }
+        }
+    }
+    [void]$script:plan.Add([ordered]@{
+        name          = $Task.Name
+        status        = $Status
+        exe           = $Task.Exe
+        argument      = $Argument
+        timeLimit     = $Task.TimeLimit
+        retryCount    = $(if ($Task.RetryCount) { [int]$Task.RetryCount } else { 0 })
+        retryInterval = $(if ($Task.RetryInterval) { $Task.RetryInterval } else { $null })
+        onBattery     = [bool]$Task.OnBattery
+        optional      = [bool]$Task.Optional
+        anchors       = @($anchors)
+        problems      = @($Problems)
+    })
+}
+
 foreach ($t in $tasks) {
 
     if ($TaskName -and $t.Name -ne $TaskName) {
@@ -251,13 +299,15 @@ foreach ($t in $tasks) {
     }
 
     if ($t.Optional -and -not $IncludeOptional -and -not $TaskName) {
-        Write-Host "[ข้าม]  $($t.Name)  (ใส่ -IncludeOptional ถ้าต้องการ)" -ForegroundColor DarkGray
+        Say "[ข้าม]  $($t.Name)  (ใส่ -IncludeOptional ถ้าต้องการ)" DarkGray
+        Add-PlanEntry -Task $t -Status 'skipped'
         $skipped++
         continue
     }
 
     if (-not (Test-Path -LiteralPath $t.Script)) {
-        Write-Host "[พัง]   $($t.Name)  → ไม่พบไฟล์ $($t.Script)" -ForegroundColor Red
+        Say "[พัง]   $($t.Name)  → ไม่พบไฟล์ $($t.Script)" Red
+        Add-PlanEntry -Task $t -Status 'failed' -Problems @('script_missing')
         $failed++
         continue
     }
@@ -267,11 +317,11 @@ foreach ($t in $tasks) {
     if ($t.Exe -eq 'cmd.exe') { $argument = '/c ' + $argument }
     if ($t.ExtraArgs)         { $argument = $argument + ' ' + $t.ExtraArgs }
 
-    Write-Host "[ตั้ง]   $($t.Name)" -ForegroundColor Green
-    Write-Host "         $($t.Exe) $argument"
-    Write-Host "         $($t.Desc)" -ForegroundColor DarkGray
+    Say "[ตั้ง]   $($t.Name)" Green
+    Say "         $($t.Exe) $argument"
+    Say "         $($t.Desc)" DarkGray
     if ($t.RetryCount) {
-        Write-Host "         retry: $($t.RetryCount) ครั้ง ระยะห่าง $($t.RetryInterval)" -ForegroundColor DarkGray
+        Say "         retry: $($t.RetryCount) ครั้ง ระยะห่าง $($t.RetryInterval)" DarkGray
     }
 
     # สร้าง trigger ก่อนแล้วตรวจ anchor — ต้องกันตั้งแต่ก่อนลงทะเบียน เพราะพอลงไปแล้ว
@@ -280,21 +330,27 @@ foreach ($t in $tasks) {
     $anchorProblems = Test-WeeklyTriggerAnchor $triggers
     if ($anchorProblems) {
         foreach ($p in $anchorProblems) {
-            Write-Host "         [anchor ผิด] $p" -ForegroundColor Red
+            Say "         [anchor ผิด] $p" Red
         }
-        Write-Host "         → ไม่ลงทะเบียน task นี้ (แก้ StartBoundary ในนิยาม task ก่อน)" -ForegroundColor Red
+        Say "         → ไม่ลงทะเบียน task นี้ (แก้ StartBoundary ในนิยาม task ก่อน)" Red
+        Add-PlanEntry -Task $t -Status 'failed' -Argument $argument -Triggers $triggers `
+                      -Problems @('weekly_anchor_mismatch')
         $failed++
         continue
     }
     foreach ($tr in $triggers) {
         if ($tr.PSObject.Properties['DaysOfWeek'] -and $tr.DaysOfWeek) {
-            Write-Host ("         anchor: {0} (ทุก {1} สัปดาห์)" -f `
-                        ([datetime]$tr.StartBoundary).ToString('yyyy-MM-dd HH:mm dddd'),
-                        $(if ($tr.WeeksInterval) { $tr.WeeksInterval } else { 1 })) -ForegroundColor DarkGray
+            Say ("         anchor: {0} (ทุก {1} สัปดาห์)" -f `
+                 ([datetime]$tr.StartBoundary).ToString('yyyy-MM-dd HH:mm dddd'),
+                 $(if ($tr.WeeksInterval) { $tr.WeeksInterval } else { 1 })) DarkGray
         }
     }
 
-    if ($DryRun) { $ok++; continue }
+    if ($DryRun) {
+        Add-PlanEntry -Task $t -Status 'dryrun' -Argument $argument -Triggers $triggers
+        $ok++
+        continue
+    }
 
     try {
         $action = New-ScheduledTaskAction -Execute $t.Exe -Argument $argument `
@@ -322,20 +378,23 @@ foreach ($t in $tasks) {
             -Action $action -Trigger $triggers `
             -Principal $principal -Settings $settings -Force | Out-Null
 
+        Add-PlanEntry -Task $t -Status 'registered' -Argument $argument -Triggers $triggers
         $ok++
     }
     catch {
-        Write-Host "         ล้มเหลว: $($_.Exception.Message)" -ForegroundColor Red
+        Say "         ล้มเหลว: $($_.Exception.Message)" Red
+        Add-PlanEntry -Task $t -Status 'failed' -Argument $argument -Triggers $triggers `
+                      -Problems @('register_failed')
         $failed++
     }
 }
 
-Write-Host ""
-Write-Host ("สรุป: ตั้งสำเร็จ {0} | ข้าม {1} | ล้มเหลว {2}" -f $ok, $skipped, $failed) -ForegroundColor Cyan
-if ($DryRun) { Write-Host "(โหมด -DryRun ไม่ได้แตะของจริง)" -ForegroundColor Yellow }
-Write-Host ""
-Write-Host "ดูผล:  Get-ScheduledTask -TaskName 'Run-Performance-*' | Format-Table TaskName,State"
-Write-Host ""
+Say
+Say ("สรุป: ตั้งสำเร็จ {0} | ข้าม {1} | ล้มเหลว {2}" -f $ok, $skipped, $failed) Cyan
+if ($DryRun) { Say "(โหมด -DryRun ไม่ได้แตะของจริง)" Yellow }
+Say
+Say "ดูผล:  Get-ScheduledTask -TaskName 'Run-Performance-*' | Format-Table TaskName,State"
+Say
 
 # ---------------- ตรวจ event log ของ Task Scheduler ----------------
 # ทำไมต้องเช็ค: Windows ปิด log นี้มาจากโรงงาน ผลคือเวลา task "ไม่ยิง" เราไม่มีทางรู้
@@ -346,22 +405,39 @@ Write-Host ""
 # เช็คเฉย ๆ ไม่แก้ให้ เพราะการเปิดต้องใช้สิทธิ์ Administrator แต่สคริปต์นี้ตั้งใจให้รัน
 # แบบ user ธรรมดาได้ (task เป็นของ user เอง) — ไม่ยอมแลกความง่ายตรงนั้นไปกับ log
 $logName = 'Microsoft-Windows-TaskScheduler/Operational'
+$eventLogEnabled = $null
 try {
-    $logOn = (Get-WinEvent -ListLog $logName -ErrorAction Stop).IsEnabled
-    if ($logOn) {
-        Write-Host "event log ของ Task Scheduler: เปิดอยู่ ✔" -ForegroundColor DarkGray
+    $eventLogEnabled = [bool](Get-WinEvent -ListLog $logName -ErrorAction Stop).IsEnabled
+    if ($eventLogEnabled) {
+        Say "event log ของ Task Scheduler: เปิดอยู่ ✔" DarkGray
     }
     else {
-        Write-Host "event log ของ Task Scheduler: ปิดอยู่ — task ที่ไม่ยิงจะไม่มีเหตุผลให้ไล่" -ForegroundColor Yellow
-        Write-Host "  เปิดด้วย (ต้อง Run as Administrator ครั้งเดียว):" -ForegroundColor Yellow
-        Write-Host "  wevtutil sl $logName /e:true /rt:false /ms:20971520"
+        Say "event log ของ Task Scheduler: ปิดอยู่ — task ที่ไม่ยิงจะไม่มีเหตุผลให้ไล่" Yellow
+        Say "  เปิดด้วย (ต้อง Run as Administrator ครั้งเดียว):" Yellow
+        Say "  wevtutil sl $logName /e:true /rt:false /ms:20971520"
     }
 }
 catch {
     # อ่าน log ไม่ได้ไม่ควรทำให้สคริปต์ตั้ง task ล้ม — งานหลักจบไปแล้วด้วยซ้ำ
-    Write-Host "event log ของ Task Scheduler: ตรวจไม่ได้ ($($_.Exception.Message))" -ForegroundColor DarkGray
+    Say "event log ของ Task Scheduler: ตรวจไม่ได้ ($($_.Exception.Message))" DarkGray
 }
-Write-Host ""
+Say
+
+if ($Json) {
+    # บังคับ UTF-8 เฉพาะทางนี้ ไม่ไปแตะ console ของคนที่รันแบบปกติ
+    try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+    $payload = [ordered]@{
+        root            = $root
+        dryRun          = [bool]$DryRun
+        includeOptional = [bool]$IncludeOptional
+        taskFilter      = $(if ($TaskName) { $TaskName } else { $null })
+        eventLogEnabled = $eventLogEnabled
+        tasks           = @($plan)
+        summary         = [ordered]@{ ok = $ok; skipped = $skipped; failed = $failed }
+    }
+    # -Depth 6: ordered hashtable ซ้อน 3 ชั้น (payload → tasks → anchors) ค่า default 2 ตัดทิ้ง
+    $payload | ConvertTo-Json -Depth 6
+}
 
 if ($failed -gt 0) { exit 1 }
 exit 0

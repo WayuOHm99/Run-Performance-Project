@@ -21,6 +21,7 @@ exit code: 0 = ครบทุกคน | 1 = มีคนล้มเหลว 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+import importlib.util
 import json
 import os
 import subprocess
@@ -28,6 +29,15 @@ import sys
 import time
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
+
+try:  # รันปกติ (scripts/ อยู่ใน sys.path)
+    import win_process
+except ModuleNotFoundError:  # ถูกโหลดตรงด้วย importlib จาก cwd ไหนก็ได้
+    _wp_spec = importlib.util.spec_from_file_location(
+        "garmin_win_process", Path(__file__).with_name("win_process.py")
+    )
+    win_process = importlib.util.module_from_spec(_wp_spec)
+    _wp_spec.loader.exec_module(win_process)
 
 # บังคับ UTF-8 กันปัญหา console cp1252 พิมพ์ไทย/emoji ไม่ได้ (Task Scheduler)
 for _stream in (sys.stdout, sys.stderr):
@@ -224,7 +234,7 @@ def run_athlete(slug, args, passthrough, run_started, timeout_sec):
     """รัน sync หนึ่งบัญชีและคืนผลแบบมาตรฐาน โดยไม่ให้ความล้มเหลวลามไปบัญชีอื่น."""
     print(f"\n▶ {slug}")
     try:
-        proc = subprocess.run(
+        proc = win_process.run(
             [sys.executable, str(BACKFILL), "--athlete", slug,
              "--days", str(args.days), *passthrough],
             cwd=str(PROJECT_ROOT),

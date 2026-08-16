@@ -110,9 +110,16 @@ def _finding_message(finding: dict) -> str:
         )
     if kind == "missing_snapshot":
         state = "ไม่มีแถว" if finding.get("reason") == "row_missing" else "มีแถวแต่ค่าที่คาดว่างทั้งหมด"
+        if finding.get("device_signal"):
+            cause = "วันนั้นมีกิจกรรมเข้ามาแต่ wellness หายทั้งชุด — ตรวจ endpoint/parser"
+        else:
+            cause = (
+                f"ไม่มีสัญญาณจากนาฬิกาเลย {finding.get('silent_days') or 1} วันติด — "
+                "ให้นักกีฬา sync แอป Garmin ก่อน"
+            )
         return (
             f"wellness {finding['calendar_date']} ขาดทั้ง snapshot ({state}): "
-            f"ขาด {', '.join(finding['missing'])}"
+            f"ขาด {', '.join(finding['missing'])}; {cause}"
         )
     if kind == "range":
         low, high = finding["bounds"]
@@ -147,6 +154,25 @@ def collect(conn: sqlite3.Connection, rows, *, today=None):
         })
         all_findings.extend(findings)
     return athletes, all_findings
+
+
+def is_athlete_side_only(finding: dict) -> bool:
+    """True เมื่อ finding นี้แก้ที่ตัวนักกีฬา ไม่ใช่ที่ระบบ
+
+    "นาฬิกาไม่ได้ sync ทั้งวัน" ไม่ใช่ความล้มเหลวของสาย deep — แต่ deep รันเดือนละ
+    ครั้ง ถ้าปล่อยให้มันตีสายเป็น failed สถานะแดงจะค้างบน dashboard ยาว 4 สัปดาห์
+    โดยที่ไม่มีอะไรให้แก้เลย (บทเรียนเดียวกับ sanity warning 5 ส.ค. 69)
+    ส่วน drift / ค่าเกินช่วง / relation ผิด ยังนับเป็นความผิดปกติของระบบเหมือนเดิม
+    """
+    return (
+        finding.get("kind") == "missing_snapshot"
+        and finding.get("level") == "WARNING"
+        and not finding.get("device_signal")
+    )
+
+
+def system_findings(findings: list) -> list:
+    return [item for item in findings if not is_athlete_side_only(item)]
 
 
 def record_deep_lane_failure(findings: list) -> None:
@@ -247,16 +273,20 @@ def main(argv=None) -> int:
             print(f"❌ {message}")
         return 1
 
+    # แยก "ระบบต้องได้รับการตรวจ" ออกจาก "นักกีฬาต้อง sync นาฬิกา" ก่อนตัดสินผลรอบ
+    system = system_findings(findings)
+    athlete_side = len(findings) - len(system)
+
     lane_status_error = None
-    if args.record_deep_status and findings:
+    if args.record_deep_status and system:
         try:
-            record_deep_lane_failure(findings)
+            record_deep_lane_failure(system)
         except Exception as exc:
             lane_status_error = str(exc)
 
     if args.json:
         payload = {
-            "ok": not findings,
+            "ok": not system,
             "today_bangkok": dq.bangkok_today(args.today).isoformat(),
             "athletes": athletes,
             "findings": findings,
@@ -265,6 +295,8 @@ def main(argv=None) -> int:
                 "findings": len(findings),
                 "warnings": sum(f["level"] == "WARNING" for f in findings),
                 "errors": sum(f["level"] == "ERROR" for f in findings),
+                "system": len(system),
+                "athlete_side": athlete_side,
             },
         }
         if lane_status_error:
@@ -272,7 +304,7 @@ def main(argv=None) -> int:
         print(json.dumps(
             dq.json_safe(payload), ensure_ascii=False, indent=2, allow_nan=False,
         ))
-        return 1 if findings else 0
+        return 1 if system else 0
 
     print("=" * 72)
     print("  GARMIN DATA QUALITY — coverage / drift / partial / range")
@@ -294,12 +326,14 @@ def main(argv=None) -> int:
     print("\n" + "=" * 72)
     if lane_status_error:
         print(f"❌ บันทึกสถานะ deep lane ไม่สำเร็จ: {lane_status_error}")
-    if findings:
-        print(f"⚠️  รวมพบ {len(findings)} จุดน่าสงสัย — ตรวจ Garmin Cloud/parser ก่อนแก้ข้อมูล")
+    if system:
+        print(f"⚠️  รวมพบ {len(system)} จุดน่าสงสัย — ตรวจ Garmin Cloud/parser ก่อนแก้ข้อมูล")
     else:
         print("✅ ไม่พบความผิดปกติจากกฎ data-quality ปัจจุบัน")
+    if athlete_side:
+        print(f"ℹ️  อีก {athlete_side} จุดเป็นเรื่องฝั่งนักกีฬา (นาฬิกาไม่ได้ sync) — ไม่นับว่ารอบนี้ล้มเหลว")
     print("=" * 72)
-    return 1 if findings else 0
+    return 1 if system else 0
 
 
 if __name__ == "__main__":

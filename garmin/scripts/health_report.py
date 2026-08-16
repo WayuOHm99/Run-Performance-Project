@@ -42,6 +42,15 @@ except ModuleNotFoundError:  # loaded directly by importlib from any cwd
     dq = importlib.util.module_from_spec(_dq_spec)
     _dq_spec.loader.exec_module(dq)
 
+try:  # เหมือนกัน — health report ถูกเรียกจาก pythonw (task SystemHealth) ด้วย
+    import win_process
+except ModuleNotFoundError:
+    _wp_spec = importlib.util.spec_from_file_location(
+        "garmin_win_process", Path(__file__).with_name("win_process.py")
+    )
+    win_process = importlib.util.module_from_spec(_wp_spec)
+    _wp_spec.loader.exec_module(win_process)
+
 for _s in (sys.stdout, sys.stderr):
     try:
         _s.reconfigure(encoding="utf-8")
@@ -286,7 +295,7 @@ def default_schtasks_provider(task_name: str) -> str:
     if os.name != "nt":
         raise SchtasksUnavailable("ไม่ใช่ Windows")
     try:
-        result = subprocess.run(
+        result = win_process.run(
             ["schtasks", "/Query", "/TN", task_name, "/V", "/FO", "LIST"],
             # Capture bytes deliberately.  On Thai Windows, schtasks may emit
             # CP874 bytes while Python's preferred text codec is CP1252; using
@@ -343,7 +352,7 @@ def default_private_acl_provider() -> dict:
         raise RuntimeError("ACL verifier script is missing")
 
     try:
-        result = subprocess.run(
+        result = win_process.run(
             [
                 "powershell.exe",
                 "-NoProfile",
@@ -831,9 +840,20 @@ def _data_quality_message(finding: dict) -> str:
         )
     if kind == "missing_snapshot":
         state = "ไม่มีแถว" if finding.get("reason") == "row_missing" else "มีแถวแต่ค่าที่คาดว่างทั้งหมด"
+        # ต่อท้ายด้วย "แล้วต้องทำอะไร" เสมอ — ระดับความรุนแรงมาจากสาเหตุคนละแบบ
+        # (นาฬิกาไม่ได้ sync = งานของผู้จัดการทีม | มีข้อมูลอื่นเข้ามาแต่ wellness หาย
+        #  = งานของคนดูแลระบบ) ถ้าไม่บอกไว้ คนอ่านจะเดาผิดทางแล้วไล่ผิดจุด
+        if finding.get("device_signal"):
+            action = "วันนั้นมีกิจกรรมเข้ามาแต่ wellness หายทั้งชุด — ตรวจ endpoint/parser"
+        else:
+            silent = finding.get("silent_days") or 1
+            action = (
+                f"ไม่มีสัญญาณจากนาฬิกาเลย {silent} วันติด — "
+                "ให้นักกีฬาเปิดแอป Garmin sync ก่อน (ไม่ใช่ pipeline พัง)"
+            )
         return (
             f"{finding['calendar_date']} ขาด wellness ทั้ง snapshot ({state}) — "
-            f"ขาด {', '.join(finding['missing'])}"
+            f"ขาด {', '.join(finding['missing'])}; {action}"
         )
     if kind == "range":
         examples = ", ".join(f"{d}={v}" for d, v in finding["examples"])

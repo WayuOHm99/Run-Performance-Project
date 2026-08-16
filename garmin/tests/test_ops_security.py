@@ -4,6 +4,7 @@ The Windows ACL integration test only touches a temporary directory.  It never
 queries or changes the production token, data, backup, or Scheduled Task paths.
 """
 
+import ast
 import importlib.util
 import json
 import os
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 
@@ -141,6 +143,113 @@ class WrapperExitPropagationTests(unittest.TestCase):
                 )
 
 
+class WindowlessSubprocessTests(unittest.TestCase):
+    """งานอัตโนมัติต้องไม่เปิดหน้าต่างที่คนปิดได้ (บทเรียนซ้ำรอบที่ 3 ของโปรเจกต์นี้)
+
+    task ที่รันด้วย pythonw.exe ไม่มี console ของตัวเอง → Windows สร้าง console
+    ใหม่ให้โปรเซสลูกที่เป็นโปรแกรม console (gh/restic/powershell/schtasks) เสมอ
+    หน้าต่างนั้นปิดได้ และเคยโดนปิดจริง: offsite backup 16 ส.ค. 69 ล้มด้วย
+    ``command_failed:gh.EXE:exit_3221225786`` (= 0xC000013A ถูกสั่งจบ)
+    """
+
+    SCRIPTS_DIR = GARMIN_ROOT / "scripts"
+    HELPER = "win_process.py"
+
+    def automated_scripts(self):
+        return [
+            path for path in sorted(self.SCRIPTS_DIR.glob("*.py"))
+            if path.name != self.HELPER
+        ]
+
+    def test_no_script_launches_a_child_process_directly(self):
+        for path in self.automated_scripts():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in {"run", "Popen", "call", "check_output", "check_call"}
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "subprocess"
+                ):
+                    self.fail(
+                        f"{path.name}:{node.lineno} เรียก subprocess.{func.attr} ตรง ๆ — "
+                        f"ต้องผ่าน win_process.run ไม่งั้นจะได้หน้าต่าง console ที่ปิดได้"
+                    )
+
+    def test_helper_always_suppresses_the_console_window_on_windows(self):
+        source = (self.SCRIPTS_DIR / self.HELPER).read_text(encoding="utf-8")
+        self.assertIn("CREATE_NO_WINDOW = 0x08000000", source)
+        self.assertIn("TERMINATED_BY_CONSOLE = 0xC000013A", source)
+
+        win_process = load_script(
+            "garmin_win_process_under_test", self.SCRIPTS_DIR / self.HELPER
+        )
+        recorded = {}
+
+        def fake_run(command, **kwargs):
+            recorded.update(kwargs)
+            recorded["command"] = command
+            return "sentinel"
+
+        with unittest.mock.patch.object(win_process.subprocess, "run", fake_run):
+            self.assertEqual(win_process.run(["gh", "release", "view"]), "sentinel")
+        if os.name == "nt":
+            self.assertTrue(
+                recorded["creationflags"] & win_process.CREATE_NO_WINDOW
+            )
+        else:
+            self.assertNotIn("creationflags", recorded)
+
+    def test_helper_keeps_caller_creation_flags(self):
+        win_process = load_script(
+            "garmin_win_process_flags_under_test", self.SCRIPTS_DIR / self.HELPER
+        )
+        recorded = {}
+
+        def fake_run(command, **kwargs):
+            recorded.update(kwargs)
+            return None
+
+        with unittest.mock.patch.object(win_process.subprocess, "run", fake_run):
+            win_process.run(["gh"], creationflags=0x00000200)
+        if os.name == "nt":
+            self.assertEqual(
+                recorded["creationflags"],
+                0x00000200 | win_process.CREATE_NO_WINDOW,
+            )
+        else:
+            self.assertEqual(recorded["creationflags"], 0x00000200)
+
+    def test_kill_and_command_labels_read_truthfully(self):
+        win_process = load_script(
+            "garmin_win_process_labels_under_test", self.SCRIPTS_DIR / self.HELPER
+        )
+
+        self.assertTrue(win_process.was_terminated(0xC000013A))
+        self.assertFalse(win_process.was_terminated(1))
+        self.assertIn("0xC000013A", win_process.exit_reason(0xC000013A))
+        self.assertEqual(win_process.exit_reason(3), "exit_3")
+        self.assertEqual(
+            win_process.command_label(
+                [r"C:\Program Files\GitHub CLI\gh.EXE", "release", "upload",
+                 "offsite-backup", r"C:\tmp\restic-repository.zip", "--repo", "owner/name"]
+            ),
+            "gh release upload",
+        )
+        # path/tag/ธง ต้องไม่ติดไปกับ label (สถานะและ heartbeat ห้ามพกรายละเอียดออกไป)
+        self.assertEqual(
+            win_process.command_label([r"C:\restic.exe", "backup", r"C:\Backup\garmin-db-daily"]),
+            "restic backup",
+        )
+        self.assertEqual(
+            win_process.command_label(["powershell.exe", "-NoProfile", "-File", "x.ps1"]),
+            "powershell",
+        )
+
+
 class TokenSlugSafetyTests(unittest.TestCase):
     def test_known_apostrophe_slug_is_preserved(self):
         self.assertEqual(token_generator.validate_athlete_slug("P'Kao"), "p'kao")
@@ -250,36 +359,106 @@ class PowerShellEncodingTests(unittest.TestCase):
         self.assertNotIn("New-TimeSpan -Days 36500)", source)
         self.assertIn("New-TimeSpan -Days 3650)", source)
 
-    @unittest.skipUnless(os.name == "nt", "Windows Scheduled Task contract")
+    def test_scheduler_exposes_a_machine_readable_plan(self):
+        """-Json ต้องมีอยู่และไม่พิมพ์ข้อความคนปนออกมา
+
+        เทสนี้อ่านซอร์ส (รันได้ทุก OS) ส่วนเทสด้านล่างรันของจริงบน Windows —
+        เหตุผลที่ต้องมีโหมดเครื่องอ่าน: ข้อความไทยที่ redirect ออกไปจะถูกแปลงตาม
+        code page ของ console ที่เรียก ทำให้กลายเป็น '?' เมื่อผู้เรียกไม่ได้ chcp 65001
+        """
+        source = (PROJECT_ROOT / "scripts" / "setup_scheduled_tasks.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn("[switch]$Json", source)
+        self.assertIn("$speak = -not $Json", source)
+        self.assertRegex(source, r"ConvertTo-Json -Depth \d+")
+        outside_say = re.sub(r"(?s)function Say \{.*?\n\}\n", "", source)
+        self.assertNotIn(
+            "Write-Host", outside_say,
+            "ทุกข้อความคนต้องผ่าน Say ไม่งั้น -Json จะคืน JSON ปนข้อความ",
+        )
+
+
+class SchedulerPlanTests(unittest.TestCase):
+    """สัญญาของตารางงานอัตโนมัติ อ่านจากแผน JSON ของ setup_scheduled_tasks.ps1."""
+
+    RETRY_POLICY = {
+        # สายช้า/สำคัญ: พลาดรอบแล้วต้องได้ลองใหม่เอง
+        "Run-Performance-Backup": (3, "PT15M"),
+        "Run-Performance-Garmin-Reconcile": (2, "PT30M"),
+        "Run-Performance-Garmin-DeepSync": (2, "PT1H"),
+        "Run-Performance-OffsiteBackup": (3, "PT30M"),
+        "Run-Performance-RestoreDrill": (1, "PT2H"),
+        "Run-Performance-SystemHealth": (2, "PT15M"),
+        # สายถี่: รอบถัดไปมาเองใน 15–60 นาที การ retry มีแต่จะไปแย่ง sync.lock
+        "Run-Performance-Garmin-Fast": (0, None),
+        "Run-Performance-Garmin-Wellness": (0, None),
+        "Run-Performance-Garmin": (0, None),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        if os.name != "nt":
+            raise unittest.SkipTest("Windows Scheduled Task contract")
+        completed = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", str(PROJECT_ROOT / "scripts" / "setup_scheduled_tasks.ps1"),
+                "-DryRun", "-Json", "-IncludeOptional",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr or completed.stdout)
+        cls.plan = json.loads(completed.stdout)
+        cls.tasks = {task["name"]: task for task in cls.plan["tasks"]}
+
+    def test_dry_run_plans_every_task_without_touching_windows(self):
+        self.assertTrue(self.plan["dryRun"])
+        self.assertEqual(set(self.tasks), set(self.RETRY_POLICY))
+        self.assertEqual(self.plan["summary"]["failed"], 0)
+        for name, task in self.tasks.items():
+            with self.subTest(task_name=name):
+                self.assertEqual(task["status"], "dryrun")
+                self.assertEqual(task["problems"], [])
+
     def test_scheduler_retries_only_slow_critical_lanes(self):
-        policies = {
-            "Run-Performance-Backup": (3, "PT15M"),
-            "Run-Performance-Garmin-Reconcile": (2, "PT30M"),
-            "Run-Performance-Garmin-DeepSync": (2, "PT1H"),
-            "Run-Performance-OffsiteBackup": (3, "PT30M"),
-            "Run-Performance-RestoreDrill": (1, "PT2H"),
-            "Run-Performance-SystemHealth": (2, "PT15M"),
+        for name, (count, interval) in self.RETRY_POLICY.items():
+            with self.subTest(task_name=name):
+                self.assertEqual(self.tasks[name]["retryCount"], count)
+                self.assertEqual(self.tasks[name]["retryInterval"], interval)
+
+    def test_every_task_may_run_on_battery(self):
+        """เครื่องนี้เป็นโน้ตบุ๊ก — ตั้ง $false เมื่อไหร่ Windows ได้สิทธิ์ทั้งไม่เริ่ม
+        และฆ่ากลางคันแบบเงียบสนิท (backup หายทั้งคืน 4 ส.ค. 69)."""
+        for name, task in self.tasks.items():
+            with self.subTest(task_name=name):
+                self.assertTrue(task["onBattery"])
+
+    def test_weekly_anchors_stay_on_their_own_weekday(self):
+        """anchor ที่หลุดวัน = cadence เพี้ยนเงียบ ๆ และเลื่อนใหม่ทุกครั้งที่รันสคริปต์
+        (DeepSync เคยกลายเป็นทุก 1 สัปดาห์ — เห็นได้เฉพาะตอน export XML)."""
+        anchored = {
+            name: task["anchors"] for name, task in self.tasks.items()
+            if task["anchors"]
         }
-        for task_name, (count, interval) in policies.items():
-            with self.subTest(task_name=task_name):
-                completed = subprocess.run(
-                    [
-                        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                        "-File", str(PROJECT_ROOT / "scripts" / "setup_scheduled_tasks.ps1"),
-                        "-DryRun", "-TaskName", task_name,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=30,
-                    check=False,
-                )
-                self.assertEqual(completed.returncode, 0, msg=completed.stderr)
-                self.assertIn(
-                    f"retry: {count} ครั้ง ระยะห่าง {interval}",
-                    completed.stdout,
-                )
+        self.assertEqual(
+            set(anchored),
+            {
+                "Run-Performance-Garmin-Reconcile",
+                "Run-Performance-Garmin-DeepSync",
+                "Run-Performance-RestoreDrill",
+            },
+        )
+        for name, anchors in anchored.items():
+            for anchor in anchors:
+                with self.subTest(task_name=name, anchor=anchor["startBoundary"]):
+                    self.assertEqual(anchor["dayOfWeek"], "Sunday")
 
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell integration test")

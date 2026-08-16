@@ -200,7 +200,12 @@ class DriftAndPartialSnapshotTests(unittest.TestCase):
         self.assertEqual(sleep["short_baseline"], (30, 30))
         self.assertEqual(sleep_drift["level"], "ERROR")
 
-    def test_missing_yesterday_row_is_error_when_baseline_expects_wellness(self):
+    def test_single_silent_day_without_device_signal_is_only_a_warning(self):
+        """นาฬิกาไม่ได้ sync 1 วัน = เรื่องปกติของนักกีฬา ไม่ใช่ระบบพัง
+
+        ตี ERROR ทุกครั้งจะทำให้ health report/heartbeat แดงค้างจนกว่านักกีฬาจะ
+        เปิดแอป — แล้วสีแดงก็เลิกมีความหมาย (บทเรียน 5 ส.ค. 69 เรื่อง noise)
+        """
         conn = create_db()
         self.addCleanup(conn.close)
         today = date(2026, 8, 9)
@@ -212,8 +217,61 @@ class DriftAndPartialSnapshotTests(unittest.TestCase):
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["kind"], "missing_snapshot")
-        self.assertEqual(findings[0]["level"], "ERROR")
+        self.assertEqual(findings[0]["level"], "WARNING")
         self.assertEqual(findings[0]["reason"], "row_missing")
+        self.assertFalse(findings[0]["device_signal"])
+        self.assertEqual(findings[0]["silent_days"], 1)
+
+    def test_missing_wellness_on_a_day_that_had_activities_is_an_error(self):
+        """มีกิจกรรมเข้ามาแต่ wellness หายทั้งชุด = นาฬิกา sync แล้วแต่เราเก็บไม่ครบ."""
+        conn = create_db()
+        self.addCleanup(conn.close)
+        today = date(2026, 8, 9)
+        for offset in range(2, 32):
+            insert_complete_day(conn, today - timedelta(days=offset))
+        conn.execute(
+            """INSERT INTO fact_activity (activity_id, athlete_id, start_time_local)
+               VALUES (99, 1, ?)""",
+            (f"{(today - timedelta(days=1)).isoformat()} 06:15:00",),
+        )
+        conn.commit()
+
+        findings = dq.partial_snapshot_findings(conn, 1, today=today)
+
+        self.assertEqual(findings[0]["level"], "ERROR")
+        self.assertTrue(findings[0]["device_signal"])
+
+    def test_deleted_activity_does_not_count_as_a_device_signal(self):
+        conn = create_db()
+        self.addCleanup(conn.close)
+        today = date(2026, 8, 9)
+        for offset in range(2, 32):
+            insert_complete_day(conn, today - timedelta(days=offset))
+        conn.execute(
+            """INSERT INTO fact_activity
+                   (activity_id, athlete_id, start_time_local, deleted_at)
+               VALUES (99, 1, ?, '2026-08-09T00:00:00Z')""",
+            (f"{(today - timedelta(days=1)).isoformat()} 06:15:00",),
+        )
+        conn.commit()
+
+        findings = dq.partial_snapshot_findings(conn, 1, today=today)
+
+        self.assertEqual(findings[0]["level"], "WARNING")
+        self.assertFalse(findings[0]["device_signal"])
+
+    def test_three_silent_days_in_a_row_escalate_back_to_error(self):
+        conn = create_db()
+        self.addCleanup(conn.close)
+        today = date(2026, 8, 9)
+        for offset in range(4, 34):
+            insert_complete_day(conn, today - timedelta(days=offset))
+        conn.commit()
+
+        findings = dq.partial_snapshot_findings(conn, 1, today=today)
+
+        self.assertEqual(findings[0]["level"], "ERROR")
+        self.assertEqual(findings[0]["silent_days"], dq.DEVICE_SILENT_ERROR_DAYS)
 
     def test_all_empty_yesterday_row_is_error_when_baseline_expects_wellness(self):
         conn = create_db()
@@ -490,6 +548,45 @@ class MonitoringIntegrationTests(unittest.TestCase):
         self.assertFalse(durable[0]["ok"])
         self.assertEqual(list(lane_dir.glob("*.tmp")), [])
 
+    def test_silent_watch_does_not_fail_the_monthly_deep_lane(self):
+        """สาย deep รันเดือนละครั้ง — ตีว่า failed เพราะนักกีฬาไม่ได้ sync
+        = ธงแดงค้างบน dashboard 4 สัปดาห์โดยไม่มีอะไรให้แก้"""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DELETE FROM fact_daily_wellness")
+        conn.execute("DELETE FROM fact_activity")
+        today = date(2026, 8, 9)
+        for offset in range(2, 32):
+            insert_complete_day(conn, today - timedelta(days=offset))
+        conn.commit()
+        conn.close()
+        lane_dir = self.temp_dir / "sync_lane"
+        lane_dir.mkdir(exist_ok=True)
+        lane_path = lane_dir / "deep.json"
+        lane_path.write_text(
+            json.dumps({
+                "run_at": "2026-08-09T10:30:00",
+                "lane": "deep",
+                "results": [{"slug": "synthetic", "ok": True, "reason": "ok", "warnings": []}],
+            }),
+            encoding="utf-8",
+        )
+        previous = drift.use_data_dir(self.temp_dir)
+        self.addCleanup(drift.use_data_dir, previous)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = drift.main([
+                "--today", "2026-08-09", "--json", "--record-deep-status"
+            ])
+
+        payload = json.loads(output.getvalue())
+        lane = json.loads(lane_path.read_text(encoding="utf-8"))
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["summary"]["athlete_side"], 1)
+        self.assertEqual(payload["summary"]["system"], 0)
+        self.assertTrue(all(item["ok"] for item in lane["results"]))
+
     def test_check_drift_unknown_explicit_athlete_is_an_error(self):
         previous = drift.use_data_dir(self.temp_dir)
         self.addCleanup(drift.use_data_dir, previous)
@@ -505,25 +602,49 @@ class MonitoringIntegrationTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("ไม่พบนักกีฬา", payload["error"])
 
-    def test_health_reports_missing_snapshot_as_error_with_specific_message(self):
+    def _missing_snapshot_finding(self, today):
+        previous = health.use_data_dir(self.temp_dir)
+        self.addCleanup(health.use_data_dir, previous)
+        return next(
+            finding for finding in health.check_data_quality(now=today)
+            if ":missing_snapshot:" in finding.check
+        )
+
+    def test_health_reports_a_silent_watch_as_an_actionable_warning(self):
         conn = sqlite3.connect(self.db_path)
         conn.execute("DELETE FROM fact_daily_wellness")
+        conn.execute("DELETE FROM fact_activity")
         today = date(2026, 8, 9)
         for offset in range(2, 32):
             insert_complete_day(conn, today - timedelta(days=offset))
         conn.commit()
         conn.close()
-        previous = health.use_data_dir(self.temp_dir)
-        self.addCleanup(health.use_data_dir, previous)
 
-        findings = health.check_data_quality(now=today)
+        missing = self._missing_snapshot_finding(today)
 
-        missing = next(
-            finding for finding in findings
-            if ":missing_snapshot:" in finding.check
-        )
-        self.assertEqual(missing.level, health.ERROR)
+        self.assertEqual(missing.level, health.WARNING)
         self.assertIn("ขาด wellness ทั้ง snapshot", missing.message)
+        self.assertIn("เปิดแอป Garmin sync", missing.message)
+
+    def test_health_reports_missing_snapshot_as_error_when_the_watch_did_sync(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DELETE FROM fact_daily_wellness")
+        conn.execute("DELETE FROM fact_activity")
+        today = date(2026, 8, 9)
+        for offset in range(2, 32):
+            insert_complete_day(conn, today - timedelta(days=offset))
+        conn.execute(
+            """INSERT INTO fact_activity (activity_id, athlete_id, start_time_local)
+               VALUES (4242, 1, ?)""",
+            (f"{(today - timedelta(days=1)).isoformat()} 18:02:00",),
+        )
+        conn.commit()
+        conn.close()
+
+        missing = self._missing_snapshot_finding(today)
+
+        self.assertEqual(missing.level, health.ERROR)
+        self.assertIn("ตรวจ endpoint/parser", missing.message)
 
 
 if __name__ == "__main__":
