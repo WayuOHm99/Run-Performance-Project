@@ -1,6 +1,6 @@
 {
   "claudeCode.initialPermissionMode": "plan",
-  "explorer.confirmDelete": true,
+  "explorer.confirmDelete": false,
   "files.eol": "\n",
   "files.exclude": {
     "**/__pycache__": true
