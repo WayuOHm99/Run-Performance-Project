@@ -1,5 +1,4 @@
 import datetime
-import json
 import math
 import os
 import sqlite3
@@ -753,45 +752,13 @@ def pace_axis_ticks(pace_series):
     return vals, [fmt_pace(v) for v in vals]
 
 
-def expected_lane_status_paths(lane_dir, expected_lanes):
-    """Return every expected lane paired with its status path or ``None``."""
-    lane_dir = Path(lane_dir)
-    return [
-        (lane, (lane_dir / f"{lane}.json") if (lane_dir / f"{lane}.json").exists() else None)
-        for lane in expected_lanes
-    ]
-
-
-def validate_lane_status(payload, expected_lane):
-    """Validate one lane file before it can be rendered as authoritative."""
-    if not isinstance(payload, dict) or payload.get("lane") != expected_lane:
-        raise ValueError("lane ไม่ตรงกับชื่อไฟล์")
-    run_at = payload.get("run_at")
-    results = payload.get("results")
-    if not isinstance(run_at, str):
-        raise ValueError("ไม่มี run_at")
-    parsed_run_at = datetime.datetime.fromisoformat(run_at)
-    if (not isinstance(results, list) or not results
-            or not all(isinstance(row, dict) and isinstance(row.get("ok"), bool)
-                       for row in results)):
-        raise ValueError("results ต้องเป็นรายการผลที่มี ok แบบ boolean")
-    return parsed_run_at, results
-
-
 # --- DB LOADERS ---
 # แคชสั้นกว่ารอบ sync ที่ถี่ที่สุด (fast activity 15 นาที / fast wellness 30 นาที) ไม่งั้น
 # ข้อมูลลง DB แล้วแต่หน้าจอยังค้างของเก่าโดยไม่มีเหตุผล — 2 นาทีพอให้ query ไม่ถี่เกิน
 CACHE_TTL_SEC = 120
 AUTO_REFRESH_SEC = 60
-# แถบเหลือง sanity check โชว์เฉพาะรอบที่ยัง "สด" — เกิน 24 ชม. ถือเป็นประวัติ ย้ายลงกล่องพับ
-# (24 ชม. ครอบสาย full ที่รันวันละ 2 รอบไว้พอดี ส่วนสายถี่กว่านั้นสดอยู่แล้ว)
-SANITY_WARN_FRESH_MIN = 24 * 60
-
-# เพดาน "สายนี้เงียบเกินคาบ" ต่อสายงาน (นาที) = คาบเดินจริง + เผื่อรอบที่ข้ามเพราะ lock
-# ⚠️ ต้องมีครบทุกสายและตรงกับ $STALE_LIMIT_MIN ใน scripts\notify_sync.ps1 — สายที่ตกหล่น
-# จะโชว์ ✅ ค้างตลอดกาลแม้ตายไปแล้ว (เดิมหล่น reconcile/deep ซึ่งเป็นสองสายที่อันตรายที่สุด
-# เพราะนาน ๆ เดินที ตายแล้วไม่มีใครสังเกตได้เป็นสัปดาห์ — เคสเดียวกับ deepsync 2 ส.ค. 69)
-# toast เตือนได้ก็จริงแต่มันหายไปกับตา ส่วนหน้านี้คือที่เดียวที่ย้อนดูได้ทีหลัง
+# เพดานสายงาน sync ใช้ตรวจความสอดคล้องกับ watchdog/health report หลังบ้านเท่านั้น
+# ไม่แสดง operational diagnostics บน Dashboard สำหรับพัฒนานักกีฬา
 LANE_STALE_LIMIT_MIN = {
     "full": 900, "fast": 75, "wellness": 90,
     "reconcile": 12240, "deep": 44640, "backup": 1800,
@@ -999,6 +966,31 @@ def load_first_activity_date(athlete_id):
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
+def load_first_dashboard_date(athlete_id):
+    """วันแรกที่มีข้อมูลซึ่งอยู่ภายใต้ตัวกรองช่วงย้อนหลังของ Dashboard.
+
+    รวม activity, wellness และ race prediction; PR/body composition มีตรรกะโหลด
+    ทั้งประวัติแยกอยู่แล้ว จึงไม่ดึงวันเก่ามากของสองตารางนั้นมาขยายกราฟสุขภาพให้ว่าง.
+    """
+    conn = connect_db()
+    row = conn.execute(
+        """SELECT MIN(calendar_date) FROM (
+               SELECT SUBSTR(start_time_local, 1, 10) AS calendar_date
+               FROM fact_activity
+               WHERE athlete_id = ? AND deleted_at IS NULL
+               UNION ALL
+               SELECT calendar_date FROM fact_daily_wellness WHERE athlete_id = ?
+               UNION ALL
+               SELECT calendar_date FROM fact_race_prediction WHERE athlete_id = ?
+           )
+           WHERE calendar_date IS NOT NULL""",
+        (athlete_id, athlete_id, athlete_id),
+    ).fetchone()
+    conn.close()
+    return datetime.date.fromisoformat(row[0]) if row and row[0] else None
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC)
 def load_last_data_dates(athlete_id):
     """วันล่าสุดที่มี activity / wellness — ใช้ทำแถบเตือนถ้า sync ค้าง (token หมด/Task ล้ม)
 
@@ -1016,26 +1008,6 @@ def load_last_data_dates(athlete_id):
         (athlete_id,)).fetchone()[0]
     conn.close()
     return la, lw
-
-
-WELLNESS_STALE_DAYS = 3  # ตั้งแต่กี่วันขึ้นไปถือว่า "ค้างจริง" ต้องไปไล่หาสาเหตุ
-
-
-def wellness_freshness(days):
-    """ป้ายความสดของ wellness รายคน — days = จำนวนวันนับจากข้อมูลล่าสุด (None = ไม่มีเลย)
-
-    ข้อมูลค้าง ≠ ระบบพัง: ข้อมูลหยุดที่เมื่อวานส่วนใหญ่แปลว่าต้นทางฝั่ง Garmin ยังไม่ sync
-    มา (🟠 รอ) ลำพังแค่นี้ยังไม่ใช่หลักฐานว่าสายงานฝั่งเราล้ม — ปัญหาจริงของ pipeline
-    มีแถบสายงานด้านล่างจับแยกให้อยู่แล้ว
-    เดิมเมื่อวานขึ้น 🟢 เหมือนวันนี้ ทำให้โค้ชอ่านตัวเลขของเมื่อวานเป็นสถานะวันนี้
-    """
-    if days is None:
-        return "🔴", "ไม่มีข้อมูล"
-    if days == 0:
-        return "🟢", "ข้อมูลอัปเดตแล้ว — วันนี้"
-    last = "เมื่อวาน" if days == 1 else f"{days} วันก่อน"
-    icon = "🟠" if days < WELLNESS_STALE_DAYS else "🔴"
-    return icon, f"รอ Garmin sync — ข้อมูลล่าสุด: {last}"
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -1098,6 +1070,27 @@ def load_personal_records(athlete_id):
         conn, params=(athlete_id,))
     conn.close()
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def load_body_composition(athlete_id):
+    """น้ำหนัก/BMI/ไขมันที่ Garmin เคยส่ง — โหลดทั้งประวัติเพื่อไม่ซ่อนค่าล่าสุด
+    เพียงเพราะอยู่นอกช่วงวิเคราะห์ 30 วันที่เลือกใน sidebar."""
+    conn = connect_db()
+    df = pd.read_sql_query(
+        """SELECT calendar_date, weight_kg, bmi, body_fat_pct
+           FROM fact_body_composition
+           WHERE athlete_id = ?
+           ORDER BY calendar_date ASC""",
+        conn,
+        params=(athlete_id,),
+    )
+    conn.close()
+    if not df.empty:
+        df["calendar_date"] = pd.to_datetime(df["calendar_date"], errors="coerce")
+        for column in ("weight_kg", "bmi", "body_fat_pct"):
+            df[column] = pd.to_numeric(df[column], errors="coerce")
     return df
 
 
@@ -1201,7 +1194,7 @@ with st.sidebar:
     st.markdown("**ช่วงข้อมูลสำหรับหน้าวิเคราะห์ย้อนหลัง**")
     history_period = st.segmented_control(
         "ช่วงย้อนหลัง",
-        options=["7 วัน", "30 วัน", "90 วัน", "กำหนดเอง"],
+        options=["7 วัน", "30 วัน", "90 วัน", "ทั้งหมด", "กำหนดเอง"],
         default="30 วัน",
         required=True,
         key="history_period",
@@ -1212,6 +1205,9 @@ with st.sidebar:
         start_date, end_date = today - datetime.timedelta(days=6), today
     elif history_period == "90 วัน":
         start_date, end_date = today - datetime.timedelta(days=89), today
+    elif history_period == "ทั้งหมด":
+        start_date = load_first_dashboard_date(athlete_id) or today
+        end_date = today
     elif history_period == "กำหนดเอง":
         custom_range = st.date_input(
             "เลือกช่วงวันที่",
@@ -1263,104 +1259,6 @@ with tab_team:
     st.header("สถานะทีมวันนี้")
     st.caption(f"ข้อมูล ณ {today.isoformat()} — ACWR = โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ของ 28 วัน "
                "(ใช้ Garmin training_load ถ้านาฬิกาให้ = รวม cross-training, ไม่งั้นใช้ระยะวิ่ง)")
-
-    # --- แถบเตือนความสดของข้อมูล (จับ token หมดอายุ / Task sync ล้ม) ---
-    fresh_parts, stale_names = [], []
-    for _, ath in athletes_df.iterrows():
-        _, lw = load_last_data_dates(ath["athlete_id"])
-        days = (today - datetime.date.fromisoformat(lw)).days if lw else None
-        icon, txt = wellness_freshness(days)
-        if days is None:
-            stale_names.append(f"{ath['display_name']} (ไม่มีข้อมูล)")
-        elif days >= WELLNESS_STALE_DAYS:
-            stale_names.append(f"{ath['display_name']} ({days} วัน)")
-        fresh_parts.append(f"{icon} **{ath['display_name']}**: {txt}")
-    st.markdown("**🔄 sync ล่าสุด (wellness):** &nbsp; " + " &nbsp;·&nbsp; ".join(fresh_parts))
-    if stale_names:
-        st.warning("⚠️ ข้อมูลค้าง ≥ 3 วัน: " + ", ".join(stale_names)
-                   + " — เช็ค log `C:\\Backup\\run-performance-logs\\garmin-sync-<สาย>.log` "
-                     "| token เสียให้รัน `เพิ่มนักกีฬา.bat` ใหม่ "
-                     "| ถ้า sync รอบล่าสุดผ่าน (ไม่มีแถบแดงด้านล่าง) = นักกีฬาไม่ได้เปิดแอป Garmin ให้นาฬิกา sync")
-
-    # --- ผลรอบ sync ล่าสุด "แยกตามสายงาน" (จาก data/sync_lane/<lane>.json ที่ fetch_all เขียน) ---
-    # จับปัญหาได้ทันทีในรอบเดียว (token เสีย/ข้อมูลเพี้ยน) ไม่ต้องรอข้อมูลค้าง 3 วันแบบแถบบน
-    # ต้องอ่านแยกสายงาน เพราะทุกสายเขียน sync_status.json ทับกัน — full sync 21:00 ล้มแล้ว
-    # fast wellness 21:08 ผ่าน จะกลบแถบแดงหายไปทั้งที่ปัญหายังอยู่
-    _LANE_LABEL = {"full": "เต็ม (08:00/21:00)", "fast": "กิจกรรม (ทุก 15 นาที)",
-                   "wellness": "wellness (ทุก 30 นาที)", "reconcile": "reconcile (รายสัปดาห์)",
-                   "deep": "deep resync (รายเดือน)", "backup": "สำรองข้อมูล (22:00)"}
-    _reason_txt = {"token": "token เสีย → รัน เพิ่มนักกีฬา.bat",
-                   "network": "เน็ต/เซิร์ฟเวอร์มีปัญหา",
-                   "timeout": "ค้างเกินเวลา",
-                   "payload": "Garmin response/payload ผิดรูปแบบหรือไม่ครบ — ดู sync log",
-                   "drift": "data quality/schema drift — ดู deepsync log",
-                   "db": "สำเนา garmin.db ไม่สำเร็จ → เปิด C:\\Backup\\run-performance-logs\\backup-log.txt",
-                   "robocopy": "robocopy mirror มีปัญหา → เปิด C:\\Backup\\run-performance-logs\\backup-log.txt"}
-    _lane_dir = DB_PATH.parent / "sync_lane"
-    _lane_paths = dict(expected_lane_status_paths(_lane_dir, _LANE_LABEL))
-    # ไฟล์รวมแบบเดิม = fallback ให้ระบบที่ยังไม่ได้รัน sync รอบใหม่หลังอัพเกรด
-    _legacy_status = DB_PATH.parent / "sync_status.json"
-    if not any(_lane_paths.values()) and _legacy_status.exists():
-        try:
-            _legacy_lane = json.loads(_legacy_status.read_text(encoding="utf-8")).get("lane")
-        except Exception:
-            _legacy_lane = None
-        if _legacy_lane in _lane_paths:
-            _lane_paths[_legacy_lane] = _legacy_status
-    _lane_lines = []
-    _old_warn_lines = []
-    for _lane, _f in _lane_paths.items():
-        _label = _LANE_LABEL[_lane]
-        if _f is None:
-            _lane_lines.append(f"❓ {_label}: ยังไม่พบประวัติการรัน")
-            continue
-        try:
-            _sync = json.loads(_f.read_text(encoding="utf-8"))
-            _run_at, _results = validate_lane_status(_sync, _lane)
-        except Exception as e:
-            st.caption(f"อ่าน {_f.name} ไม่ได้: {e}")
-            _lane_lines.append(f"❓ {_label}: อ่านสถานะไม่ได้")
-            continue
-        _when = _sync["run_at"][:16].replace("T", " ")
-        _fail = [r for r in _results if not r.get("ok", False)]
-        _warn = [r for r in _results if r.get("ok", False) and r.get("warnings")]
-        try:
-            _now_for_lane = datetime.datetime.now(tz=_run_at.tzinfo) if _run_at.tzinfo else datetime.datetime.now()
-            _age_min = (_now_for_lane - _run_at).total_seconds() / 60
-        except (OverflowError, TypeError):
-            _age_min = None
-        if _fail:
-            st.error(f"❌ sync {_label} รอบ {_when} ล้มเหลว: "
-                     + " · ".join(f"**{r.get('slug', 'ไม่ทราบนักกีฬา')}** "
-                                  f"({_reason_txt.get(r.get('reason'), 'ดู log')})"
-                                  for r in _fail))
-        # sanity warning = สภาพข้อมูล "ณ รอบนั้น" ไม่ใช่สถานะปัจจุบัน — รอบที่เก่ากว่า 1 วัน
-        # คือประวัติศาสตร์ ไม่ใช่งานของวันนี้ ต้องลดชั้นลงกล่องพับ ไม่งั้นสายที่รันนาน ๆ ที
-        # (deep รายเดือน / reconcile รายสัปดาห์) แปะแถบเหลืองค้างหน้าจอเป็นสัปดาห์จนคนเลิกอ่าน
-        _stale_warn = _age_min is not None and _age_min > SANITY_WARN_FRESH_MIN
-        for r in _warn:
-            _warning_values = r["warnings"] if isinstance(r["warnings"], list) else [r["warnings"]]
-            _msg = (f"🧐 **{r.get('slug', 'ไม่ทราบนักกีฬา')}** — sanity check "
-                    f"(sync {_label} รอบ {_when}): "
-                    + " | ".join(map(str, _warning_values)))
-            if _stale_warn:
-                _old_warn_lines.append(_msg)
-            else:
-                st.warning(_msg)
-        # สายที่ "เงียบหายไป" อันตรายกว่าสายที่ล้มเหลว เพราะไม่มีอะไรฟ้อง — กาไว้ให้เห็นตรงนี้
-        # (เพดานเดียวกับ watchdog ใน notify_sync.ps1 — ดู LANE_STALE_LIMIT_MIN ด้านบน)
-        _limit_min = LANE_STALE_LIMIT_MIN[_lane]
-        _quiet = _limit_min is not None and _age_min is not None and _age_min > _limit_min
-        _mark = "❌" if _fail else ("⏰" if _quiet else "✅")
-        _lane_lines.append(f"{_mark} {_label}: {_when}"
-                           + (f" (เงียบมา {_age_min / 60:.1f} ชม.)" if _quiet else ""))
-    if _old_warn_lines:
-        with st.expander(f"🧐 ผลตรวจ sanity จากรอบเก่า ({len(_old_warn_lines)} รายการ)"):
-            for _line in _old_warn_lines:
-                st.markdown("- " + _line)
-    if _lane_lines:
-        # st.caption ไม่รับ HTML — ใช้ตัวคั่นธรรมดา ไม่ใช่ &nbsp; แบบบรรทัด st.markdown ด้านบน
-        st.caption("รอบ sync ล่าสุดของแต่ละสายงาน — " + "  ·  ".join(_lane_lines))
 
     team_rows = []
     for _, ath in athletes_df.iterrows():
@@ -1606,11 +1504,14 @@ with tab_today:
     if team_row is not None:
         status_text = str(team_row["สถานะ"])
         flag_text = str(team_row["ธงเฝ้าระวัง"])
-        message = f"**{status_text}**"
+        message = f"**สถานะนักกีฬา: {status_text}**"
         if flag_text not in ("—", ""):
             message += f" · {flag_text}"
         if status_text.startswith("🔴"):
-            st.error(message, icon=":material/warning:")
+            st.warning(
+                message + " · เป็นคำเตือนจากข้อมูลซ้อม/การฟื้นตัว ไม่ใช่ข้อผิดพลาดของระบบ",
+                icon=":material/warning:",
+            )
         elif status_text.startswith("🟡"):
             st.warning(message, icon=":material/visibility:")
         elif status_text.startswith("🟢"):
@@ -2128,32 +2029,59 @@ with tab_health:
                 "วันที่/ความสด": field_freshness(snapshot, today),
             })
         if detail_rows:
-            with st.expander("ดูข้อมูลสุขภาพที่เก็บไว้ทั้งหมด", icon=":material/monitor_heart:"):
+            with st.expander("ดูข้อมูลสุขภาพเพิ่มเติมล่าสุด", icon=":material/monitor_heart:"):
                 st.dataframe(pd.DataFrame(detail_rows), hide_index=True)
                 st.caption(
-                    "เลือกค่าล่าสุดแยกทีละ field; fetched_at เป็นเวลาระดับแถว ไม่ได้ยืนยันว่า "
+                    "ค่าหลักอยู่ในการ์ดและกราฟด้านบน; ตารางนี้เลือกค่าเพิ่มเติมล่าสุดแยกทีละ field; "
+                    "fetched_at เป็นเวลาระดับแถว ไม่ได้ยืนยันว่า "
                     "ทุก endpoint ในแถวนั้นสดพร้อมกัน"
                 )
 
         history_labels = {
-            "calendar_date": "วันที่", "hrv_weekly_avg": "HRV 7 วัน",
+            "calendar_date": "วันที่",
+            "resting_hr": "Resting HR",
+            "hrv_weekly_avg": "HRV 7 วัน",
+            "hrv_last_night": "HRV คืนล่าสุด",
+            "hrv_status": "สถานะ HRV",
+            "sleep_score": "Sleep score",
             "sleep_duration_sec": "เวลานอน", "deep_sleep_sec": "Deep",
             "light_sleep_sec": "Light", "rem_sleep_sec": "REM", "awake_sec": "Awake",
-            "body_battery_low": "BB ต่ำสุด", "bb_at_wake": "BB ตอนตื่น",
+            "body_battery_high": "BB สูงสุด", "body_battery_low": "BB ต่ำสุด",
+            "stress_avg": "Stress เฉลี่ย", "max_stress": "Stress สูงสุด",
+            "bb_at_wake": "BB ตอนตื่น",
             "bb_charged": "BB ชาร์จ", "bb_drained": "BB ใช้ไป",
             "bb_during_sleep": "BB ระหว่างนอน", "bb_most_recent": "BB ล่าสุด",
             "steps": "Steps", "steps_goal": "เป้า Steps", "floors_ascended": "Floors",
             "active_kilocalories": "Active kcal", "bmr_kilocalories": "BMR kcal",
             "active_seconds": "Active time",
-            "training_status": "Training Status", "highest_respiration": "หายใจสูงสุด",
-            "lowest_respiration": "หายใจต่ำสุด",
+            "avg_waking_respiration": "หายใจเฉลี่ยตอนตื่น",
+            "avg_sleep_respiration": "หายใจเฉลี่ยตอนนอน",
+            "highest_respiration": "หายใจสูงสุด", "lowest_respiration": "หายใจต่ำสุด",
             "training_readiness": "Readiness", "readiness_level": "Readiness level",
+            "readiness_feedback": "Readiness feedback",
+            "readiness_feedback_long": "Readiness feedback ละเอียด",
+            "readiness_timestamp_utc": "เวลา Readiness (UTC)",
+            "readiness_timestamp_local": "เวลา Readiness (local)",
+            "readiness_input_context": "Readiness context",
             "acute_load": "Acute Load", "acwr_percent": "Readiness: Acute Load factor %",
+            "acwr_factor_feedback": "Acute Load feedback",
             "hrv_factor_pct": "Readiness: HRV factor %",
+            "hrv_factor_feedback": "HRV factor feedback",
             "stress_history_pct": "Readiness: Stress factor %",
+            "stress_history_factor_feedback": "Stress factor feedback",
+            "readiness_sleep_factor_pct": "Readiness: Sleep factor %",
+            "readiness_sleep_factor_feedback": "Sleep factor feedback",
             "recovery_time_min": "Recovery Time (นาที)",
+            "recovery_time_factor_pct": "Readiness: Recovery factor %",
+            "recovery_time_factor_feedback": "Recovery factor feedback",
+            "recovery_time_change_phrase": "สถานะ Recovery Time",
+            "training_status": "Training Status",
+            "vo2max_trend": "VO2max",
+            "fitness_age": "Fitness Age",
             "endurance_score": "Endurance Score", "hill_score_overall": "Hill Score",
             "hill_score_strength": "Hill Strength", "hill_score_endurance": "Hill Endurance",
+            "lactate_threshold_hr": "LT Heart Rate",
+            "lactate_threshold_pace_min_km": "LT Pace",
         }
         history_columns = [
             column for column in history_labels
@@ -2172,6 +2100,26 @@ with tab_health:
                 ):
                     if column in history:
                         history[column] = history[column].map(fmt_sec)
+                if "lactate_threshold_pace_min_km" in history:
+                    history["lactate_threshold_pace_min_km"] = history[
+                        "lactate_threshold_pace_min_km"
+                    ].map(lambda value: (
+                        f"{fmt_pace(value)} /km" if pd.notna(value) else "–"
+                    ))
+                text_history_columns = (
+                    "hrv_status", "training_status", "readiness_level",
+                    "readiness_feedback", "readiness_feedback_long",
+                    "readiness_input_context", "acwr_factor_feedback",
+                    "hrv_factor_feedback", "stress_history_factor_feedback",
+                    "readiness_sleep_factor_feedback", "recovery_time_factor_feedback",
+                    "recovery_time_change_phrase",
+                )
+                for column in text_history_columns:
+                    if column in history:
+                        history[column] = history[column].map(
+                            lambda value: (value.replace("_", " ")
+                                           if isinstance(value, str) else value)
+                        )
                 history = history.rename(columns=history_labels)
                 st.dataframe(history, hide_index=True)
 
@@ -2402,6 +2350,58 @@ with tab_progress:
     else:
         st.info("ไม่มีข้อมูล VO2max ในช่วงที่เลือก (นาฬิกาอัปเดตเฉพาะวันที่มีวิ่ง GPS)")
 
+    # ---------------- Body composition ----------------
+    # endpoint นี้มักมีข้อมูลห่าง ๆ และอาจอยู่นอกช่วง 30 วันที่เลือก จึงแสดงค่าล่าสุด
+    # จากประวัติทั้งหมด พร้อมวันที่จริงของแต่ละ field แทนการทำให้ค่าหายจาก dashboard.
+    st.subheader("องค์ประกอบร่างกายจาก Garmin")
+    body_composition = load_body_composition(athlete_id)
+    body_fields = [
+        ("weight_kg", "น้ำหนัก", " kg", "{:.1f}"),
+        ("bmi", "BMI", "", "{:.1f}"),
+        ("body_fat_pct", "ไขมันในร่างกาย", "%", "{:.1f}"),
+    ]
+    body_latest = []
+    if not body_composition.empty:
+        for column, label, unit, number_format in body_fields:
+            valid = body_composition.dropna(subset=[column])
+            if not valid.empty:
+                row = valid.iloc[-1]
+                body_latest.append((
+                    label,
+                    number_format.format(row[column]) + unit,
+                    row["calendar_date"],
+                ))
+    if not body_latest:
+        st.info("Garmin ยังไม่ส่งข้อมูลน้ำหนัก, BMI หรือเปอร์เซ็นต์ไขมันสำหรับนักกีฬาคนนี้")
+    else:
+        with st.container(horizontal=True):
+            for label, value, measured_at in body_latest:
+                st.metric(
+                    label,
+                    value,
+                    delta=(measured_at.strftime("%d/%m/%Y")
+                           if pd.notna(measured_at) else None),
+                    delta_color="off",
+                    border=True,
+                )
+        body_history = body_composition.rename(columns={
+            "calendar_date": "วันที่",
+            "weight_kg": "น้ำหนัก (kg)",
+            "bmi": "BMI",
+            "body_fat_pct": "ไขมัน (%)",
+        })
+        with st.expander("ประวัติองค์ประกอบร่างกาย", icon=":material/monitor_weight:"):
+            st.dataframe(
+                body_history,
+                hide_index=True,
+                column_config={
+                    "วันที่": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                    "น้ำหนัก (kg)": st.column_config.NumberColumn(format="%.1f"),
+                    "BMI": st.column_config.NumberColumn(format="%.1f"),
+                    "ไขมัน (%)": st.column_config.NumberColumn(format="%.1f"),
+                },
+            )
+
     # ---------------- Race predictions ----------------
     st.subheader("เวลาการแข่งขันที่ Garmin คาดการณ์")
     preds = load_race_predictions(athlete_id, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
@@ -2629,6 +2629,88 @@ with tab_splits:
                     wc[2].metric("ความชื้น", _fmt(arow.get("weather_humidity"), " %"), border=True)
                     wc[3].metric("ลม", _fmt(arow.get("weather_wind_kph"), " km/h"), border=True)
 
+                # ฟิลด์ต่อไปนี้ถูกเก็บใน fact_activity มาตลอด แต่หน้าเดิมไม่เคยแสดง
+                # ทำให้ดูเหมือน sync มาไม่ครบ ทั้งที่ข้อมูลจริงอยู่ใน SQLite แล้ว.
+                def _has_any(*fields):
+                    return any(pd.notna(arow.get(field)) for field in fields)
+
+                if _has_any(
+                    "moving_duration_sec", "steps", "moderate_intensity_min",
+                    "vigorous_intensity_min",
+                ):
+                    st.markdown("**เวลาและกิจกรรม**")
+                    tc = st.columns(4)
+                    tc[0].metric("เวลาที่เคลื่อนไหว", _dur(arow.get("moving_duration_sec")), border=True)
+                    tc[1].metric("จำนวนก้าวในกิจกรรม", _fmt(arow.get("steps"), " ก้าว"), border=True)
+                    tc[2].metric(
+                        "Intensity ปานกลาง",
+                        _fmt(arow.get("moderate_intensity_min"), " นาที"),
+                        border=True,
+                    )
+                    tc[3].metric(
+                        "Intensity หนัก",
+                        _fmt(arow.get("vigorous_intensity_min"), " นาที"),
+                        border=True,
+                    )
+
+                if _has_any(
+                    "avg_speed_mps", "max_speed_mps", "avg_grade_adjusted_speed_mps",
+                ):
+                    st.markdown("**ความเร็วจาก Garmin**")
+
+                    def _speed_kph(value):
+                        return (_fmt(value * 3.6, " km/h", "{:.1f}")
+                                if pd.notna(value) else "–")
+
+                    vc = st.columns(3)
+                    vc[0].metric("ความเร็วเฉลี่ย", _speed_kph(arow.get("avg_speed_mps")), border=True)
+                    vc[1].metric("ความเร็วสูงสุด", _speed_kph(arow.get("max_speed_mps")), border=True)
+                    vc[2].metric(
+                        "Grade-adjusted speed",
+                        _speed_kph(arow.get("avg_grade_adjusted_speed_mps")),
+                        border=True,
+                    )
+
+                if _has_any("vo2max_value", "normalized_power", "max_power", "max_cadence"):
+                    st.markdown("**สมรรถนะในกิจกรรม**")
+                    pc = st.columns(4)
+                    pc[0].metric(
+                        "VO2max จากกิจกรรม",
+                        _fmt(arow.get("vo2max_value"), "", "{:.1f}"),
+                        border=True,
+                    )
+                    pc[1].metric("Normalized Power", _fmt(arow.get("normalized_power"), " W"), border=True)
+                    pc[2].metric("Power สูงสุด", _fmt(arow.get("max_power"), " W"), border=True)
+                    pc[3].metric("Cadence สูงสุด", _fmt(arow.get("max_cadence"), " spm"), border=True)
+
+                if _has_any(
+                    "elevation_loss_m", "min_elevation_m", "max_elevation_m", "bmr_calories",
+                ):
+                    st.markdown("**ระดับความสูงและพลังงานเพิ่มเติม**")
+                    ec = st.columns(4)
+                    ec[0].metric("ลงระดับรวม", _fmt(arow.get("elevation_loss_m"), " m"), border=True)
+                    ec[1].metric("ระดับต่ำสุด", _fmt(arow.get("min_elevation_m"), " m"), border=True)
+                    ec[2].metric("ระดับสูงสุด", _fmt(arow.get("max_elevation_m"), " m"), border=True)
+                    ec[3].metric("BMR calories", _fmt(arow.get("bmr_calories"), " kcal"), border=True)
+
+                activity_meta = []
+                if pd.notna(arow.get("activity_type")):
+                    activity_meta.append(f"ประเภท: {arow.get('activity_type')}")
+                if pd.notna(arow.get("training_effect_label")):
+                    activity_meta.append(f"Training effect: {arow.get('training_effect_label')}")
+                if pd.notna(arow.get("location_name")):
+                    activity_meta.append(f"สถานที่: {arow.get('location_name')}")
+                if activity_meta:
+                    st.caption(" · ".join(activity_meta))
+                if _has_any("start_latitude", "start_longitude"):
+                    latitude = arow.get("start_latitude")
+                    longitude = arow.get("start_longitude")
+                    coordinate = (
+                        f"{latitude:.6f}, {longitude:.6f}"
+                        if pd.notna(latitude) and pd.notna(longitude) else "พิกัดไม่ครบ"
+                    )
+                    st.caption(f"พิกัดเริ่มกิจกรรม: {coordinate}")
+
             zc = ["hr_zone1_sec", "hr_zone2_sec", "hr_zone3_sec", "hr_zone4_sec", "hr_zone5_sec"]
             if set(zc).issubset(activity_df.columns) and arow[zc].notna().any():
                 zvals = [float(arow.get(c)) / 60 if pd.notna(arow.get(c)) else 0.0 for c in zc]
@@ -2756,12 +2838,21 @@ with tab_splits:
                             cfg[label] = fmt
 
                 _add("avg_power", "Power (W)")
+                _add("max_power", "Power สูงสุด (W)")
+                _add("normalized_power", "Normalized Power (W)")
                 _add("avg_stride_length_cm", "Stride (cm)")
                 _add("ground_contact_time_ms", "GCT (ms)")
                 _add("vertical_oscillation_cm", "Vert Osc (cm)",
                      st.column_config.NumberColumn(format="%.1f"))
-                table_data["เนิน (m)"] = splits["elevation_gain_m"]
-                cfg["เนิน (m)"] = num0
+                _add("vertical_ratio", "Vertical Ratio (%)",
+                     st.column_config.NumberColumn(format="%.1f"))
+                _add("max_cadence", "Cadence สูงสุด")
+                if "avg_speed_mps" in splits and splits["avg_speed_mps"].notna().any():
+                    table_data["ความเร็วเฉลี่ย (km/h)"] = splits["avg_speed_mps"] * 3.6
+                    cfg["ความเร็วเฉลี่ย (km/h)"] = st.column_config.NumberColumn(format="%.1f")
+                table_data["ไต่ (m)"] = splits["elevation_gain_m"]
+                cfg["ไต่ (m)"] = num0
+                _add("elevation_loss_m", "ลง (m)")
                 _add("intensity_type", "ประเภท", None)  # text
 
                 st.dataframe(pd.DataFrame(table_data), hide_index=True, column_config=cfg)

@@ -923,64 +923,6 @@ class LaneStaleLimitTests(unittest.TestCase):
         self.assertEqual(set(dash), self.EXPECTED_LANES)
         self.assertEqual(dash, self.watchdog_limits())
 
-    def test_every_lane_has_a_label_on_the_team_tab(self):
-        # มีเพดานแต่ไม่มีป้าย = แถบขึ้นเป็นชื่อไฟล์ดิบ อ่านไม่รู้เรื่องตอนที่ต้องรีบที่สุด
-        labels = re.search(r"_LANE_LABEL = \{(.+?)\}",
-                           (GARMIN_ROOT / "scripts" / "dashboard.py")
-                           .read_text(encoding="utf-8"), re.S)
-        self.assertIsNotNone(labels)
-        named = set(re.findall(r'"(\w+)":', labels.group(1)))
-        self.assertEqual(named, self.EXPECTED_LANES)
-
-
-class WellnessFreshnessTests(unittest.TestCase):
-    """ป้ายความสดรายคนบนแท็บรวมทีม — "ข้อมูลค้าง ≠ ระบบพัง".
-
-    dashboard.py import ตรง ๆ ไม่ได้ (รัน streamlit ทั้งไฟล์) จึงแกะเฉพาะฟังก์ชันบริสุทธิ์
-    ตัวนี้ออกมาด้วย ast แล้ว exec เดี่ยว ๆ — แบบเดียวกับ LaneStaleLimitTests
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        tree = ast.parse((GARMIN_ROOT / "scripts" / "dashboard.py")
-                         .read_text(encoding="utf-8"))
-        wanted = {"wellness_freshness", "WELLNESS_STALE_DAYS"}
-        picked = [n for n in tree.body
-                  if (isinstance(n, ast.FunctionDef) and n.name in wanted)
-                  or (isinstance(n, ast.Assign) and any(
-                      isinstance(t, ast.Name) and t.id in wanted for t in n.targets))]
-        assert len(picked) == 2, "ไม่พบ wellness_freshness / WELLNESS_STALE_DAYS ใน dashboard.py"
-        ns = {}
-        exec(compile(ast.Module(body=picked, type_ignores=[]),
-                     "dashboard.py", "exec"), ns)
-        cls.freshness = staticmethod(ns["wellness_freshness"])
-        cls.stale_days = ns["WELLNESS_STALE_DAYS"]
-
-    def test_today_is_green(self):
-        icon, txt = self.freshness(0)
-        self.assertEqual(icon, "🟢")
-        self.assertIn("วันนี้", txt)
-
-    def test_yesterday_waits_for_garmin_instead_of_looking_fine(self):
-        # เดิมเมื่อวานขึ้น 🟢 เท่ากับวันนี้ → โค้ชอ่านค่าเมื่อวานเป็นสถานะวันนี้
-        icon, txt = self.freshness(1)
-        self.assertEqual(icon, "🟠")
-        self.assertIn("รอ Garmin sync", txt)
-        self.assertIn("เมื่อวาน", txt)
-
-    def test_still_waiting_up_to_the_stale_limit(self):
-        icon, txt = self.freshness(self.stale_days - 1)
-        self.assertEqual(icon, "🟠")
-        self.assertIn("รอ Garmin sync", txt)
-
-    def test_real_stale_stays_red(self):
-        icon, _ = self.freshness(self.stale_days)
-        self.assertEqual(icon, "🔴")
-
-    def test_no_data_at_all_stays_red(self):
-        self.assertEqual(self.freshness(None), ("🔴", "ไม่มีข้อมูล"))
-
-
 class SentinelValueTest(unittest.TestCase):
     """-1 ของ Garmin = "ไม่มีข้อมูล" ห้ามเก็บเป็นค่าที่วัดได้ (dashboard เอาไปเฉลี่ยตรง ๆ)"""
 

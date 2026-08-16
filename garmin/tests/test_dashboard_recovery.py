@@ -65,8 +65,6 @@ HELPERS = extract_helpers(
     "compute_acwr",
     "aggregate_pace_min_per_km",
     "usable_hr_zone_rows",
-    "expected_lane_status_paths",
-    "validate_lane_status",
 )
 
 
@@ -243,7 +241,7 @@ class TrainingMathTests(unittest.TestCase):
         self.assertEqual(usable["activity_id"].tolist(), [3])
 
 
-class CalendarAndLaneTests(unittest.TestCase):
+class CalendarTests(unittest.TestCase):
     def test_calendar_alignment_inserts_an_explicit_nan_for_a_missing_day(self):
         frame = pd.DataFrame({
             "calendar_date": ["2026-08-07", "2026-08-09"],
@@ -257,37 +255,6 @@ class CalendarAndLaneTests(unittest.TestCase):
         self.assertEqual(len(aligned), 3)
         self.assertEqual(aligned.loc[1, "calendar_date"].date(), date(2026, 8, 8))
         self.assertTrue(pd.isna(aligned.loc[1, "vo2max_trend"]))
-
-    def test_lane_inventory_returns_every_expected_lane_even_when_files_are_missing(self):
-        expected = ["full", "fast", "wellness", "reconcile", "deep", "backup"]
-        with tempfile.TemporaryDirectory(prefix="dashboard-lanes-") as tmp:
-            lane_dir = Path(tmp)
-            (lane_dir / "full.json").write_text("{}", encoding="utf-8")
-
-            found = dict(HELPERS["expected_lane_status_paths"](lane_dir, expected))
-
-        self.assertEqual(list(found), expected)
-        self.assertEqual(found["full"].name, "full.json")
-        self.assertIsNone(found["fast"])
-        self.assertIsNone(found["backup"])
-
-    def test_lane_status_rejects_empty_malformed_or_mislabeled_results(self):
-        validate = HELPERS["validate_lane_status"]
-        base = {"lane": "fast", "run_at": "2026-08-11T08:50:02"}
-
-        for results in ([], ["not-a-result"], [{"slug": "tong"}], [{"ok": 1}]):
-            with self.subTest(results=results):
-                with self.assertRaises(ValueError):
-                    validate({**base, "results": results}, "fast")
-        with self.assertRaises(ValueError):
-            validate({**base, "lane": "full", "results": [{"ok": True}]}, "fast")
-
-        run_at, results = validate(
-            {**base, "results": [{"slug": "tong", "ok": True}]}, "fast"
-        )
-        self.assertEqual(run_at, datetime.datetime(2026, 8, 11, 8, 50, 2))
-        self.assertTrue(results[0]["ok"])
-
 
 class FormattingAndVisibilityTests(unittest.TestCase):
     def test_integer_metrics_do_not_show_dot_zero(self):
@@ -595,31 +562,16 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
         self.assertIn("if not vo2.empty or not _fit_age.empty:", DASHBOARD_SRC)
         self.assertNotIn("if not vo2.empty:\n        first_v", DASHBOARD_SRC)
 
-    def test_all_expected_sync_lanes_are_rendered(self):
-        self.assertIn(
-            "_lane_paths = dict(expected_lane_status_paths(_lane_dir, _LANE_LABEL))",
-            DASHBOARD_SRC,
-        )
-        self.assertIn("ยังไม่พบประวัติการรัน", DASHBOARD_SRC)
-
-    def test_diagnostics_point_to_the_hardened_private_log_directory(self):
-        self.assertIn(
-            r"C:\\Backup\\run-performance-logs\\garmin-sync-<สาย>.log",
-            DASHBOARD_SRC,
-        )
-        self.assertIn(
-            r"C:\\Backup\\run-performance-logs\\backup-log.txt",
-            DASHBOARD_SRC,
-        )
-        self.assertNotIn(r"C:\\Backup\\backup-log.txt", DASHBOARD_SRC)
-        self.assertIn(
-            '"drift": "data quality/schema drift — ดู deepsync log"',
-            DASHBOARD_SRC,
-        )
-        self.assertIn(
-            '"payload": "Garmin response/payload ผิดรูปแบบหรือไม่ครบ — ดู sync log"',
-            DASHBOARD_SRC,
-        )
+    def test_operational_diagnostics_are_not_rendered_on_the_athlete_dashboard(self):
+        for operational_text in (
+            "sync ล่าสุด (wellness)",
+            "sanity check (sync",
+            "รอบ sync ล่าสุดของแต่ละสายงาน",
+            "ผลตรวจ sanity จากรอบเก่า",
+            "_lane_paths",
+        ):
+            self.assertNotIn(operational_text, DASHBOARD_SRC)
+        self.assertIn('st.header("สถานะทีมวันนี้")', DASHBOARD_SRC)
 
     def test_sleep_respiration_is_treated_as_a_finalized_overnight_metric(self):
         self.assertIn(
