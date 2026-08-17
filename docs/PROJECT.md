@@ -125,6 +125,7 @@ D:\Run-Performance-Project\
 - **เทส:** `garmin\.venv\Scripts\python.exe -m unittest discover -s tests` (รันจาก `garmin\`)
 
 - **ความครบของข้อมูลบน Dashboard (แก้ 17 ส.ค. 69):** หน้า **รายละเอียดเซสชัน** ต้องแสดงทุกฟิลด์สมรรถนะที่เก็บใน `fact_activity` เมื่อกิจกรรมนั้นมีค่า รวม moving time/speed/VO2max/power/cadence/elevation/intensity minutes/พิกัด และตาราง splits ต้องไม่ทิ้ง max/normalized power, max cadence, speed, vertical ratio หรือ elevation loss. หน้า **สุขภาพ** ต้องมีทั้งค่าหลักและประวัติรายวันครบ รวม RHR/HRV/Sleep/Body Battery/Stress/Readiness และ sidebar ต้องเลือก **ทั้งหมด** ได้โดยเริ่มจากวันแรกที่มี activity (เฉพาะ `deleted_at IS NULL`), wellness หรือ race prediction. หน้า **ความก้าวหน้า** แสดงน้ำหนัก/BMI/body fat ล่าสุดจากประวัติ `fact_body_composition` ทั้งหมด แม้ค่าล่าสุดอยู่นอกช่วงย้อนหลัง; ช่องที่อุปกรณ์ไม่ส่งคงเป็น `–`/ข้อความไม่มีข้อมูล ไม่คาดเดาหรือเติมค่าเอง. สถานะเสี่ยงสูงจาก ACWR/HRV/Readiness ต้องใช้กล่องคำเตือนและระบุว่าเป็น **สถานะนักกีฬา ไม่ใช่ข้อผิดพลาดของระบบ**
+- **สถานะความพร้อมของข้อมูล (17 ส.ค. 69):** ปุ่ม `สถานะข้อมูล Garmin` ใน sidebar เปิด popover สรุป 6 กลุ่มจากประวัติจริงทั้งบัญชีเทียบกับช่วงวันที่เลือก: พร้อม / บางส่วน / มีประวัติแต่นอกช่วง / Garmin Connect ยังไม่เคยส่ง โดยไม่กินพื้นที่หน้าวิเคราะห์หลัก. ห้ามใช้ชื่อรุ่นนาฬิกาเพียงอย่างเดียวฟันธง capability และห้ามตีความ `NULL` ว่า Sync ล้ม; หน้า Recovery/Progress ต้องบอกเหตุผลเมื่อไม่มีค่าแทนการซ่อน section เงียบ ๆ. Recovery Time ที่มีเฉพาะบนนาฬิกาแต่ไม่เข้า Garmin Connect ไม่สามารถเติมผ่าน pipeline นี้ได้และห้ามคำนวณเลียนแบบ Garmin.
 
 ## Workflow เมื่อดูผลซ้อม
 
