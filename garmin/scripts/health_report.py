@@ -178,6 +178,7 @@ RECOVERY_LABEL = {
     "offsite_backup": "สำรองข้อมูลเข้ารหัสนอกเครื่อง (ทุกคืน 22:30)",
     "restore_drill": "ทดสอบกู้คืนจริง (ทุก 4 สัปดาห์)",
 }
+MAX_FUTURE_MINUTES = 10
 
 SCHEDULED_TASKS = [
     "Run-Performance-Garmin-Fast",
@@ -633,7 +634,12 @@ def check_lane_freshness(now=None) -> list:
                                      f"{label}: ยังไม่เคยมีสถานะ (sync_lane/{lane}.json ไม่พบ)"))
             continue
         age_min = (now - run_at).total_seconds() / 60
-        if age_min > limit_min:
+        if age_min < -MAX_FUTURE_MINUTES:
+            findings.append(Finding(
+                f"lane_freshness:{lane}", ERROR,
+                f"{label}: run_at อยู่ในอนาคต {-age_min:.0f} นาที",
+            ))
+        elif age_min > limit_min:
             findings.append(Finding(f"lane_freshness:{lane}", ERROR,
                                      f"{label}: เงียบมา {age_min / 60:.1f} ชม. (เกินเพดาน {limit_min / 60:.1f} ชม.)"))
         elif age_min > limit_min * 0.8:
@@ -682,7 +688,12 @@ def check_recovery_freshness(now=None) -> list:
             continue
 
         age_min = (now - run_at).total_seconds() / 60
-        if age_min > limit_min:
+        if age_min < -MAX_FUTURE_MINUTES:
+            findings.append(Finding(
+                check, ERROR,
+                f"{label}: run_at อยู่ในอนาคต {-age_min:.0f} นาที",
+            ))
+        elif age_min > limit_min:
             findings.append(Finding(
                 check, ERROR,
                 f"{label}: ผลพิสูจน์ล่าสุดเก่า {age_min / 1440:.1f} วัน "

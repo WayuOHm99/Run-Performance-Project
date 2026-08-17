@@ -266,6 +266,17 @@ class LaneFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
         deep = find(findings, "lane_freshness:deep")
         self.assertEqual(deep[0].level, hr.WARNING)
 
+    def test_future_lane_timestamp_is_error(self):
+        now = datetime(2026, 8, 17, 12, 0, 0)
+        self.write_lane_status("fast", now + timedelta(days=30))
+
+        fast = find(
+            hr.check_lane_freshness(now=now), "lane_freshness:fast"
+        )[0]
+
+        self.assertEqual(fast.level, hr.ERROR)
+        self.assertIn("อนาคต", fast.message)
+
 
 class RecoveryFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
     def write_operation(self, operation, run_at, *, ok=True, reason="ok"):
@@ -317,6 +328,16 @@ class RecoveryFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
         )
 
         self.assertTrue(all(item.level == hr.ERROR for item in findings))
+
+    def test_future_recovery_proof_is_error(self):
+        now = datetime(2026, 8, 17, 12, 0, 0)
+        for operation in hr.RECOVERY_STALE_LIMIT_MIN:
+            self.write_operation(operation, now + timedelta(days=30))
+
+        findings = hr.check_recovery_freshness(now=now)
+
+        self.assertTrue(all(item.level == hr.ERROR for item in findings))
+        self.assertTrue(all("อนาคต" in item.message for item in findings))
 
 class UnfinishedRunTests(IsolatedHealthDirMixin, unittest.TestCase):
     def test_started_and_never_finished_is_error(self):

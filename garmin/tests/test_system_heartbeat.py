@@ -89,6 +89,12 @@ class SystemHeartbeatCliTests(unittest.TestCase):
         self.assertIn("validate_system_heartbeat.py", source)
         self.assertIn("--offline-start 01:00", source)
         self.assertIn("--offline-end 08:00", source)
+        self.assertIn("issues: write", source)
+        self.assertIn("heartbeat_issue_alert.py", source)
+        self.assertIn("force_failure", source)
+        self.assertIn("steps.validate.outcome", source)
+        self.assertIn("if: always()", source)
+        self.assertIn("continue-on-error: true", source)
         self.assertNotRegex(source, r"(?m)^    env:\s*$")
 
     def test_validator_accepts_fresh_healthy_heartbeat(self):
@@ -150,6 +156,28 @@ class SystemHeartbeatCliTests(unittest.TestCase):
                 )
                 self.assertEqual(completed.returncode, 1)
                 self.assertEqual(result["reason"], reason)
+
+    def test_validator_rejects_unexpected_privacy_sensitive_fields(self):
+        payload = self.heartbeat("2026-08-17T03:00:00+00:00")
+        cases = []
+        with_findings = dict(payload)
+        with_findings["findings"] = [
+            {"athlete": "private-name", "measurement": 42}
+        ]
+        cases.append(with_findings)
+        with_summary_detail = dict(payload)
+        with_summary_detail["summary"] = {
+            **payload["summary"], "athlete": "private-name"
+        }
+        cases.append(with_summary_detail)
+
+        for candidate in cases:
+            with self.subTest(keys=sorted(candidate)):
+                completed, result = self.run_validator(
+                    candidate, "2026-08-17T03:05:00+00:00"
+                )
+                self.assertEqual(completed.returncode, 1)
+                self.assertEqual(result["reason"], "invalid")
 
     @unittest.skipUnless(os.name == "nt", "Windows Scheduled Task contract")
     def test_scheduler_publishes_heartbeat_every_two_hours_with_retry(self):

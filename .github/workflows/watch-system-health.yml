@@ -4,9 +4,16 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      force_failure:
+        description: Test incident delivery without changing heartbeat data
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: watch-system-health
@@ -26,6 +33,8 @@ jobs:
           python-version: "3.14"
 
       - name: Download privacy-safe heartbeat
+        id: download
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
@@ -34,10 +43,29 @@ jobs:
           --pattern system-health.json
           --dir "$RUNNER_TEMP"
 
-      - name: Require a fresh healthy report
+      - name: Validate heartbeat
+        id: validate
+        if: always()
+        continue-on-error: true
         run: >-
           python garmin/scripts/validate_system_heartbeat.py
           "$RUNNER_TEMP/system-health.json"
           --timezone Asia/Bangkok
           --offline-start 01:00
           --offline-end 08:00
+
+      - name: Open or recover the system incident
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEARTBEAT_STATUS: ${{ (inputs.force_failure == true || steps.download.outcome != 'success' || steps.validate.outcome != 'success') && 'failure' || 'healthy' }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python garmin/scripts/heartbeat_issue_alert.py
+          --status "$HEARTBEAT_STATUS"
+          --repository "$GITHUB_REPOSITORY"
+          --run-url "$RUN_URL"
+
+      - name: Fail after incident delivery
+        if: always() && (inputs.force_failure == true || steps.download.outcome != 'success' || steps.validate.outcome != 'success')
+        run: exit 1

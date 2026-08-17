@@ -57,9 +57,13 @@ def _window_start(current, start, end):
 def _validated_summary(payload):
     if not isinstance(payload, dict):
         raise ValidationError("payload_invalid")
+    if set(payload) != {"generated_at", "status", "summary"}:
+        raise ValidationError("payload_fields_invalid")
     summary = payload.get("summary")
     if not isinstance(summary, dict):
         raise ValidationError("summary_invalid")
+    if set(summary) != {"ok", "warning", "error", "total"}:
+        raise ValidationError("summary_fields_invalid")
     values = {}
     for key in ("ok", "warning", "error", "total"):
         value = summary.get(key)
