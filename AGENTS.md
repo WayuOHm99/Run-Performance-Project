@@ -16,3 +16,17 @@
 4. ตรวจ diff และผลทดสอบของตัวเองก่อนสรุป
 
 งานเสร็จเมื่อ behavior ตรงคำขอ เทสที่เกี่ยวข้องผ่าน และสรุปไฟล์ที่แก้กับข้อจำกัดที่ยังเหลือแล้ว
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context domain documentation layout. See `docs/agents/domain.md`.

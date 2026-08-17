@@ -130,7 +130,10 @@ function Test-TaskPrincipalsMatchCurrentUser {
         'Run-Performance-Garmin',
         'Run-Performance-Backup',
         'Run-Performance-Garmin-Reconcile',
-        'Run-Performance-Garmin-DeepSync'
+        'Run-Performance-Garmin-DeepSync',
+        'Run-Performance-OffsiteBackup',
+        'Run-Performance-RestoreDrill',
+        'Run-Performance-SystemHealth'
     )
     $currentLeaf = ($currentIdentity.Name -split '\\')[-1]
 

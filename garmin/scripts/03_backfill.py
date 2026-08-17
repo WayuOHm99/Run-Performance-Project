@@ -136,8 +136,18 @@ def safe_get(data: dict, *keys, default=None):
     return current
 
 
-def safe_call(api_method, *args, **kwargs):
-    """Call Garmin API with retry on 429 and transient network timeouts."""
+def _record_endpoint_failure(failures, api_method, exc, endpoint=None):
+    """Keep a privacy-safe failure fact without persisting response bodies."""
+    if failures is None:
+        return
+    failures.append({
+        "endpoint": endpoint or getattr(api_method, "__name__", "garmin_endpoint"),
+        "reason": classify_login_error(exc),
+    })
+
+
+def safe_call(api_method, *args, _failures=None, _endpoint=None, **kwargs):
+    """Call an optional Garmin endpoint and record terminal failures when asked."""
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -151,6 +161,12 @@ def safe_call(api_method, *args, **kwargs):
                 or "read timeout" in error_str.lower()
             )
             if "429" in error_str or "Too Many" in error_str:
+                if attempt == max_retries - 1:
+                    _record_endpoint_failure(
+                        _failures, api_method, e, endpoint=_endpoint
+                    )
+                    print("   ❌ Max retries exceeded.")
+                    return None
                 wait = 60 * (attempt + 1)
                 print(f"   ⚠️  Rate limited! Waiting {wait}s before retry...")
                 time.sleep(wait)
@@ -162,9 +178,11 @@ def safe_call(api_method, *args, **kwargs):
                 print(f"   ⚠️  เน็ตค้าง/timeout ({e}) — ลองใหม่ครั้งที่ {attempt + 2}...")
                 time.sleep(5 * (attempt + 1))
             else:
+                _record_endpoint_failure(
+                    _failures, api_method, e, endpoint=_endpoint
+                )
                 print(f"   ⚠️  API error: {e}")
                 return None
-    print("   ❌ Max retries exceeded.")
     return None
 
 
@@ -181,6 +199,81 @@ class InvalidEndpointPayloadError(RequiredEndpointError):
     """A mandatory Garmin response arrived but is unsafe to reconcile."""
 
     status_reason = "payload"
+
+
+CORE_WELLNESS_ENDPOINT_ORDER = (
+    "get_stats", "get_hrv_data", "get_sleep_data", "get_training_readiness",
+)
+CORE_WELLNESS_ENDPOINTS = frozenset(CORE_WELLNESS_ENDPOINT_ORDER)
+
+
+class CoreWellnessUnavailableError(RequiredEndpointError):
+    """Every core wellness endpoint failed for one requested day."""
+
+    def __init__(self, failures):
+        all_failures = list(failures)
+        by_endpoint = {item["endpoint"]: item for item in all_failures}
+        self.failures = [
+            by_endpoint[name]
+            for name in CORE_WELLNESS_ENDPOINT_ORDER
+            if name in by_endpoint
+        ]
+        self.status_reason = (
+            "token"
+            if all_failures
+            and all(item["reason"] == "token" for item in all_failures)
+            else "network"
+        )
+        super().__init__(
+            "all core wellness endpoints failed: "
+            + ", ".join(item["endpoint"] for item in self.failures)
+        )
+
+def _raise_if_all_core_wellness_failed(failures):
+    failed = {item["endpoint"] for item in failures}
+    if CORE_WELLNESS_ENDPOINTS.issubset(failed):
+        raise CoreWellnessUnavailableError(failures)
+
+
+def _core_wellness_error(failures):
+    """Return the terminal core error, or None when the day is usable."""
+    try:
+        _raise_if_all_core_wellness_failed(failures)
+    except CoreWellnessUnavailableError as exc:
+        return exc
+    return None
+
+
+def _publish_deferred_wellness_errors(errors, collector):
+    """Let orchestration finish recoverable work before publishing failure."""
+    if not errors:
+        return
+    if collector is None:
+        raise errors[0]
+    collector.extend(errors)
+
+
+def _unique_endpoint_failures(failures):
+    """Deduplicate structured failure facts while preserving call order."""
+    unique = []
+    seen = set()
+    for item in failures or []:
+        key = (item.get("endpoint"), item.get("reason"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append({"endpoint": key[0], "reason": key[1]})
+    return unique
+
+
+def _call_wellness_endpoint(garmin, endpoint, date_str, failures):
+    """Call one named wellness endpoint with stable, privacy-safe telemetry."""
+    return safe_call(
+        getattr(garmin, endpoint),
+        date_str,
+        _failures=failures,
+        _endpoint=endpoint,
+    )
 
 
 def _normalize_activity_id(value):
@@ -268,7 +361,8 @@ def fetch_activity_detail(garmin, activity_id):
 
 
 def fetch_and_insert_activities(
-    garmin, conn, athlete_id, start_date, end_date, *, fast=False
+    garmin, conn, athlete_id, start_date, end_date, *, fast=False,
+    _validated_source=None, reconcile=True,
 ):
     """Fetch activities by date range and insert into fact_activity (ละเอียด: running dynamics,
     HR time-in-zone, weather, stamina/impact load สำหรับกิจกรรมวิ่ง).
@@ -278,15 +372,20 @@ def fetch_and_insert_activities(
     ถ้า activity มีอยู่แล้ว จะเก็บ enrichment จาก full sync เดิมไว้ ไม่เขียน NULL ทับ."""
     print(f"\n📊 Fetching activities from {start_date} to {end_date}...")
 
-    activities = safe_call(
-        garmin.get_activities_by_date,
-        start_date.isoformat(),
-        end_date.isoformat(),
-    )
-    # Only a validated list is authoritative enough for reconciliation.  In
-    # particular, an empty mapping/string must never be mistaken for [] and
-    # soft-delete every activity in the requested window.
-    activities = _validated_activities(activities)
+    if _validated_source is None:
+        activities = safe_call(
+            garmin.get_activities_by_date,
+            start_date.isoformat(),
+            end_date.isoformat(),
+        )
+        # Only a validated list is authoritative enough for reconciliation.  In
+        # particular, an empty mapping/string must never be mistaken for [] and
+        # soft-delete every activity in the requested window.
+        activities = _validated_activities(activities)
+    else:
+        # Internal seam used by reconcile_only after it validated the single
+        # authoritative collection.  This avoids a second list request.
+        activities = list(_validated_source)
 
     cur = conn.cursor()
     count = 0
@@ -389,7 +488,7 @@ def fetch_and_insert_activities(
     print(f"   ✅ Inserted {count} activities")
     # reconcile ช่วงที่เพิ่งดึง (ฟรี — ใช้รายการที่ดึงมาแล้ว): กิจกรรมใน DB ช่วงนี้ที่ไม่อยู่
     # ในรายการจริงของ Garmin = ถูกลบฝั่งแอป → mark deleted_at (daily 3 วันจับการลบล่าสุดได้เอง)
-    if not fast:
+    if not fast and reconcile:
         reconcile_activities(conn, athlete_id, start_date, end_date, present_ids)
     return count
 
@@ -535,18 +634,45 @@ def reconcile_activities(conn, athlete_id, start_date, end_date, present_ids):
 
 
 def reconcile_only(garmin, conn, athlete_id, start_date, end_date):
-    """โหมด --reconcile: ดึงแค่ "รายชื่อ activityId" ช่วงกว้าง (ไม่ดึงรายละเอียด/ไม่ insert)
-    แล้วมาร์คกิจกรรมที่ถูกลบ — เบา API พอสำหรับรันรายสัปดาห์ช่วง 90 วัน.
-    คืน (marked, restored) หรือ None ถ้าดึงรายการไม่สำเร็จ (ห้าม reconcile)."""
+    """Reconcile a bounded wide window and selectively import remote-only rows.
+
+    Existing rows cost no detail calls.  Garmin-only rows are enriched once,
+    which lets the weekly 90-day lane repair old uploads missed by daily sync.
+    """
     print(f"\n🔍 Reconcile (เช็คกิจกรรมถูกลบ) {start_date} → {end_date}...")
     activities = safe_call(garmin.get_activities_by_date,
                            start_date.isoformat(), end_date.isoformat())
     activities = _validated_activities(activities)
     present_ids = {activity_id for _activity, activity_id in activities}
+    local_ids = {
+        row[0] for row in conn.execute(
+            """SELECT activity_id FROM fact_activity
+               WHERE athlete_id = ?
+                 AND substr(start_time_local, 1, 10) BETWEEN ? AND ?""",
+            (athlete_id, str(start_date), str(end_date)),
+        ).fetchall()
+    }
+    missing = []
+    seen_missing = set()
+    for activity, activity_id in activities:
+        if activity_id not in local_ids and activity_id not in seen_missing:
+            missing.append((activity, activity_id))
+            seen_missing.add(activity_id)
+    if missing:
+        fetch_and_insert_activities(
+            garmin,
+            conn,
+            athlete_id,
+            start_date,
+            end_date,
+            _validated_source=missing,
+            reconcile=False,
+        )
     marked, restored = reconcile_activities(conn, athlete_id, start_date, end_date, present_ids)
     print(f"   ✅ Reconcile เสร็จ — Garmin มี {len(present_ids)} กิจกรรม | "
-          f"mark deleted {len(marked)} | กู้คืน {len(restored)}")
-    return marked, restored
+          f"นำเข้าที่ขาด {len(missing)} | mark deleted {len(marked)} | "
+          f"กู้คืน {len(restored)}")
+    return marked, restored, [activity_id for _activity, activity_id in missing]
 
 
 # ── Daily Wellness Fetching ──────────────────────────────────
@@ -999,7 +1125,10 @@ def _update_wellness_fields(cur, athlete_id, date_str, values: dict) -> int:
     return len(fresh)
 
 
-def fetch_and_update_wellness_fast(garmin, conn, athlete_id, start_date, end_date):
+def fetch_and_update_wellness_fast(
+    garmin, conn, athlete_id, start_date, end_date, *, endpoint_failures=None,
+    terminal_errors=None,
+):
     """fast wellness: ดึงเฉพาะค่าที่ "ขยับระหว่างวัน" ของช่วงสั้น ๆ แล้วอัปเดตทับเป็นราย
     คอลัมน์ (ไม่ล้างของเดิม) — 4 endpoint ต่อวันแทน 9 ของ full sync
 
@@ -1012,18 +1141,33 @@ def fetch_and_update_wellness_fast(garmin, conn, athlete_id, start_date, end_dat
     cur = conn.cursor()
     current = start_date
     count = 0
+    deferred_errors = []
 
     while current <= end_date:
         date_str = current.isoformat()
         print(f"   {date_str}", end="", flush=True)
+        day_failures = []
 
-        stats = safe_call(garmin.get_stats, date_str)
+        stats = _call_wellness_endpoint(
+            garmin, "get_stats", date_str, day_failures
+        )
         time.sleep(0.3)
-        hrv = safe_call(garmin.get_hrv_data, date_str)
+        hrv = _call_wellness_endpoint(
+            garmin, "get_hrv_data", date_str, day_failures
+        )
         time.sleep(0.3)
-        sleep = safe_call(garmin.get_sleep_data, date_str)
+        sleep = _call_wellness_endpoint(
+            garmin, "get_sleep_data", date_str, day_failures
+        )
         time.sleep(0.3)
-        readiness = safe_call(garmin.get_training_readiness, date_str)
+        readiness = _call_wellness_endpoint(
+            garmin, "get_training_readiness", date_str, day_failures
+        )
+        if endpoint_failures is not None:
+            endpoint_failures.extend(day_failures)
+        error = _core_wellness_error(day_failures)
+        if error is not None:
+            deferred_errors.append(error)
 
         values = {
             **_parse_stats(stats),
@@ -1042,6 +1186,7 @@ def fetch_and_update_wellness_fast(garmin, conn, athlete_id, start_date, end_dat
         current += timedelta(days=1)
 
     print(f"   ✅ อัปเดต wellness {count} วัน")
+    _publish_deferred_wellness_errors(deferred_errors, terminal_errors)
     return count
 
 
@@ -1106,7 +1251,8 @@ def _previous_day_repair_due(conn, athlete_id, repair_date, *, now_utc=None):
 
 
 def fetch_and_repair_previous_day_wellness(
-    garmin, conn, athlete_id, repair_date, *, now_utc=None
+    garmin, conn, athlete_id, repair_date, *, now_utc=None,
+    endpoint_failures=None, terminal_errors=None,
 ):
     """Repair a partial yesterday snapshot without doubling every fast poll.
 
@@ -1123,15 +1269,22 @@ def fetch_and_repair_previous_day_wellness(
 
     date_str = str(repair_date)
     print(f"\n🩹 ซ่อม wellness เมื่อวาน {date_str} ({', '.join(reasons)})...")
-    stats = safe_call(garmin.get_stats, date_str)
+    failures = []
+    stats = _call_wellness_endpoint(garmin, "get_stats", date_str, failures)
     time.sleep(0.3)
-    hrv = safe_call(garmin.get_hrv_data, date_str)
+    hrv = _call_wellness_endpoint(garmin, "get_hrv_data", date_str, failures)
     time.sleep(0.3)
-    sleep = safe_call(garmin.get_sleep_data, date_str)
+    sleep = _call_wellness_endpoint(garmin, "get_sleep_data", date_str, failures)
     time.sleep(0.3)
-    respiration = safe_call(garmin.get_respiration_data, date_str)
+    respiration = _call_wellness_endpoint(
+        garmin, "get_respiration_data", date_str, failures
+    )
     time.sleep(0.3)
-    readiness = safe_call(garmin.get_training_readiness, date_str)
+    readiness = _call_wellness_endpoint(
+        garmin, "get_training_readiness", date_str, failures
+    )
+    if endpoint_failures is not None:
+        endpoint_failures.extend(failures)
 
     values = {
         **_parse_stats(stats),
@@ -1142,6 +1295,15 @@ def fetch_and_repair_previous_day_wellness(
     _fill_missing(values, _parse_respiration(respiration))
     cur = conn.cursor()
     n_fields = _update_wellness_fields(cur, athlete_id, date_str, values)
+    conn.commit()
+    # Preserve any valid respiration value, but do not consume the repair
+    # cooldown when every core endpoint errored; the next lane must retry.
+    error = _core_wellness_error(failures)
+    if error is not None:
+        if terminal_errors is None:
+            raise error
+        terminal_errors.append(error)
+        return int(n_fields > 0)
 
     # Record the attempt even if Garmin still returned nothing.  A real
     # no-night-data case will therefore retry only after the cooldown.
@@ -1163,55 +1325,80 @@ def fetch_and_repair_previous_day_wellness(
     return int(n_fields > 0)
 
 
-def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
+def fetch_and_insert_wellness(
+    garmin, conn, athlete_id, start_date, end_date, *, endpoint_failures=None,
+    terminal_errors=None,
+):
     """Fetch daily wellness metrics day-by-day."""
     print(f"\n🩺 Fetching daily wellness from {start_date} to {end_date}...")
 
     cur = conn.cursor()
     current = start_date
     count = 0
+    deferred_errors = []
     total_days = (end_date - start_date).days + 1
 
     while current <= end_date:
         date_str = current.isoformat()
         day_num = (current - start_date).days + 1
         print(f"   Day {day_num}/{total_days}: {date_str}", end="", flush=True)
+        day_failures = []
 
         # ── Stats (steps, resting HR, stress) ──
-        stats = safe_call(garmin.get_stats, date_str)
+        stats = _call_wellness_endpoint(
+            garmin, "get_stats", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── HRV ──
-        hrv = safe_call(garmin.get_hrv_data, date_str)
+        hrv = _call_wellness_endpoint(
+            garmin, "get_hrv_data", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── Sleep ──
-        sleep = safe_call(garmin.get_sleep_data, date_str)
+        sleep = _call_wellness_endpoint(
+            garmin, "get_sleep_data", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── Respiration (Body Battery ดึงจาก get_stats แล้ว ไม่ต้องเรียกแยก) ──
-        respiration = safe_call(garmin.get_respiration_data, date_str)
+        respiration = _call_wellness_endpoint(
+            garmin, "get_respiration_data", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── Training Readiness ──
-        readiness = safe_call(garmin.get_training_readiness, date_str)
+        readiness = _call_wellness_endpoint(
+            garmin, "get_training_readiness", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── Training Status ──
-        training_status = safe_call(garmin.get_training_status, date_str)
+        training_status = _call_wellness_endpoint(
+            garmin, "get_training_status", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── Max metrics (VO2max trend + fitness age — เทรนด์รายวัน ไม่ใช่แค่วันเทส) ──
-        max_metrics = safe_call(garmin.get_max_metrics, date_str)
+        max_metrics = _call_wellness_endpoint(
+            garmin, "get_max_metrics", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── Endurance score (device-dependent — นาฬิการุ่นเก่าได้ None) ──
-        endurance = safe_call(garmin.get_endurance_score, date_str)
+        endurance = _call_wellness_endpoint(
+            garmin, "get_endurance_score", date_str, day_failures
+        )
         time.sleep(0.3)
 
         # ── Hill score (device-dependent) ──
-        hill = safe_call(garmin.get_hill_score, date_str)
+        hill = _call_wellness_endpoint(
+            garmin, "get_hill_score", date_str, day_failures
+        )
         time.sleep(0.3)
+        if endpoint_failures is not None:
+            endpoint_failures.extend(day_failures)
 
         values = {
             **_parse_stats(stats),
@@ -1229,6 +1416,11 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
         _insert_wellness_row(cur, athlete_id, date_str, values)
         # ไม่ถือ write transaction ค้างระหว่าง network calls ของวันถัดไป
         conn.commit()
+        # Optional endpoint values above are still valid and must survive even
+        # though the round itself is failed because every core source errored.
+        error = _core_wellness_error(day_failures)
+        if error is not None:
+            deferred_errors.append(error)
         count += 1
         print(" ✓")
 
@@ -1238,6 +1430,7 @@ def fetch_and_insert_wellness(garmin, conn, athlete_id, start_date, end_date):
 
     conn.commit()
     print(f"   ✅ Inserted {count} wellness records")
+    _publish_deferred_wellness_errors(deferred_errors, terminal_errors)
     return count
 
 
@@ -1590,7 +1783,8 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
 # ── Sync status + sanity check ───────────────────────────────
 
 def write_status(slug, ok, reason="ok", error=None,
-                 activities=None, wellness_days=None, warnings=None):
+                 activities=None, wellness_days=None, warnings=None,
+                 endpoint_failures=None):
     """เขียนสถานะรอบนี้ลง data/sync_status/<slug>.json (เขียน tmp แล้ว rename กันไฟล์ครึ่งเดียว)."""
     STATUS_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -1601,6 +1795,7 @@ def write_status(slug, ok, reason="ok", error=None,
         "activities": activities,
         "wellness_days": wellness_days,
         "warnings": warnings or [],
+        "endpoint_failures": _unique_endpoint_failures(endpoint_failures),
         "finished_at": datetime.now().isoformat(timespec="seconds"),
     }
     tmp = STATUS_DIR / f"{slug}.json.tmp"
@@ -1802,16 +1997,20 @@ def main():
             )
             sys.exit(1)
         conn.close()
-        marked, restored = result
+        marked, restored, imported = result
         write_status(args.athlete, ok=True, reason="ok",
+                     activities=len(imported),
                      warnings=([f"reconcile: mark กิจกรรมถูกลบ {len(marked)} รายการ"] if marked else []))
         print("\n" + "=" * 50)
-        print(f"🎉 Reconcile complete! deleted +{len(marked)} | restored +{len(restored)}")
+        print(f"🎉 Reconcile complete! imported +{len(imported)} | "
+              f"deleted +{len(marked)} | restored +{len(restored)}")
         print("=" * 50)
         return
 
     # Fetch data.  A mandatory collection which is unavailable or malformed is
     # a failed sync, never a successful zero-row round.
+    wellness_endpoint_failures = []
+    wellness_terminal_errors = []
     try:
         if args.skip_activities or args.wellness_fast:
             _why = "--skip-activities" if args.skip_activities else "--wellness-fast"
@@ -1828,26 +2027,44 @@ def main():
             print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
         elif args.wellness_fast:
             wellness_count = fetch_and_update_wellness_fast(
-                garmin, conn, athlete_id, start_date, end_date
+                garmin, conn, athlete_id, start_date, end_date,
+                endpoint_failures=wellness_endpoint_failures,
+                terminal_errors=wellness_terminal_errors,
             )
             # The scheduled lane uses --days 0.  A manual wider fast range already
             # fetched yesterday in the loop, so do not duplicate those calls.
             if start_date == end_date:
                 wellness_count += fetch_and_repair_previous_day_wellness(
-                    garmin, conn, athlete_id, end_date - timedelta(days=1)
+                    garmin, conn, athlete_id, end_date - timedelta(days=1),
+                    endpoint_failures=wellness_endpoint_failures,
+                    terminal_errors=wellness_terminal_errors,
                 )
         else:
             wellness_count = fetch_and_insert_wellness(
-                garmin, conn, athlete_id, start_date, end_date
+                garmin, conn, athlete_id, start_date, end_date,
+                endpoint_failures=wellness_endpoint_failures,
+                terminal_errors=wellness_terminal_errors,
             )
             fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
+        if wellness_terminal_errors:
+            raise CoreWellnessUnavailableError(
+                failure
+                for error in wellness_terminal_errors
+                for failure in error.failures
+            )
     except RequiredEndpointError as exc:
         conn.close()
         print(f"\n❌ Sync ใช้ response จาก Garmin ไม่ได้: {exc}")
         write_status(
-            args.athlete, ok=False, reason=exc.status_reason, error=str(exc)
+            args.athlete,
+            ok=False,
+            reason=exc.status_reason,
+            error=str(exc),
+            endpoint_failures=(
+                wellness_endpoint_failures or getattr(exc, "failures", None)
+            ),
         )
-        sys.exit(1)
+        sys.exit(2 if exc.status_reason == "token" else 1)
 
     sanity_start_date = (
         min(start_date, end_date - timedelta(days=1))
@@ -1858,6 +2075,15 @@ def main():
         include_wellness=not args.activities_only,
         include_activities=not args.wellness_fast,
     )
+    unique_endpoint_failures = _unique_endpoint_failures(
+        wellness_endpoint_failures
+    )
+    if unique_endpoint_failures:
+        summary = ", ".join(
+            f"{item['endpoint']}:{item['reason']}"
+            for item in unique_endpoint_failures
+        )
+        warnings.append(f"wellness endpoint degraded: {summary}")
     if warnings:
         print("\n⚠️  Sanity check พบจุดน่าสงสัย:")
         for w in warnings:
@@ -1866,7 +2092,8 @@ def main():
     conn.close()
     write_status(args.athlete, ok=True, reason="ok",
                  activities=activity_count, wellness_days=wellness_count,
-                 warnings=warnings)
+                 warnings=warnings,
+                 endpoint_failures=unique_endpoint_failures)
 
     print("\n" + "=" * 50)
     print("🎉 Backfill complete!")

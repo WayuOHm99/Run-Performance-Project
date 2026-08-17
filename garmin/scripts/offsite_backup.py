@@ -364,7 +364,7 @@ def run_restore_drill() -> dict:
         if not databases:
             raise OffsiteBackupError("restored_database_missing")
         restored_database = databases[-1]
-        validation = validate_sqlite(restored_database)
+        validation = validate_sqlite(restored_database, dashboard_probe=True)
         if not validation["ok"]:
             raise OffsiteBackupError("restored_database_invalid")
 
@@ -375,6 +375,13 @@ def run_restore_drill() -> dict:
             "snapshot_count": len(snapshot_rows),
             "restored_database": restored_database.name,
             "restored_size_bytes": validation["size_bytes"],
+            "latest_activity_date": validation["latest_activity_date"],
+            "latest_wellness_date": validation["latest_wellness_date"],
+            "data_age_days": validation["data_age_days"],
+            "athlete_count": validation["athlete_count"],
+            "active_activity_count": validation["active_activity_count"],
+            "wellness_count": validation["wellness_count"],
+            "dashboard_probe": validation["dashboard_probe"],
         }
     except (OffsiteBackupError, OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
         reason = str(exc) or exc.__class__.__name__

@@ -28,12 +28,62 @@ param(
     # -StaleOnly: รอบนี้ไม่ได้ทำงานจริง (ข้ามเพราะชน lock) จึงไม่มี "ผลของรอบ" ให้ตรวจ —
     # เอาไว้ให้สาย wellness ยังเดิน watchdog ได้แม้รอบตัวเองถูกข้าม ไม่งั้นช่วงที่มีสายอื่น
     # ค้างกอด lock ยาว ๆ (= ช่วงที่น่าจะมีปัญหาที่สุด) watchdog จะเงียบไปพร้อมกันทั้งระบบ
-    [switch]$StaleOnly
+    [switch]$StaleOnly,
+    # Test/portable seams: production leaves these blank and uses garmin/data + Windows toast.
+    [string]$DataDir = "",
+    [string]$NotificationLog = "",
+    [string]$NowIso = "",
+    [ValidateRange(1, 10080)][int]$CooldownMinutes = 360
 )
 
 $ErrorActionPreference = "Stop"
+$script:Now = if ($NowIso) { [DateTimeOffset]::Parse($NowIso) } else { [DateTimeOffset]::Now }
+$script:Conditions = @()
+$script:ScopeComplete = @{}
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Add-Condition(
+    [string]$Scope, [string]$Key, [string]$Title, [string]$Body
+) {
+    $script:Conditions += [pscustomobject]@{
+        scope = $Scope; key = $Key; title = $Title; body = $Body
+    }
+}
+
+function Get-WarningIdentity([string]$Warning) {
+    # Use the full warning only to derive a local opaque identity.  Dates, activity IDs,
+    # and health details stay in the protected lane log and never enter toast/state text.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Warning)
+        $hex = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace("-", "")
+        return $hex.Substring(0, 16).ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-WarningLabel([string]$Warning) {
+    if ($Warning -match '^wellness endpoint degraded') { return "Garmin wellness ตอบไม่ครบ" }
+    if ($Warning -match '^wellness ว่างทั้งวัน') { return "wellness ว่างทั้งวัน" }
+    if ($Warning -match '^wellness เป็น partial snapshot') { return "wellness ยังมาไม่ครบ" }
+    if ($Warning -match '^วิ่ง .*ไม่มี HR') { return "กิจกรรมวิ่งไม่มี HR" }
+    if ($Warning -match '^วิ่ง .*ไม่มีระยะทาง') { return "กิจกรรมวิ่งไม่มีระยะทาง" }
+    if ($Warning -match '^กิจกรรม .*เวลารวม') { return "กิจกรรมไม่มีเวลารวม" }
+    if ($Warning -match '^reconcile:') { return "รายการกิจกรรมเปลี่ยนจาก Garmin" }
+    return "ข้อมูลมีจุดน่าสงสัย"
+}
 
 function Show-Toast([string]$Title, [string]$Body) {
+    if ($NotificationLog) {
+        $parent = Split-Path $NotificationLog -Parent
+        if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+        $entry = [ordered]@{
+            at = $script:Now.ToString("o"); title = $Title; body = $Body
+        } | ConvertTo-Json -Compress
+        [System.IO.File]::AppendAllText($NotificationLog, $entry + [Environment]::NewLine, $utf8NoBom)
+        Write-Output "notification-sink: $Title"
+        return
+    }
     try {
         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
         [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
@@ -53,9 +103,63 @@ function Show-Toast([string]$Title, [string]$Body) {
     }
 }
 
+function Publish-Scope([string]$Scope, [string]$DataRoot) {
+    $items = @($script:Conditions | Where-Object { $_.scope -eq $Scope } |
+        Select-Object key, title, body)
+    $safeScope = $Scope -replace "[^a-zA-Z0-9_.-]", "_"
+    $conditionPath = Join-Path $DataRoot "notify_conditions_$safeScope.json"
+    $statePath = Join-Path $DataRoot "notify_state.json"
+    $json = ConvertTo-Json -InputObject @($items) -Depth 4 -Compress
+    [System.IO.Directory]::CreateDirectory($DataRoot) | Out-Null
+    [System.IO.File]::WriteAllText($conditionPath, $json, $utf8NoBom)
+    try {
+        $garminRoot = Split-Path $PSScriptRoot -Parent
+        $python = Join-Path $garminRoot ".venv\Scripts\python.exe"
+        if (-not (Test-Path $python)) {
+            $python = Join-Path $garminRoot ".venv/bin/python"
+        }
+        $policy = Join-Path $PSScriptRoot "notification_policy.py"
+        $nowText = $script:Now.ToString("o")
+        $observation = if ($script:ScopeComplete[$Scope] -eq $true) { "complete" }
+                       else { "unknown" }
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $raw = & $python -X utf8 $policy --state $statePath --scope $Scope `
+                --conditions $conditionPath --now $nowText `
+                --cooldown-minutes $CooldownMinutes --observation $observation 2>&1
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorAction
+        }
+        if ($LASTEXITCODE -ne 0) {
+            $details = ($raw | Out-String).Trim()
+            throw "notification policy failed: $details"
+        }
+        $result = ($raw -join "`n") | ConvertFrom-Json
+
+        $alerts = @($result.alerts)
+        if ($alerts.Count -gt 0) {
+            $title = if ($alerts.Count -eq 1) { $alerts[0].title }
+                     else { "Garmin: พบปัญหาใหม่/ถึงเวลาเตือน $($alerts.Count) รายการ" }
+            Show-Toast $title (($alerts | ForEach-Object { $_.body }) -join "`n")
+        }
+        $recoveries = @($result.recoveries)
+        if ($recoveries.Count -gt 0) {
+            $body = ($recoveries | ForEach-Object { "$($_.body) — กลับมาปกติแล้ว" }) -join "`n"
+            Show-Toast "Garmin: ปัญหาคลี่คลาย $($recoveries.Count) รายการ" $body
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $conditionPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # ── ผลของรอบที่เพิ่งจบ ───────────────────────────────────────
 
 function Test-Round([string]$StatusPath, [string]$StartPath) {
+    $scope = "round-" + $(if ($Lane) { $Lane } else { "manual" })
+    $script:ScopeComplete[$scope] = $false
     # เวลาเริ่มรอบนี้ (bat เขียนก่อนรัน fetch_all) — ใช้ตัดสินว่าสถานะถูกเขียน "รอบนี้" จริงไหม
     $runStart = $null
     if (Test-Path $StartPath) {
@@ -63,17 +167,20 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
             $runStart = [datetime]::Parse((Get-Content $StartPath -Raw).Trim())
         }
         catch {
-            Show-Toast "Garmin sync ล้มเหลว" "start marker เสีย/อ่านไม่ได้ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
+            Add-Condition $scope "start-marker-invalid" "Garmin sync ล้มเหลว" `
+                "start marker เสีย/อ่านไม่ได้ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
             return
         }
     }
     elseif ($Lane) {
-        Show-Toast "Garmin sync ล้มเหลว" "ไม่มี start marker ของรอบนี้ — prep_log ทำงานไม่สำเร็จ"
+        Add-Condition $scope "start-marker-missing" "Garmin sync ล้มเหลว" `
+            "ไม่มี start marker ของรอบนี้ — prep_log ทำงานไม่สำเร็จ"
         return
     }
 
     if (-not (Test-Path $StatusPath)) {
-        Show-Toast "Garmin sync ล้มเหลว" "ไม่มีไฟล์สถานะ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
+        Add-Condition $scope "status-missing" "Garmin sync ล้มเหลว" `
+            "ไม่มีไฟล์สถานะ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
         return
     }
 
@@ -91,7 +198,8 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
         }
     }
     catch {
-        Show-Toast "Garmin sync ล้มเหลว" "ไฟล์สถานะเสีย/อ่านไม่ได้ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
+        Add-Condition $scope "status-invalid" "Garmin sync ล้มเหลว" `
+            "ไฟล์สถานะเสีย/อ่านไม่ได้ — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
         return
     }
 
@@ -99,24 +207,31 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
     # (เช่นรัน fetch_all มือตรง ๆ ไม่ผ่าน bat) ถือว่า fresh เพื่อไม่เตือนพร่ำเพรื่อ
     $isFresh = ($null -eq $runStart) -or ($statusTime -ge $runStart.AddSeconds(-5))
     if (-not $isFresh) {
-        Show-Toast "Garmin sync ล้มเหลว" "fetch_all ไม่ได้เขียนสถานะรอบนี้ (ไม่ได้รัน/ตายก่อน) — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
+        Add-Condition $scope "status-not-fresh" "Garmin sync ล้มเหลว" `
+            "fetch_all ไม่ได้เขียนสถานะรอบนี้ (ไม่ได้รัน/ตายก่อน) — เปิด log C:\Backup\run-performance-logs\garmin-sync-*.log"
         return
     }
+
+    # From this point results are structurally valid and belong to this round,
+    # so an absent prior condition is real recovery rather than "unknown".
+    $script:ScopeComplete[$scope] = $true
 
     $failed = @($s.results | Where-Object { -not $_.ok })
     $warned = @($s.results | Where-Object { $_.ok -and @($_.warnings).Count -gt 0 })
     if ($SyncExit -ne 0 -and $failed.Count -eq 0) {
         if ($FailureContext -eq "drift") {
-            Show-Toast "Garmin data quality/schema drift" "พบข้อมูลน่าสงสัยหรือ schema drift (exit $SyncExit) — เปิด deepsync log"
+            Add-Condition $scope "launcher-drift-$SyncExit" `
+                "Garmin data quality/schema drift" `
+                "พบข้อมูลน่าสงสัยหรือ schema drift (exit $SyncExit) — เปิด deepsync log"
         }
         else {
-            Show-Toast "Garmin sync ล้มเหลว" "worker/launcher คืน exit code $SyncExit แม้ status เดิมจะดูสำเร็จ — เปิด log"
+            Add-Condition $scope "launcher-exit-$SyncExit" "Garmin sync ล้มเหลว" `
+                "worker/launcher คืน exit code $SyncExit แม้ status เดิมจะดูสำเร็จ — เปิด log"
         }
         return
     }
     if ($failed.Count -eq 0 -and $warned.Count -eq 0) { return }
 
-    $lines = @()
     foreach ($f in $failed) {
         $why = switch ($f.reason) {
             "token"   { "token เสีย -> รัน เพิ่มนักกีฬา.bat" }
@@ -125,15 +240,23 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
             "payload" { "Garmin payload ผิดรูปแบบ/ข้อมูลตอบกลับเสีย -> ดู log" }
             default   { "ล้มเหลว -> ดู log" }
         }
-        $lines += "$($f.slug): $why"
+        $safeReason = if ($f.reason -match '^[a-zA-Z0-9_-]+$') { $f.reason } else { "error" }
+        Add-Condition $scope "athlete-$($f.slug)-$safeReason" `
+            "Garmin sync ล้มเหลว" "$($f.slug): $why"
     }
     foreach ($w in $warned) {
-        $lines += "$($w.slug): ข้อมูลน่าสงสัย $(@($w.warnings).Count) จุด (ดู log)"
+        $safeSlug = ([string]$w.slug) -replace '[^a-zA-Z0-9_.-]', '_'
+        $seenWarnings = @{}
+        foreach ($warning in @($w.warnings)) {
+            $warningText = [string]$warning
+            $identity = Get-WarningIdentity $warningText
+            if ($seenWarnings.ContainsKey($identity)) { continue }
+            $seenWarnings[$identity] = $true
+            Add-Condition $scope "athlete-$safeSlug-warning-$identity" `
+                "Garmin sync: ข้อมูลมีจุดน่าสงสัย" `
+                "$($w.slug): $(Get-WarningLabel $warningText) (ดู log)"
+        }
     }
-
-    $title = if ($failed.Count -gt 0) { "Garmin sync ล้มเหลว $($failed.Count) คน" }
-             else { "Garmin sync: ข้อมูลมีจุดน่าสงสัย" }
-    Show-Toast $title ($lines -join "`n")
 }
 
 
@@ -159,14 +282,6 @@ $STALE_MARKER = @{ full = "sync_run_start.txt"; fast = "sync_fast_run_start.txt"
                    backup = "sync_backup_run_start.txt" }
 # เผื่อเวลาที่รอบหนึ่งใช้จริง ก่อนจะสรุปว่า "ตายกลางคัน" ไม่ใช่ "กำลังรันอยู่ตอนนี้"
 $RUN_GRACE_MIN = @{ full = 30; fast = 10; wellness = 10; reconcile = 60; deep = 90; backup = 60 }
-$STALE_COOLDOWN_MIN = 360     # เตือนซ้ำได้ทุก 6 ชม. พอให้รู้ตัวโดยไม่รำคาญ
-
-function Format-Age([int]$Minutes) {
-    # สายรายสัปดาห์/รายเดือนถ้าบอกเป็นชั่วโมงจะอ่านไม่ออก (744 ชม. = กี่วันก็ต้องมานั่งหาร)
-    if ($Minutes -ge 2880) { return "{0:N1} วัน" -f ($Minutes / 1440) }
-    return "{0:N1} ชม." -f ($Minutes / 60)
-}
-
 function Read-TimeFile([string]$Path) {
     if (-not (Test-Path $Path)) { return $null }
     try { return [datetime]::Parse((Get-Content $Path -Raw).Trim()) } catch { return $null }
@@ -176,32 +291,52 @@ function Test-StaleLanes([string]$DataDir) {
     # เครื่องปิด/หลับ = ทุกสายเก่าหมดโดยธรรมชาติ ไม่ใช่ความผิดพลาด → ใช้ heartbeat ของ
     # รอบก่อนหน้าดูว่าเพิ่งกลับมาไหม ถ้าใช่ ข้ามรอบนี้ (รอบหน้าอีก 30 นาทีค่อยว่ากัน)
     $hbPath = Join-Path $DataDir "notify_heartbeat.txt"
-    $now = Get-Date
+    $scope = "stale"
+    $script:ScopeComplete[$scope] = $false
+    $now = $script:Now.LocalDateTime
     $prev = Read-TimeFile $hbPath
     $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $hbPath
     if ($null -eq $prev -or ($now - $prev).TotalMinutes -gt 45) { return }
 
     $laneDir = Join-Path $DataDir "sync_lane"
-    $stale = @()
+    $observationComplete = $true
     foreach ($name in $STALE_LIMIT_MIN.Keys) {
         $runAt = $null
         $p = Join-Path $laneDir "$name.json"
         if (Test-Path $p) {
             try {
-                $runAt = [datetime]((Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json).run_at)
-            } catch { $runAt = $null }
+                $rawStatus = Get-Content $p -Raw -Encoding UTF8 | ConvertFrom-Json
+                if (-not $rawStatus.run_at) { throw "run_at missing" }
+                $runAt = [datetime]$rawStatus.run_at
+            }
+            catch {
+                $observationComplete = $false
+                Add-Condition $scope "lane-$name-status-invalid" `
+                    "Garmin sync มีไฟล์สถานะเสีย" `
+                    "$($STALE_LABEL[$name]): ไฟล์สถานะอ่านไม่ได้ — เปิด log"
+                $runAt = $null
+            }
         }
         # สายที่เพิ่มเข้ามาใหม่แล้วลืมใส่ marker/grace ต้องไม่ทำให้ watchdog ทั้งตัวตาย
         # เงียบ ๆ (Join-Path กับ $null โยน error แล้ว try ข้างนอกจะกลืนหายไปทั้งฟังก์ชัน)
         $marker = $STALE_MARKER[$name]
         $startAt = if ($marker) { Read-TimeFile (Join-Path $DataDir $marker) } else { $null }
+        if ($marker -and (Test-Path (Join-Path $DataDir $marker)) -and $null -eq $startAt) {
+            $observationComplete = $false
+            Add-Condition $scope "lane-$name-marker-invalid" `
+                "Garmin sync มี start marker เสีย" `
+                "$($STALE_LABEL[$name]): อ่านเวลาเริ่มรอบไม่ได้ — เปิด log"
+            continue
+        }
         $grace = if ($RUN_GRACE_MIN[$name]) { $RUN_GRACE_MIN[$name] } else { 60 }
 
         # (1) รอบที่เริ่มแล้วไม่จบ — เริ่มไปแล้วแต่ไม่มีสถานะของรอบนั้นตามมา
         if ($startAt -and (($null -eq $runAt) -or ($runAt -lt $startAt.AddSeconds(-5)))) {
             if (($now - $startAt).TotalMinutes -gt $grace) {
-                $stale += "{0}: รอบ {1:d/M HH:mm} เริ่มแล้วไม่จบ (โดนปิด/เครื่องดับกลางทาง)" `
-                          -f $STALE_LABEL[$name], $startAt
+                Add-Condition $scope "lane-$name-unfinished" `
+                    "Garmin sync มีรอบเริ่มแล้วไม่จบ" `
+                    ("{0}: รอบ {1:d/M HH:mm} เริ่มแล้วไม่จบ (โดนปิด/เครื่องดับกลางทาง)" `
+                        -f $STALE_LABEL[$name], $startAt)
             }
             # ยังอยู่ในช่วงที่รอบนี้อาจกำลังรันอยู่ — ไม่ต้องไปวัดอายุสถานะเก่าซ้ำ
             continue
@@ -209,36 +344,41 @@ function Test-StaleLanes([string]$DataDir) {
 
         # (2) สายที่ไม่มีรอบใหม่มานานเกินคาบ (สายที่ยังไม่เคยเดินเลย ไม่ต้องเตือน)
         if ($null -eq $runAt) { continue }
+        if ($runAt -gt $now.AddMinutes(10)) {
+            Add-Condition $scope "lane-$name-future" `
+                "Garmin sync มีเวลาในอนาคต" `
+                "$($STALE_LABEL[$name]): run_at อยู่ในอนาคต — เช็คนาฬิกาเครื่อง/ไฟล์สถานะ"
+            continue
+        }
         $ageMin = [int]($now - $runAt).TotalMinutes
         if ($ageMin -gt $STALE_LIMIT_MIN[$name]) {
-            $stale += "{0}: เงียบมา {1}" -f $STALE_LABEL[$name], (Format-Age $ageMin)
+            Add-Condition $scope "lane-$name-stale" `
+                "Garmin sync มีสายที่หยุดเดิน" `
+                ("$($STALE_LABEL[$name]): ไม่มีรอบใหม่เกินเพดานที่กำหนด" +
+                 "`nเช็ค Task Scheduler + log C:\Backup\run-performance-logs\garmin-sync-*.log")
         }
     }
-    if ($stale.Count -eq 0) { return }
-
-    # กันเตือนซ้ำถี่ ๆ ทุก 30 นาทีจนคนเลิกสนใจ
-    $lastPath = Join-Path $DataDir "notify_stale_last.txt"
-    if (Test-Path $lastPath) {
-        try {
-            $last = [datetime]::Parse((Get-Content $lastPath -Raw).Trim())
-            if (($now - $last).TotalMinutes -lt $STALE_COOLDOWN_MIN) { return }
-        } catch {}
-    }
-    $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $lastPath
-    Show-Toast "Garmin sync มีสายที่หยุดเดิน" (($stale -join "`n") +
-        "`nเช็ค Task Scheduler + log C:\Backup\run-performance-logs\garmin-sync-*.log")
+    $script:ScopeComplete[$scope] = $observationComplete
 }
 
 try {
-    $dataDir = Join-Path (Split-Path $PSScriptRoot -Parent) "data"
+    $dataDir = if ($DataDir) { $DataDir }
+               else { Join-Path (Split-Path $PSScriptRoot -Parent) "data" }
     # สถานะของสายตัวเอง — ไม่ระบุ -Lane (เช่นรันมือ) ค่อย fallback ไฟล์รวมแบบเดิม
     $lanePath = if ($Lane) { Join-Path (Join-Path $dataDir "sync_lane") "$Lane.json" } else { $null }
     $statusPath = if ($lanePath -and (Test-Path $lanePath)) { $lanePath }
                   else { Join-Path $dataDir "sync_status.json" }
     $startPath = Join-Path $dataDir $StartMarker
 
-    if (-not $StaleOnly) { Test-Round $statusPath $startPath }
-    if ($CheckStale) { Test-StaleLanes $dataDir }
+    if (-not $StaleOnly) {
+        Test-Round $statusPath $startPath
+        $roundScope = "round-" + $(if ($Lane) { $Lane } else { "manual" })
+        Publish-Scope $roundScope $dataDir
+    }
+    if ($CheckStale) {
+        Test-StaleLanes $dataDir
+        Publish-Scope "stale" $dataDir
+    }
 } catch {
     Write-Output "notify_sync.ps1 error (ไม่กระทบ sync): $_"
 }

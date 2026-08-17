@@ -9,9 +9,45 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "garmin" / "scripts" / "system_heartbeat.py"
+VALIDATOR = PROJECT_ROOT / "garmin" / "scripts" / "validate_system_heartbeat.py"
 
 
 class SystemHeartbeatCliTests(unittest.TestCase):
+    def run_validator(self, payload, now):
+        with tempfile.TemporaryDirectory(prefix="heartbeat-validator-") as raw:
+            source = Path(raw) / "system-health.json"
+            source.write_text(json.dumps(payload), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(VALIDATOR),
+                    str(source),
+                    "--now", now,
+                    "--timezone", "Asia/Bangkok",
+                    "--offline-start", "01:00",
+                    "--offline-end", "08:00",
+                ],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        return completed, json.loads(completed.stdout)
+
+    @staticmethod
+    def heartbeat(generated_at, *, status="ok", errors=0):
+        return {
+            "generated_at": generated_at,
+            "status": status,
+            "summary": {
+                "ok": 24 - errors,
+                "warning": 1,
+                "error": errors,
+                "total": 25,
+            },
+        }
+
     def test_summarize_strips_findings_and_athlete_details(self):
         report = {
             "generated_at": "2026-08-12T23:55:54",
@@ -50,10 +86,98 @@ class SystemHeartbeatCliTests(unittest.TestCase):
         self.assertIn("cron: '17 * * * *'", source)
         self.assertIn("gh release download system-health", source)
         self.assertIn('--repo "$GITHUB_REPOSITORY"', source)
-        self.assertIn("TotalHours", source)
-        self.assertIn("TotalMinutes -lt -10", source)
-        self.assertIn("summary.error", source)
+        self.assertIn("validate_system_heartbeat.py", source)
+        self.assertIn("--offline-start 01:00", source)
+        self.assertIn("--offline-end 08:00", source)
+        self.assertIn("issues: write", source)
+        self.assertIn("heartbeat_issue_alert.py", source)
+        self.assertIn("force_failure", source)
+        self.assertIn("steps.validate.outcome", source)
+        self.assertIn("if: always()", source)
+        self.assertIn("continue-on-error: true", source)
         self.assertNotRegex(source, r"(?m)^    env:\s*$")
+
+    def test_validator_accepts_fresh_healthy_heartbeat(self):
+        completed, result = self.run_validator(
+            self.heartbeat("2026-08-17T02:00:00+00:00"),
+            "2026-08-17T03:00:00+00:00",
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual((result["ok"], result["reason"]), (True, "fresh"))
+
+    def test_validator_rejects_stale_heartbeat_during_operational_hours(self):
+        completed, result = self.run_validator(
+            self.heartbeat("2026-08-16T23:00:00+00:00"),
+            "2026-08-17T03:00:00+00:00",
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual((result["ok"], result["reason"]), (False, "stale"))
+
+    def test_validator_allows_staleness_only_inside_planned_offline_window(self):
+        payload = self.heartbeat("2026-08-16T17:30:00+00:00")  # 00:30 Bangkok
+        offline, offline_result = self.run_validator(
+            payload, "2026-08-16T21:00:00+00:00"  # 04:00 Bangkok
+        )
+        awake, awake_result = self.run_validator(
+            payload, "2026-08-17T01:01:00+00:00"  # 08:01 Bangkok
+        )
+        self.assertEqual(offline.returncode, 0)
+        self.assertEqual(offline_result["reason"], "planned_offline")
+        self.assertEqual(awake.returncode, 1)
+        self.assertEqual(awake_result["reason"], "stale")
+
+    def test_validator_does_not_hide_multi_day_outage_during_offline_window(self):
+        completed, result = self.run_validator(
+            self.heartbeat("2026-08-14T17:25:00+00:00"),
+            "2026-08-17T00:00:00+00:00",  # 07:00 Bangkok
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(result["reason"], "stale")
+
+    def test_validator_rejects_future_malformed_and_unhealthy_payloads(self):
+        cases = [
+            (
+                self.heartbeat("2026-08-17T03:20:01+00:00"),
+                "future",
+            ),
+            ({"generated_at": "not-a-date"}, "invalid"),
+            (
+                self.heartbeat(
+                    "2026-08-17T03:00:00+00:00", status="error", errors=1
+                ),
+                "unhealthy",
+            ),
+        ]
+        for payload, reason in cases:
+            with self.subTest(reason=reason):
+                completed, result = self.run_validator(
+                    payload, "2026-08-17T03:00:00+00:00"
+                )
+                self.assertEqual(completed.returncode, 1)
+                self.assertEqual(result["reason"], reason)
+
+    def test_validator_rejects_unexpected_privacy_sensitive_fields(self):
+        payload = self.heartbeat("2026-08-17T03:00:00+00:00")
+        cases = []
+        with_findings = dict(payload)
+        with_findings["findings"] = [
+            {"athlete": "private-name", "measurement": 42}
+        ]
+        cases.append(with_findings)
+        with_summary_detail = dict(payload)
+        with_summary_detail["summary"] = {
+            **payload["summary"], "athlete": "private-name"
+        }
+        cases.append(with_summary_detail)
+
+        for candidate in cases:
+            with self.subTest(keys=sorted(candidate)):
+                completed, result = self.run_validator(
+                    candidate, "2026-08-17T03:05:00+00:00"
+                )
+                self.assertEqual(completed.returncode, 1)
+                self.assertEqual(result["reason"], "invalid")
 
     @unittest.skipUnless(os.name == "nt", "Windows Scheduled Task contract")
     def test_scheduler_publishes_heartbeat_every_two_hours_with_retry(self):

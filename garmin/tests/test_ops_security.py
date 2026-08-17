@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import unittest
 import unittest.mock
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -21,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 GARMIN_ROOT = PROJECT_ROOT / "garmin"
 TASKS_DIR = GARMIN_ROOT / "tasks"
 ACL_SCRIPT = PROJECT_ROOT / "scripts" / "harden_private_acl.ps1"
+SCHEDULER_VERIFY_SCRIPT = GARMIN_ROOT / "scripts" / "verify_scheduled_tasks.py"
 
 
 def load_script(name, path):
@@ -34,6 +36,115 @@ token_generator = load_script(
     "garmin_token_generator_under_test",
     GARMIN_ROOT / "scripts" / "01_generate_token.py",
 )
+scheduler_verify = load_script(
+    "scheduler_verify_under_test", SCHEDULER_VERIFY_SCRIPT
+)
+
+
+def scheduled_task_xml(
+    *,
+    argument='"C:\\Project\\worker.vbs"',
+    interval="PT15M",
+    start_boundary="2026-08-02T00:05:00+07:00",
+    end_boundary=None,
+    enabled=None,
+    extra_action="",
+):
+    enabled_xml = "" if enabled is None else f"<Enabled>{str(enabled).lower()}</Enabled>"
+    end_boundary_xml = (
+        "" if end_boundary is None else f"<EndBoundary>{end_boundary}</EndBoundary>"
+    )
+    return f'''<?xml version="1.0"?>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Principals><Principal><LogonType>InteractiveToken</LogonType></Principal></Principals>
+  <Settings>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT30M</Interval><Count>2</Count></RestartOnFailure>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <StartWhenAvailable>true</StartWhenAvailable>
+  </Settings>
+  <Triggers><TimeTrigger><StartBoundary>{start_boundary}</StartBoundary>{end_boundary_xml}{enabled_xml}
+    <Repetition><Interval>{interval}</Interval><Duration>P3650D</Duration></Repetition>
+  </TimeTrigger></Triggers>
+  <Actions><Exec><Command>wscript.exe</Command><Arguments>{argument}</Arguments>
+    <WorkingDirectory>C:\\Project</WorkingDirectory></Exec>{extra_action}</Actions>
+</Task>'''
+
+
+class SchedulerInstalledComparisonTests(unittest.TestCase):
+    NOW = datetime(2026, 8, 17, 12, tzinfo=timezone(timedelta(hours=7)))
+
+    def expected(self):
+        return {
+            "exe": "wscript.exe",
+            "actionCount": 1,
+            "actionTypes": ["Exec"],
+            "argument": '"C:\\Project\\worker.vbs"',
+            "workingDirectory": "C:\\Project",
+            "logonType": "InteractiveToken",
+            "executionTimeLimit": "PT10M",
+            "retryCount": 2,
+            "retryInterval": "PT30M",
+            "onBattery": True,
+            "multipleInstances": "IgnoreNew",
+            "startWhenAvailable": True,
+            "triggers": [{
+                "type": "time", "startTime": "00:05:00",
+                "utcOffset": "+07:00", "endBoundary": None, "enabled": True,
+                "interval": "PT15M", "duration": "P3650D",
+                "windowActive": True,
+            }],
+        }
+
+    def test_matching_installed_xml_has_no_drift(self):
+        actual = scheduler_verify.normalize_task_xml(
+            scheduled_task_xml(), now=self.NOW
+        )
+        self.assertEqual(scheduler_verify.compare_task(self.expected(), actual), [])
+
+    def test_action_and_trigger_drift_are_reported_read_only(self):
+        actual = scheduler_verify.normalize_task_xml(
+            scheduled_task_xml(argument='"C:\\Wrong\\worker.vbs"', interval="PT1H"),
+            now=self.NOW,
+        )
+        self.assertEqual(
+            set(scheduler_verify.compare_task(self.expected(), actual)),
+            {"action_arguments", "trigger_schedule"},
+        )
+
+    def test_disabled_expired_and_wrong_timezone_triggers_are_rejected(self):
+        cases = (
+            {"enabled": False},
+            {"start_boundary": "2010-01-01T00:05:00+07:00"},
+            {"start_boundary": "2026-08-02T00:05:00+00:00"},
+            {"end_boundary": "2026-08-10T00:00:00+07:00"},
+        )
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                actual = scheduler_verify.normalize_task_xml(
+                    scheduled_task_xml(**kwargs), now=self.NOW
+                )
+                self.assertIn(
+                    "trigger_schedule",
+                    scheduler_verify.compare_task(self.expected(), actual),
+                )
+
+    def test_unexpected_non_exec_action_is_counted_and_rejected(self):
+        actual = scheduler_verify.normalize_task_xml(
+            scheduled_task_xml(
+                extra_action=(
+                    "<ComHandler><ClassId>00000000-0000-0000-0000-000000000000"
+                    "</ClassId></ComHandler>"
+                )
+            ),
+            now=self.NOW,
+        )
+        self.assertEqual(
+            set(scheduler_verify.compare_task(self.expected(), actual)),
+            {"action_count", "action_types"},
+        )
 
 
 class WrapperExitPropagationTests(unittest.TestCase):
@@ -306,6 +417,7 @@ class CiCoverageTests(unittest.TestCase):
         source = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        windows_job = source.split("  windows-ops:", 1)[1]
         self.assertIn("runs-on: windows-latest", source)
         self.assertIn("garmin.tests.test_ops_security", source)
         self.assertIn("garmin.tests.test_health_report.PrivateAclChecksTests", source)
@@ -319,6 +431,12 @@ class CiCoverageTests(unittest.TestCase):
         )
         self.assertIn("garmin.tests.test_offsite_backup", source)
         self.assertIn("garmin.tests.test_system_heartbeat", source)
+        self.assertIn("astral-sh/setup-uv@v9.0.0", windows_job)
+        self.assertIn("uv sync --project garmin --frozen", windows_job)
+        self.assertIn('tzutil /s "SE Asia Standard Time"', windows_job)
+        self.assertIn(
+            "uv run --project garmin --frozen python -m unittest", windows_job
+        )
 
 
 class PowerShellEncodingTests(unittest.TestCase):
@@ -348,6 +466,16 @@ class PowerShellEncodingTests(unittest.TestCase):
             source,
             r"default\s+\{\s*\$defaultGarmin \+ \$defaultBackup \+ \$defaultLogs\s*\}",
         )
+
+    def test_acl_principal_check_covers_every_protected_operations_task(self):
+        source = ACL_SCRIPT.read_text(encoding="utf-8-sig")
+        for task_name in (
+            "Run-Performance-OffsiteBackup",
+            "Run-Performance-RestoreDrill",
+            "Run-Performance-SystemHealth",
+        ):
+            with self.subTest(task_name=task_name):
+                self.assertIn(f"'{task_name}'", source)
 
     def test_notification_does_not_hide_missing_or_malformed_round_state(self):
         source = (GARMIN_ROOT / "scripts" / "notify_sync.ps1").read_text(
@@ -412,6 +540,35 @@ class SchedulerPlanTests(unittest.TestCase):
         "Run-Performance-Garmin-Wellness": (0, None),
         "Run-Performance-Garmin": (0, None),
     }
+    TRIGGER_POLICY = {
+        "Run-Performance-Garmin-Fast": [
+            {"type": "time", "startTime": "00:05:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "interval": "PT15M", "duration": "P3650D", "windowActive": True},
+        ],
+        "Run-Performance-Garmin-Wellness": [
+            {"type": "time", "startTime": "00:12:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "interval": "PT30M", "duration": "P3650D", "windowActive": True},
+        ],
+        "Run-Performance-Garmin": [
+            {"type": "time", "startTime": "00:00:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "interval": "PT1H", "duration": "P3650D", "windowActive": True},
+        ],
+        "Run-Performance-Backup": [
+            {"type": "daily", "startTime": "22:00:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "daysInterval": 1},
+        ],
+        "Run-Performance-Garmin-Reconcile": [
+            {"type": "weekly", "startBoundary": "2026-08-09T09:30:00+07:00", "startTime": "09:30:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "weeksInterval": 1, "daysOfWeek": ["Sunday"]},
+        ],
+        "Run-Performance-Garmin-DeepSync": [
+            {"type": "weekly", "startBoundary": "2026-08-02T10:30:00+07:00", "startTime": "10:30:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "weeksInterval": 4, "daysOfWeek": ["Sunday"]},
+        ],
+        "Run-Performance-OffsiteBackup": [
+            {"type": "daily", "startTime": "22:30:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "daysInterval": 1},
+        ],
+        "Run-Performance-RestoreDrill": [
+            {"type": "weekly", "startBoundary": "2026-08-02T12:00:00+07:00", "startTime": "12:00:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "weeksInterval": 4, "daysOfWeek": ["Sunday"]},
+        ],
+        "Run-Performance-SystemHealth": [
+            {"type": "time", "startTime": "00:25:00", "utcOffset": "+07:00", "endBoundary": None, "enabled": True, "interval": "PT2H", "duration": "P3650D", "windowActive": True},
+        ],
+    }
 
     @classmethod
     def setUpClass(cls):
@@ -456,6 +613,30 @@ class SchedulerPlanTests(unittest.TestCase):
         for name, task in self.tasks.items():
             with self.subTest(task_name=name):
                 self.assertTrue(task["onBattery"])
+
+    def test_plan_locks_action_settings_and_full_trigger_timetable(self):
+        for name, task in self.tasks.items():
+            with self.subTest(task_name=name):
+                self.assertEqual(task["triggers"], self.TRIGGER_POLICY[name])
+                self.assertEqual(task["actionCount"], 1)
+                self.assertEqual(task["actionTypes"], ["Exec"])
+                self.assertEqual(
+                    Path(task["workingDirectory"]), Path(task["argument"].split('"')[1]).parent
+                )
+                self.assertEqual(task["logonType"], "InteractiveToken")
+                self.assertEqual(task["multipleInstances"], "IgnoreNew")
+                self.assertTrue(task["startWhenAvailable"])
+                self.assertEqual(task["executionTimeLimit"], task["timeLimit"])
+
+    def test_supported_principal_requires_login_without_storing_windows_password(self):
+        source = (PROJECT_ROOT / "scripts" / "setup_scheduled_tasks.ps1").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertTrue(
+            all(task["logonType"] == "InteractiveToken" for task in self.tasks.values())
+        )
+        self.assertIn("-LogonType Interactive", source)
+        self.assertNotRegex(source, r"(?i)-Password\b|AutoAdminLogon|DefaultPassword")
 
     def test_weekly_anchors_stay_on_their_own_weekday(self):
         """anchor ที่หลุดวัน = cadence เพี้ยนเงียบ ๆ และเลื่อนใหม่ทุกครั้งที่รันสคริปต์

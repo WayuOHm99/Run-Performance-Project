@@ -178,6 +178,7 @@ RECOVERY_LABEL = {
     "offsite_backup": "สำรองข้อมูลเข้ารหัสนอกเครื่อง (ทุกคืน 22:30)",
     "restore_drill": "ทดสอบกู้คืนจริง (ทุก 4 สัปดาห์)",
 }
+MAX_FUTURE_MINUTES = 10
 
 SCHEDULED_TASKS = [
     "Run-Performance-Garmin-Fast",
@@ -188,6 +189,7 @@ SCHEDULED_TASKS = [
     "Run-Performance-Garmin-DeepSync",
     "Run-Performance-OffsiteBackup",
     "Run-Performance-RestoreDrill",
+    "Run-Performance-SystemHealth",
 ]
 TASK_LANE = {
     "Run-Performance-Garmin-Fast": "fast",
@@ -536,7 +538,7 @@ def check_scheduled_tasks(provider=None, now=None) -> list:
     provider = provider or default_schtasks_provider
     findings = []
     for task_name in SCHEDULED_TASKS:
-        lane = TASK_LANE[task_name]
+        lane = TASK_LANE.get(task_name)
         try:
             raw = provider(task_name)
         except ScheduledTaskQueryFailed as e:
@@ -575,8 +577,8 @@ def check_scheduled_tasks(provider=None, now=None) -> list:
 
         # Wrappers propagate the worker result all the way through .bat + .vbs, while
         # sync_lane confirms the application-level result.  Both signals must agree.
-        lane_status = _lane_ok(lane)
-        note = " (cross-check กับ sync_lane)"
+        lane_status = _lane_ok(lane) if lane else None
+        note = " (cross-check กับ sync_lane)" if lane else ""
         if lane_status is not None and lane_status[0] is False:
             reasons = ", ".join(r.get("reason", "?") for r in lane_status[1]) or "ไม่ทราบสาเหตุ"
             findings.append(Finding(
@@ -595,6 +597,11 @@ def check_scheduled_tasks(provider=None, now=None) -> list:
                 f"scheduled_task:{task_name}", ERROR,
                 f"LastRunTime={last_run} LastTaskResult={last_result} "
                 f"(ตัว worker/launcher คืน non-zero){note}",
+            ))
+        elif lane is None:
+            findings.append(Finding(
+                f"scheduled_task:{task_name}", OK,
+                f"LastRunTime={last_run} LastTaskResult={last_result}",
             ))
         elif lane_status is None:
             findings.append(Finding(
@@ -627,7 +634,12 @@ def check_lane_freshness(now=None) -> list:
                                      f"{label}: ยังไม่เคยมีสถานะ (sync_lane/{lane}.json ไม่พบ)"))
             continue
         age_min = (now - run_at).total_seconds() / 60
-        if age_min > limit_min:
+        if age_min < -MAX_FUTURE_MINUTES:
+            findings.append(Finding(
+                f"lane_freshness:{lane}", ERROR,
+                f"{label}: run_at อยู่ในอนาคต {-age_min:.0f} นาที",
+            ))
+        elif age_min > limit_min:
             findings.append(Finding(f"lane_freshness:{lane}", ERROR,
                                      f"{label}: เงียบมา {age_min / 60:.1f} ชม. (เกินเพดาน {limit_min / 60:.1f} ชม.)"))
         elif age_min > limit_min * 0.8:
@@ -676,7 +688,12 @@ def check_recovery_freshness(now=None) -> list:
             continue
 
         age_min = (now - run_at).total_seconds() / 60
-        if age_min > limit_min:
+        if age_min < -MAX_FUTURE_MINUTES:
+            findings.append(Finding(
+                check, ERROR,
+                f"{label}: run_at อยู่ในอนาคต {-age_min:.0f} นาที",
+            ))
+        elif age_min > limit_min:
             findings.append(Finding(
                 check, ERROR,
                 f"{label}: ผลพิสูจน์ล่าสุดเก่า {age_min / 1440:.1f} วัน "

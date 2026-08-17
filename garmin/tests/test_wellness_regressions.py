@@ -370,6 +370,36 @@ class PreviousDayRepairTests(unittest.TestCase):
         self.assertFalse(due)
         self.assertEqual(reasons, ["cooldown"])
 
+    def test_core_endpoint_errors_fail_repair_without_consuming_retry(self):
+        self.insert_partial()
+
+        class FailedCoreGarmin(self.Garmin):
+            def get_stats(self, _day):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+            def get_hrv_data(self, _day):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+            def get_sleep_data(self, _day):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+            def get_training_readiness(self, _day):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+        with (
+            mock.patch.object(backfill.time, "sleep"),
+            self.assertRaises(backfill.CoreWellnessUnavailableError),
+        ):
+            backfill.fetch_and_repair_previous_day_wellness(
+                FailedCoreGarmin(), self.conn, 1, self.DAY, now_utc=self.NOW
+            )
+
+        due, reasons = backfill._previous_day_repair_due(
+            self.conn, 1, self.DAY, now_utc=self.NOW
+        )
+        self.assertTrue(due)
+        self.assertNotEqual(reasons, ["cooldown"])
+
     def test_complete_yesterday_does_not_consume_extra_api_calls(self):
         self.conn.execute(
             """INSERT INTO fact_daily_wellness

@@ -24,6 +24,7 @@ from contextlib import contextmanager
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -92,6 +93,44 @@ DEFAULT_ATHLETE_TIMEOUT_SEC = 1200
 # ข้อมูลของช่องนั้นถูกรอบถัดไปกวาดครอบไปแล้วด้วย --days อยู่ดี ตามเก็บย้อนไกลกว่านี้ไม่ได้อะไร
 # เพิ่ม แถมทำให้ log อ่านไม่รู้เรื่อง (เครื่องปิดยาว 2 สัปดาห์แล้วโชว์ช่องค้าง 28 ช่อง)
 CATCH_UP_LOOKBACK_HOURS = 48
+STATUS_FUTURE_SKEW = timedelta(minutes=5)
+
+_WORKER_SECRET_PATTERNS = (
+    re.compile(
+        r'''(?ix)(["']?authorization["']?\s*[:=]\s*)'''
+        r'''(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,;}]+)'''
+    ),
+    re.compile(
+        r'''(?ix)(["']?(?:password|passwd|access_token|refresh_token|'''
+        r'''oauth\w*_(?:token|secret)|token|session|set-cookie|cookie|'''
+        r'''client_secret|consumer_secret|'''
+        r'''api[_-]?key)["']?\s*[:=]\s*)'''
+        r'''(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]]+)'''
+    ),
+    re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
+)
+
+
+def sanitize_worker_output(value) -> str:
+    """Redact common credentials while preserving useful child diagnostics."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    for pattern in _WORKER_SECRET_PATTERNS:
+        if pattern.groups:
+            text = pattern.sub(r"\1[REDACTED]", text)
+        else:
+            text = pattern.sub("[REDACTED]", text)
+    return text
+
+
+def _forward_worker_output(value) -> None:
+    output = sanitize_worker_output(value)
+    if output:
+        print(output, end="" if output.endswith("\n") else "\n")
 
 
 @contextmanager
@@ -139,7 +178,12 @@ def read_athlete_status(slug: str, not_before: datetime) -> dict | None:
     p = STATUS_DIR / f"{slug}.json"
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        if datetime.fromisoformat(data["finished_at"]) >= not_before:
+        finished_at = datetime.fromisoformat(data["finished_at"])
+        if finished_at.tzinfo is not None:
+            finished_at = finished_at.astimezone().replace(tzinfo=None)
+        if not_before.tzinfo is not None:
+            not_before = not_before.astimezone().replace(tzinfo=None)
+        if not_before <= finished_at <= datetime.now() + STATUS_FUTURE_SKEW:
             return data
     except Exception:
         pass
@@ -206,6 +250,17 @@ def pending_slots(lane: str, slots: list[dtime], now: datetime,
     except Exception:
         # ไม่เคยรัน/ไฟล์เสีย → ถือว่าค้างทั้งหมด ให้รันเลย
         return candidates or [now]
+    if last_run.tzinfo is not None and now.tzinfo is None:
+        # Lane files normally use local naive time.  If a migrated/corrupted
+        # file carries an offset, compare it in this host's local wall clock.
+        last_run = last_run.astimezone().replace(tzinfo=None)
+    elif last_run.tzinfo is None and now.tzinfo is not None:
+        last_run = last_run.replace(tzinfo=now.tzinfo)
+    # A future timestamp is not evidence that any real slot completed.  It can
+    # come from clock drift or a corrupted status file and must fail open into
+    # catch-up instead of suppressing every pending round.
+    if last_run > now:
+        return candidates or [now]
     # New lane files carry per-athlete results.  A round which ran but failed is
     # not evidence that a catch-up slot completed; leave it pending so the next
     # hourly trigger can retry.  Files from older builds had no `results`, so
@@ -240,15 +295,35 @@ def run_athlete(slug, args, passthrough, run_started, timeout_sec):
             cwd=str(PROJECT_ROOT),
             env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
             timeout=timeout_sec,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
+        _forward_worker_output(proc.stdout)
         status = read_athlete_status(slug, run_started)
         if proc.returncode == 0:
+            if status is None:
+                print(f"   ❌ {slug}: worker จบโดยไม่มีสถานะใหม่ของรอบนี้")
+                return {
+                    "slug": slug, "ok": False, "reason": "status_missing",
+                    "warnings": [],
+                }
+            if status.get("ok") is not True:
+                return {
+                    "slug": slug,
+                    "ok": False,
+                    "reason": status.get("reason") or "error",
+                    "warnings": [],
+                }
             return {"slug": slug, "ok": True, "reason": "ok",
-                    "warnings": (status or {}).get("warnings", [])}
+                    "warnings": status.get("warnings", [])}
         reason = (status or {}).get("reason") or \
             ("token" if proc.returncode == 2 else "error")
         return {"slug": slug, "ok": False, "reason": reason, "warnings": []}
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        _forward_worker_output(exc.stdout)
         print(f"   ❌ {slug}: เกิน {timeout_sec // 60} นาที — ยกเลิกแล้ว")
         return {"slug": slug, "ok": False, "reason": "timeout", "warnings": []}
     except Exception as e:

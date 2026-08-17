@@ -77,6 +77,21 @@ def find(findings, prefix):
 
 
 class ScheduledTaskChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
+    def test_health_report_monitors_its_own_publisher_task(self):
+        self.assertIn("Run-Performance-SystemHealth", hr.SCHEDULED_TASKS)
+        findings = hr.check_scheduled_tasks(
+            provider=lambda name: (
+                "Last Run Time: 8/17/2026 10:25:00 AM\n"
+                "Last Result: 0\nStatus: Ready\n"
+            ),
+            now=datetime(2026, 8, 17, 10, 30),
+        )
+        own = find(
+            findings, "scheduled_task:Run-Performance-SystemHealth"
+        )
+        self.assertEqual(len(own), 1)
+        self.assertEqual(own[0].level, hr.OK)
+
     def test_real_provider_decodes_thai_windows_cp874_without_reader_crash(self):
         raw = (
             "Last Run Time: 8/9/2026 11:55:00 AM\n"
@@ -154,7 +169,14 @@ class ScheduledTaskChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
             "Last Result: 0\nStatus: Ready\n"
         ))
         self.assertTrue(findings)
-        self.assertTrue(all(f.level == hr.WARNING for f in findings))
+        lane_findings = [
+            f for f in findings if f.check.removeprefix("scheduled_task:") in hr.TASK_LANE
+        ]
+        self.assertTrue(all(f.level == hr.WARNING for f in lane_findings))
+        self.assertEqual(
+            find(findings, "scheduled_task:Run-Performance-SystemHealth")[0].level,
+            hr.OK,
+        )
 
     def test_malformed_lane_results_are_warning_not_crash_or_ok(self):
         lane_dir = self.data_dir / "sync_lane"
@@ -168,7 +190,14 @@ class ScheduledTaskChecksTests(IsolatedHealthDirMixin, unittest.TestCase):
             "Last Run Time: 8/6/2026 11:58:00 AM\n"
             "Last Result: 0\nStatus: Ready\n"
         ))
-        self.assertTrue(all(f.level == hr.WARNING for f in findings))
+        lane_findings = [
+            f for f in findings if f.check.removeprefix("scheduled_task:") in hr.TASK_LANE
+        ]
+        self.assertTrue(all(f.level == hr.WARNING for f in lane_findings))
+        self.assertEqual(
+            find(findings, "scheduled_task:Run-Performance-SystemHealth")[0].level,
+            hr.OK,
+        )
 
     def test_disabled_expected_task_is_error(self):
         now = datetime(2026, 8, 6, 12, 0, 0)
@@ -237,6 +266,17 @@ class LaneFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
         deep = find(findings, "lane_freshness:deep")
         self.assertEqual(deep[0].level, hr.WARNING)
 
+    def test_future_lane_timestamp_is_error(self):
+        now = datetime(2026, 8, 17, 12, 0, 0)
+        self.write_lane_status("fast", now + timedelta(days=30))
+
+        fast = find(
+            hr.check_lane_freshness(now=now), "lane_freshness:fast"
+        )[0]
+
+        self.assertEqual(fast.level, hr.ERROR)
+        self.assertIn("อนาคต", fast.message)
+
 
 class RecoveryFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
     def write_operation(self, operation, run_at, *, ok=True, reason="ok"):
@@ -288,6 +328,16 @@ class RecoveryFreshnessTests(IsolatedHealthDirMixin, unittest.TestCase):
         )
 
         self.assertTrue(all(item.level == hr.ERROR for item in findings))
+
+    def test_future_recovery_proof_is_error(self):
+        now = datetime(2026, 8, 17, 12, 0, 0)
+        for operation in hr.RECOVERY_STALE_LIMIT_MIN:
+            self.write_operation(operation, now + timedelta(days=30))
+
+        findings = hr.check_recovery_freshness(now=now)
+
+        self.assertTrue(all(item.level == hr.ERROR for item in findings))
+        self.assertTrue(all("อนาคต" in item.message for item in findings))
 
 class UnfinishedRunTests(IsolatedHealthDirMixin, unittest.TestCase):
     def test_started_and_never_finished_is_error(self):
