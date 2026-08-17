@@ -1,5 +1,6 @@
 import ast
 import importlib.util
+import io
 import os
 import types
 import re
@@ -1179,6 +1180,99 @@ class FetchAllOrchestrationTests(IsolatedDataDirMixin, unittest.TestCase):
             fetch_all.main()
 
         self.assertEqual(exited.exception.code, 1)
+
+
+class RunAthleteDiagnosticsTests(IsolatedDataDirMixin, unittest.TestCase):
+    def test_windowless_worker_output_is_forwarded_and_secrets_are_redacted(self):
+        args = types.SimpleNamespace(days=0)
+        output = io.StringIO()
+        child = subprocess.CompletedProcess(
+            args=["python", "03_backfill.py"],
+            returncode=0,
+            stdout=(
+                "Logged in as: Probe\n"
+                "API error: HTTP 503 Service Unavailable\n"
+                "Authorization: Bearer super-secret-token\n"
+                "Authorization: Basic basic-secret\n"
+                "email=athlete@example.com password=hunter2\n"
+                '{"access_token":"json-secret","client_secret":"client-secret",'
+                '"oauth_consumer_secret":"oauth-secret"}\n'
+                '{"Authorization":"Basic quoted-basic-secret"}\n'
+                "headers={'Authorization': 'Bearer quoted-bearer-secret'}\n"
+                "authorization = Bearer assigned-bearer-secret\n"
+                "Set-Cookie: session-cookie-secret\n"
+            ),
+        )
+
+        with (
+            mock.patch.object(fetch_all.win_process, "run", return_value=child) as run,
+            mock.patch.object(
+                fetch_all,
+                "read_athlete_status",
+                return_value={"ok": True, "warnings": []},
+            ),
+            mock.patch("sys.stdout", output),
+        ):
+            result = fetch_all.run_athlete(
+                "probe", args, ["--activities-only"], datetime.now(), 60
+            )
+
+        kwargs = run.call_args.kwargs
+        self.assertEqual(result["ok"], True)
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
+        self.assertTrue(kwargs["text"])
+        logged = output.getvalue()
+        self.assertIn("Logged in as: Probe", logged)
+        self.assertIn("HTTP 503 Service Unavailable", logged)
+        self.assertIn("[REDACTED]", logged)
+        for secret in (
+            "super-secret-token", "athlete@example.com", "hunter2",
+            "basic-secret", "json-secret", "client-secret", "oauth-secret",
+            "quoted-basic-secret", "quoted-bearer-secret", "session-cookie-secret",
+            "assigned-bearer-secret",
+        ):
+            self.assertNotIn(secret, logged)
+
+    def test_zero_exit_without_fresh_worker_status_is_not_green(self):
+        args = types.SimpleNamespace(days=0)
+        child = subprocess.CompletedProcess(
+            args=["python", "03_backfill.py"], returncode=0, stdout="done\n"
+        )
+        with (
+            mock.patch.object(fetch_all.win_process, "run", return_value=child),
+            mock.patch.object(fetch_all, "read_athlete_status", return_value=None),
+        ):
+            result = fetch_all.run_athlete(
+                "probe", args, ["--activities-only"], datetime.now(), 60
+            )
+
+        self.assertEqual(
+            result,
+            {"slug": "probe", "ok": False, "reason": "status_missing", "warnings": []},
+        )
+
+    def test_future_status_cannot_make_worker_without_new_status_green(self):
+        args = types.SimpleNamespace(days=0)
+        fetch_all.STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        (fetch_all.STATUS_DIR / "probe.json").write_text(
+            fetch_all.json.dumps({
+                "finished_at": "2099-01-01T00:00:00",
+                "ok": True,
+                "warnings": [],
+            }),
+            encoding="utf-8",
+        )
+        child = subprocess.CompletedProcess(
+            args=["python", "03_backfill.py"], returncode=0, stdout="done\n"
+        )
+        with mock.patch.object(fetch_all.win_process, "run", return_value=child):
+            result = fetch_all.run_athlete(
+                "probe", args, ["--activities-only"], datetime.now(), 60
+            )
+
+        self.assertEqual(result["ok"], False)
+        self.assertEqual(result["reason"], "status_missing")
 
 
 class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
