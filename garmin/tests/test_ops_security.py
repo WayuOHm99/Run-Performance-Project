@@ -417,6 +417,7 @@ class CiCoverageTests(unittest.TestCase):
         source = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
+        windows_job = source.split("  windows-ops:", 1)[1]
         self.assertIn("runs-on: windows-latest", source)
         self.assertIn("garmin.tests.test_ops_security", source)
         self.assertIn("garmin.tests.test_health_report.PrivateAclChecksTests", source)
@@ -430,6 +431,12 @@ class CiCoverageTests(unittest.TestCase):
         )
         self.assertIn("garmin.tests.test_offsite_backup", source)
         self.assertIn("garmin.tests.test_system_heartbeat", source)
+        self.assertIn("astral-sh/setup-uv@v9.0.0", windows_job)
+        self.assertIn("uv sync --project garmin --frozen", windows_job)
+        self.assertIn('tzutil /s "SE Asia Standard Time"', windows_job)
+        self.assertIn(
+            "uv run --project garmin --frozen python -m unittest", windows_job
+        )
 
 
 class PowerShellEncodingTests(unittest.TestCase):

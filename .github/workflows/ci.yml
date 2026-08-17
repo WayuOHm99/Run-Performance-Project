@@ -93,11 +93,26 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.11.19"
+
+      - name: Sync locked dependencies
+        run: uv sync --project garmin --frozen
+
+      - name: Match the production timezone
+        run: |
+          tzutil /s "SE Asia Standard Time"
+          if ((tzutil /g) -ne "SE Asia Standard Time") {
+            throw "Failed to configure the production timezone"
+          }
+
       - name: Run temp-only Windows operations tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
-          python -m unittest
+          uv run --project garmin --frozen python -m unittest
           garmin.tests.test_ops_security
           garmin.tests.test_health_report.PrivateAclChecksTests
           garmin.tests.test_health_report.HealthcheckSecretStorageChecksTests
