@@ -139,7 +139,7 @@ $tasks = @(
         # แล้ว anchor ยังเป็นวันที่รันสคริปต์ จะเจอบั๊กเดียวกับที่ DeepSync เพิ่งเจอ
         Triggers    = {
             $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '09:30'
-            $trigger.StartBoundary = '2026-08-09T09:30:00'
+            $trigger.StartBoundary = '2026-08-09T09:30:00+07:00'
             $trigger
         }
         Optional    = $true
@@ -167,7 +167,7 @@ $tasks = @(
         #   → นับ 4 สัปดาห์ต่อได้พอดีเป็น 30 ส.ค. โดยไม่เลื่อนออกจากจังหวะเดิม
         Triggers    = {
             $trigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 4 -DaysOfWeek Sunday -At '10:30'
-            $trigger.StartBoundary = '2026-08-02T10:30:00'
+            $trigger.StartBoundary = '2026-08-02T10:30:00+07:00'
             $trigger
         }
         Optional    = $true
@@ -197,7 +197,7 @@ $tasks = @(
         OnBattery   = $true
         Triggers    = {
             $trigger = New-ScheduledTaskTrigger -Weekly -WeeksInterval 4 -DaysOfWeek Sunday -At '12:00'
-            $trigger.StartBoundary = '2026-08-02T12:00:00'
+            $trigger.StartBoundary = '2026-08-02T12:00:00+07:00'
             $trigger
         }
         Optional    = $true
@@ -261,6 +261,64 @@ function Test-WeeklyTriggerAnchor {
 
 $ok = 0; $skipped = 0; $failed = 0
 
+function ConvertTo-TriggerPlan {
+    param($Triggers)
+
+    $dayNames = @('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')
+    foreach ($tr in $Triggers) {
+        $className = [string]$tr.CimClass.CimClassName
+        $boundary = ([datetimeoffset]::Parse([string]$tr.StartBoundary)).ToLocalTime()
+        $startTime = $boundary.ToString('HH:mm:ss')
+        $utcOffset = $boundary.ToString('zzz')
+        $enabled = [bool]$tr.Enabled
+        if ($className -eq 'MSFT_TaskTimeTrigger') {
+            [ordered]@{
+                type         = 'time'
+                startTime    = $startTime
+                utcOffset    = $utcOffset
+                endBoundary  = $null
+                enabled      = $enabled
+                interval     = [string]$tr.Repetition.Interval
+                duration     = [string]$tr.Repetition.Duration
+                windowActive = $true
+            }
+        }
+        elseif ($className -eq 'MSFT_TaskDailyTrigger') {
+            [ordered]@{
+                type         = 'daily'
+                startTime    = $startTime
+                utcOffset    = $utcOffset
+                endBoundary  = $null
+                enabled      = $enabled
+                daysInterval = [int]$tr.DaysInterval
+            }
+        }
+        elseif ($className -eq 'MSFT_TaskWeeklyTrigger') {
+            $mask = [int]$tr.DaysOfWeek
+            $days = @()
+            for ($index = 0; $index -lt $dayNames.Count; $index++) {
+                if ($mask -band [int][math]::Pow(2, $index)) { $days += $dayNames[$index] }
+            }
+            [ordered]@{
+                type          = 'weekly'
+                startBoundary = $boundary.ToString('yyyy-MM-ddTHH:mm:sszzz')
+                startTime     = $startTime
+                utcOffset     = $utcOffset
+                endBoundary   = $null
+                enabled       = $enabled
+                weeksInterval = [int]$tr.WeeksInterval
+                daysOfWeek    = @($days)
+            }
+        }
+        else {
+            [ordered]@{
+                type = $className; startTime = $startTime
+                utcOffset = $utcOffset; endBoundary = $null; enabled = $enabled
+            }
+        }
+    }
+}
+
 # บันทึกผลของ task หนึ่งตัวลงแผน (ผลลัพธ์แบบเครื่องอ่าน — key เป็น ASCII เสมอ)
 function Add-PlanEntry {
     param($Task, [string]$Status, [string]$Argument = '', $Triggers = @(), $Problems = @())
@@ -276,16 +334,25 @@ function Add-PlanEntry {
             }
         }
     }
+    $triggerPlan = @(ConvertTo-TriggerPlan $Triggers)
     [void]$script:plan.Add([ordered]@{
         name          = $Task.Name
         status        = $Status
         exe           = $Task.Exe
+        actionCount   = 1
+        actionTypes   = @('Exec')
         argument      = $Argument
         timeLimit     = $Task.TimeLimit
         retryCount    = $(if ($Task.RetryCount) { [int]$Task.RetryCount } else { 0 })
         retryInterval = $(if ($Task.RetryInterval) { $Task.RetryInterval } else { $null })
         onBattery     = [bool]$Task.OnBattery
+        workingDirectory = Split-Path -Parent $Task.Script
+        logonType     = 'InteractiveToken'
+        multipleInstances = 'IgnoreNew'
+        startWhenAvailable = $true
+        executionTimeLimit = $Task.TimeLimit
         optional      = [bool]$Task.Optional
+        triggers      = @($triggerPlan)
         anchors       = @($anchors)
         problems      = @($Problems)
     })
