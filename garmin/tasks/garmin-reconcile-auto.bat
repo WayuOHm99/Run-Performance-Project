@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0.."
-rem Weekly: detect activities deleted on Garmin's side over the last 90 days and mark
-rem deleted_at (fetches activity-id list only, no detail -> light API). Schedule weekly.
+rem Weekly: compare a bounded 90-day activity list, soft-delete/restore existing rows,
+rem and enrich only Garmin-only rows missing from SQLite. Schedule weekly.
 rem Keep this .bat pure ASCII: Thai text breaks cmd.exe parsing.
 rem Own log file per lane - a shared log made concurrent lanes drop whole rounds.
 set "LOG=C:\Backup\run-performance-logs\garmin-sync-reconcile.log"

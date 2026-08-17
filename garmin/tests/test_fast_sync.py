@@ -12,7 +12,7 @@ import threading
 import time
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -394,6 +394,51 @@ class FastActivityTests(unittest.TestCase):
             (1, 1, 1),
         )
 
+    def test_reconcile_imports_only_remote_activities_missing_from_sqlite(self):
+        """Weekly reconcile is the bounded self-healing path for old uploads.
+
+        The missing activity is eight days old, so the normal three-day full
+        sync cannot see it.  Existing activities must not pay the detail API
+        cost again merely because the wider reconciliation window runs.
+        """
+        conn = create_activity_db()
+        self.addCleanup(conn.close)
+        conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, activity_type, start_time_local,
+                   distance_m, duration_sec, deleted_at
+               ) VALUES (101, 1, 'running', '2030-01-02 06:00:00',
+                         5000, 1500, NULL)"""
+        )
+        old_missing = synthetic_activity(activity_id=202)
+        old_missing["startTimeLocal"] = "2030-01-02 07:00:00"
+        garmin = SyntheticGarmin([synthetic_activity(), old_missing])
+
+        with mock.patch.object(backfill.time, "sleep"):
+            marked, restored, imported = backfill.reconcile_only(
+                garmin,
+                conn,
+                1,
+                backfill.date(2030, 1, 1),
+                backfill.date(2030, 1, 10),
+            )
+
+        row = conn.execute(
+            """SELECT activity_id, deleted_at
+                 FROM fact_activity
+                WHERE activity_id = 202"""
+        ).fetchone()
+        split_count = conn.execute(
+            "SELECT COUNT(*) FROM fact_activity_split WHERE activity_id = 202"
+        ).fetchone()[0]
+        self.assertEqual((marked, restored, imported), ([], [], [202]))
+        self.assertEqual(row, (202, None))
+        self.assertEqual(split_count, 1)
+        self.assertEqual(
+            (garmin.detail_calls, garmin.weather_calls, garmin.split_calls),
+            (1, 1, 1),
+        )
+
 
 def create_wellness_db():
     conn = sqlite3.connect(":memory:")
@@ -524,6 +569,116 @@ class FastWellnessTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(row, (47.0, 80.0))
 
+    def test_fast_wellness_fails_when_every_core_endpoint_errors(self):
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+
+        class FailedCoreGarmin:
+            def __getattr__(self, name):
+                if name in {
+                    "get_stats", "get_hrv_data", "get_sleep_data",
+                    "get_training_readiness",
+                }:
+                    return lambda _date: (_ for _ in ()).throw(
+                        RuntimeError("HTTP 503 Service Unavailable")
+                    )
+                raise AttributeError(name)
+
+        with (
+            mock.patch.object(backfill.time, "sleep"),
+            self.assertRaises(backfill.CoreWellnessUnavailableError),
+        ):
+            backfill.fetch_and_update_wellness_fast(
+                FailedCoreGarmin(),
+                conn,
+                1,
+                backfill.date(2030, 1, 2),
+                backfill.date(2030, 1, 2),
+            )
+
+    def test_fast_wellness_continues_later_days_before_reporting_failure(self):
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+
+        class FirstDayFails(SyntheticWellnessGarmin):
+            def _core(self, date_str, payload):
+                if date_str == "2030-01-02":
+                    raise RuntimeError("HTTP 503 Service Unavailable")
+                return payload
+
+            def get_stats(self, date_str):
+                return self._core(date_str, {"restingHeartRate": 48})
+
+            def get_hrv_data(self, date_str):
+                return self._core(date_str, {"hrvSummary": {"lastNightAvg": 66}})
+
+            def get_sleep_data(self, date_str):
+                return self._core(
+                    date_str,
+                    {"dailySleepDTO": {"sleepScores": {"overall": {"value": 82}}}},
+                )
+
+            def get_training_readiness(self, date_str):
+                return self._core(date_str, [{"score": 74}])
+
+        with (
+            mock.patch.object(backfill.time, "sleep"),
+            self.assertRaises(backfill.CoreWellnessUnavailableError),
+        ):
+            backfill.fetch_and_update_wellness_fast(
+                FirstDayFails(),
+                conn,
+                1,
+                backfill.date(2030, 1, 2),
+                backfill.date(2030, 1, 3),
+            )
+
+        row = conn.execute(
+            """SELECT resting_hr, hrv_last_night, sleep_score, training_readiness
+                 FROM fact_daily_wellness
+                WHERE athlete_id = 1 AND calendar_date = '2030-01-03'"""
+        ).fetchone()
+        self.assertEqual(row, (48.0, 66.0, 82.0, 74.0))
+
+    def test_fast_wellness_reports_partial_endpoint_failures_without_raw_errors(self):
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+
+        class PartialGarmin(SyntheticWellnessGarmin):
+            def get_hrv_data(self, _date):
+                raise RuntimeError("HTTP 503 private-upstream-details")
+
+            def get_sleep_data(self, _date):
+                raise RuntimeError("HTTP 503 private-upstream-details")
+
+            def get_training_readiness(self, _date):
+                raise RuntimeError("HTTP 503 private-upstream-details")
+
+        failures = []
+        count = self._run_fast_with_failures(PartialGarmin(), conn, failures)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            failures,
+            [
+                {"endpoint": "get_hrv_data", "reason": "network"},
+                {"endpoint": "get_sleep_data", "reason": "network"},
+                {"endpoint": "get_training_readiness", "reason": "network"},
+            ],
+        )
+        self.assertNotIn("private-upstream-details", repr(failures))
+
+    def _run_fast_with_failures(self, garmin, conn, failures):
+        with mock.patch.object(backfill.time, "sleep"):
+            return backfill.fetch_and_update_wellness_fast(
+                garmin,
+                conn,
+                1,
+                backfill.date(2030, 1, 2),
+                backfill.date(2030, 1, 2),
+                endpoint_failures=failures,
+            )
+
     def test_full_wellness_still_writes_every_field_group(self):
         conn = create_wellness_db()
         self.addCleanup(conn.close)
@@ -550,6 +705,115 @@ class FastWellnessTests(unittest.TestCase):
             (48.0, "BALANCED", 82.0, 4000.0, 420.0, 14.0, 13.0, "PRODUCTIVE",
              52.5, 6100.0, 50.0),
         )
+
+    def test_full_wellness_persists_optional_fields_before_core_failure(self):
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+
+        class PartialFullGarmin(SyntheticWellnessGarmin):
+            def get_stats(self, _date):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+            def get_hrv_data(self, _date):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+            def get_sleep_data(self, _date):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+            def get_training_readiness(self, _date):
+                raise RuntimeError("HTTP 503 Service Unavailable")
+
+        with (
+            mock.patch.object(backfill.time, "sleep"),
+            self.assertRaises(backfill.CoreWellnessUnavailableError),
+        ):
+            backfill.fetch_and_insert_wellness(
+                PartialFullGarmin(),
+                conn,
+                1,
+                backfill.date(2030, 1, 2),
+                backfill.date(2030, 1, 2),
+            )
+
+        row = conn.execute(
+            """SELECT avg_sleep_respiration, training_status, vo2max_trend,
+                      endurance_score, hill_score_strength
+                 FROM fact_daily_wellness
+                WHERE athlete_id = 1 AND calendar_date = ?""",
+            (self.DAY,),
+        ).fetchone()
+        self.assertEqual(row, (13.0, "PRODUCTIVE", 52.5, 6100.0, 50.0))
+
+    def test_full_wellness_continues_later_days_before_reporting_failure(self):
+        conn = create_wellness_db()
+        self.addCleanup(conn.close)
+
+        class FirstDayFails(SyntheticWellnessGarmin):
+            def _core(self, date_str, payload):
+                if date_str == "2030-01-02":
+                    raise RuntimeError("HTTP 503 Service Unavailable")
+                return payload
+
+            def get_stats(self, date_str):
+                return self._core(date_str, super().get_stats(date_str))
+
+            def get_hrv_data(self, date_str):
+                return self._core(date_str, super().get_hrv_data(date_str))
+
+            def get_sleep_data(self, date_str):
+                return self._core(date_str, super().get_sleep_data(date_str))
+
+            def get_training_readiness(self, date_str):
+                return self._core(
+                    date_str, super().get_training_readiness(date_str)
+                )
+
+        with (
+            mock.patch.object(backfill.time, "sleep"),
+            self.assertRaises(backfill.CoreWellnessUnavailableError),
+        ):
+            backfill.fetch_and_insert_wellness(
+                FirstDayFails(),
+                conn,
+                1,
+                backfill.date(2030, 1, 2),
+                backfill.date(2030, 1, 3),
+            )
+
+        row = conn.execute(
+            """SELECT resting_hr, training_status, endurance_score
+                 FROM fact_daily_wellness
+                WHERE athlete_id = 1 AND calendar_date = '2030-01-03'"""
+        ).fetchone()
+        self.assertEqual(row, (48.0, "PRODUCTIVE", 6100.0))
+
+    def test_mixed_core_failures_default_to_network_not_token(self):
+        failures = [
+            {"endpoint": "get_stats", "reason": "token"},
+            {"endpoint": "get_hrv_data", "reason": "network"},
+            {"endpoint": "get_sleep_data", "reason": "network"},
+            {"endpoint": "get_training_readiness", "reason": "network"},
+        ]
+
+        error = backfill.CoreWellnessUnavailableError(failures)
+
+        self.assertEqual(error.status_reason, "network")
+
+    def test_multi_day_failure_classification_considers_every_failure(self):
+        network_then_token = [
+            *(
+                {"endpoint": endpoint, "reason": "network"}
+                for endpoint in backfill.CORE_WELLNESS_ENDPOINT_ORDER
+            ),
+            *(
+                {"endpoint": endpoint, "reason": "token"}
+                for endpoint in backfill.CORE_WELLNESS_ENDPOINT_ORDER
+            ),
+        ]
+
+        error = backfill.CoreWellnessUnavailableError(network_then_token)
+
+        self.assertEqual(error.status_reason, "network")
 
     def test_full_wellness_keeps_columns_the_daily_fetch_does_not_own(self):
         conn = create_wellness_db()
@@ -678,6 +942,164 @@ class BackfillStatusTests(IsolatedDataDirMixin, unittest.TestCase):
         )
         self.assertEqual(raised.exception.code, 1)
         self.assertEqual((payload["ok"], payload["reason"]), (False, "payload"))
+
+    def test_all_core_wellness_errors_write_a_failed_privacy_safe_status(self):
+        schema.init_schema(self.data_dir / "garmin.db")
+        project_root = self.data_dir / "project"
+        (project_root / "tokens" / "probe").mkdir(parents=True)
+
+        class FailingGarmin:
+            def login(self, _token_dir):
+                return None
+
+            def get_full_name(self):
+                return "Probe"
+
+            def get_respiration_data(self, _date):
+                return None
+
+            def __getattr__(self, name):
+                if name in {
+                    "get_stats", "get_hrv_data", "get_sleep_data",
+                    "get_training_readiness",
+                }:
+                    return lambda _date: (_ for _ in ()).throw(
+                        RuntimeError("HTTP 503 private-upstream-details")
+                    )
+                raise AttributeError(name)
+
+        fake_garminconnect = types.ModuleType("garminconnect")
+        fake_garminconnect.Garmin = FailingGarmin
+        argv = ["03_backfill.py", "--athlete", "probe", "--days", "0",
+                "--wellness-fast"]
+
+        with (
+            mock.patch.object(backfill, "PROJECT_ROOT", project_root),
+            mock.patch.object(backfill.time, "sleep"),
+            mock.patch.dict(sys.modules, {"garminconnect": fake_garminconnect}),
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            backfill.main()
+
+        payload = backfill.json.loads(
+            (backfill.STATUS_DIR / "probe.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual((payload["ok"], payload["reason"]), (False, "network"))
+        self.assertEqual(
+            payload["error"],
+            "all core wellness endpoints failed: get_stats, get_hrv_data, "
+            "get_sleep_data, get_training_readiness",
+        )
+        self.assertEqual(
+            payload["endpoint_failures"],
+            [
+                {"endpoint": "get_stats", "reason": "network"},
+                {"endpoint": "get_hrv_data", "reason": "network"},
+                {"endpoint": "get_sleep_data", "reason": "network"},
+                {"endpoint": "get_training_readiness", "reason": "network"},
+            ],
+        )
+        self.assertNotIn("private-upstream-details", repr(payload))
+
+    def test_full_wellness_failure_still_runs_extras_before_failed_status(self):
+        schema.init_schema(self.data_dir / "garmin.db")
+        project_root = self.data_dir / "project"
+        (project_root / "tokens" / "probe").mkdir(parents=True)
+
+        class FailingGarmin:
+            def login(self, _token_dir):
+                return None
+
+            def get_full_name(self):
+                return "Probe"
+
+            def __getattr__(self, name):
+                if name in backfill.CORE_WELLNESS_ENDPOINTS:
+                    return lambda _date: (_ for _ in ()).throw(
+                        RuntimeError("HTTP 503 Service Unavailable")
+                    )
+                if name in {
+                    "get_respiration_data", "get_training_status",
+                    "get_max_metrics", "get_endurance_score", "get_hill_score",
+                }:
+                    return lambda _date: None
+                raise AttributeError(name)
+
+        fake_garminconnect = types.ModuleType("garminconnect")
+        fake_garminconnect.Garmin = FailingGarmin
+        argv = ["03_backfill.py", "--athlete", "probe", "--days", "0",
+                "--skip-activities"]
+
+        with (
+            mock.patch.object(backfill, "PROJECT_ROOT", project_root),
+            mock.patch.object(backfill.time, "sleep"),
+            mock.patch.dict(sys.modules, {"garminconnect": fake_garminconnect}),
+            mock.patch.object(backfill, "fetch_and_insert_extras") as extras,
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            backfill.main()
+
+        self.assertEqual(raised.exception.code, 1)
+        extras.assert_called_once()
+
+    def test_multi_day_mixed_failures_publish_network_and_all_causes(self):
+        schema.init_schema(self.data_dir / "garmin.db")
+        project_root = self.data_dir / "project"
+        (project_root / "tokens" / "probe").mkdir(parents=True)
+        end_day = backfill.datetime.now(backfill.BANGKOK_TZ).date()
+        token_day = (end_day - backfill.timedelta(days=1)).isoformat()
+
+        class MixedGarmin:
+            def login(self, _token_dir):
+                return None
+
+            def get_full_name(self):
+                return "Probe"
+
+            def __getattr__(self, name):
+                if name in backfill.CORE_WELLNESS_ENDPOINTS:
+                    def fail(date_str):
+                        message = (
+                            "401 Unauthorized"
+                            if date_str == token_day
+                            else "HTTP 503 Service Unavailable"
+                        )
+                        raise RuntimeError(message)
+                    return fail
+                if name in {
+                    "get_respiration_data", "get_training_status",
+                    "get_max_metrics", "get_endurance_score", "get_hill_score",
+                }:
+                    return lambda _date: None
+                raise AttributeError(name)
+
+        fake_garminconnect = types.ModuleType("garminconnect")
+        fake_garminconnect.Garmin = MixedGarmin
+        argv = ["03_backfill.py", "--athlete", "probe", "--days", "1",
+                "--skip-activities"]
+
+        with (
+            mock.patch.object(backfill, "PROJECT_ROOT", project_root),
+            mock.patch.object(backfill.time, "sleep"),
+            mock.patch.dict(sys.modules, {"garminconnect": fake_garminconnect}),
+            mock.patch.object(backfill, "fetch_and_insert_extras"),
+            mock.patch.object(sys, "argv", argv),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            backfill.main()
+
+        payload = backfill.json.loads(
+            (backfill.STATUS_DIR / "probe.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(payload["reason"], "network")
+        self.assertEqual(
+            {item["reason"] for item in payload["endpoint_failures"]},
+            {"token", "network"},
+        )
 
 
 class FetchAllOrchestrationTests(IsolatedDataDirMixin, unittest.TestCase):
@@ -887,6 +1309,35 @@ class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
         self.assertEqual(
             fetch_all.slot_already_done("full", self.slots, now),
             datetime(2030, 5, 6, 8, 0),
+        )
+
+    def test_future_lane_timestamp_cannot_suppress_catch_up(self):
+        now = datetime(2030, 5, 6, 9, 0)
+        self.write_lane(
+            now + timedelta(days=1),
+            results=[{"slug": "probe", "ok": True, "reason": "ok"}],
+        )
+
+        self.assertEqual(
+            fetch_all.pending_slots("full", self.slots, now),
+            [
+                datetime(2030, 5, 4, 21, 0),
+                datetime(2030, 5, 5, 8, 0),
+                datetime(2030, 5, 5, 21, 0),
+                datetime(2030, 5, 6, 8, 0),
+            ],
+        )
+
+    def test_aware_future_lane_timestamp_also_fails_open(self):
+        now = datetime(2030, 5, 6, 9, 0)
+        self.write_lane(
+            datetime(2030, 5, 7, 9, 0, tzinfo=timezone(timedelta(hours=7))),
+            results=[{"slug": "probe", "ok": True, "reason": "ok"}],
+        )
+
+        self.assertEqual(
+            fetch_all.pending_slots("full", self.slots, now),
+            fetch_all.passed_slots(self.slots, now),
         )
 
 

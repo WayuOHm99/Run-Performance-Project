@@ -206,6 +206,17 @@ def pending_slots(lane: str, slots: list[dtime], now: datetime,
     except Exception:
         # ไม่เคยรัน/ไฟล์เสีย → ถือว่าค้างทั้งหมด ให้รันเลย
         return candidates or [now]
+    if last_run.tzinfo is not None and now.tzinfo is None:
+        # Lane files normally use local naive time.  If a migrated/corrupted
+        # file carries an offset, compare it in this host's local wall clock.
+        last_run = last_run.astimezone().replace(tzinfo=None)
+    elif last_run.tzinfo is None and now.tzinfo is not None:
+        last_run = last_run.replace(tzinfo=now.tzinfo)
+    # A future timestamp is not evidence that any real slot completed.  It can
+    # come from clock drift or a corrupted status file and must fail open into
+    # catch-up instead of suppressing every pending round.
+    if last_run > now:
+        return candidates or [now]
     # New lane files carry per-athlete results.  A round which ran but failed is
     # not evidence that a catch-up slot completed; leave it pending so the next
     # hourly trigger can retry.  Files from older builds had no `results`, so
