@@ -289,6 +289,15 @@ $STALE_MARKER = @{ full = "sync_run_start.txt"; fast = "sync_fast_run_start.txt"
                    backup = "sync_backup_run_start.txt" }
 # เผื่อเวลาที่รอบหนึ่งใช้จริง ก่อนจะสรุปว่า "ตายกลางคัน" ไม่ใช่ "กำลังรันอยู่ตอนนี้"
 $RUN_GRACE_MIN = @{ full = 30; fast = 10; wellness = 10; reconcile = 60; deep = 90; backup = 60 }
+# heartbeat ที่ส่งออกนอกเครื่องไม่ใช่หนึ่งใน 6 สาย sync ด้านบน (ค่าพวกนั้นต้องตรงกับ
+# dashboard.py เป๊ะ ๆ) จึงแยกค่าไว้ต่างหาก. ทำไมต้องเฝ้าตรงนี้: จาก GitHub ความเงียบ
+# แปลได้ทั้ง "เครื่องหลับ" และ "publisher พัง" — แยกไม่ออก (18 ส.ค. 69 เครื่องหลับ
+# 16:19-20:17 เปิด incident หลอก 3 รอบ) แต่ในเครื่องแยกออก เพราะรู้ว่าตื่นมานานแค่ไหน
+# เพดาน = คาบส่งจริง 2 ชม. + เผื่ออีกหนึ่งช่อง (retry ของ task ห่าง 15 นาที 2 ครั้ง)
+$HEARTBEAT_MARKER = "heartbeat_published_at.txt"
+$HEARTBEAT_STALE_LIMIT_MIN = 180
+$HEARTBEAT_LABEL = "heartbeat ออกนอกเครื่อง (ทุก 2 ชม.)"
+
 function Read-TimeFile([string]$Path) {
     if (-not (Test-Path $Path)) { return $null }
     try { return [datetime]::Parse((Get-Content $Path -Raw).Trim()) } catch { return $null }
@@ -301,9 +310,22 @@ function Test-StaleLanes([string]$DataDir) {
     $scope = "stale"
     $script:ScopeComplete[$scope] = $false
     $now = $script:Now.LocalDateTime
+    $awakePath = Join-Path $DataDir "notify_awake_since.txt"
     $prev = Read-TimeFile $hbPath
     $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $hbPath
-    if ($null -eq $prev -or ($now - $prev).TotalMinutes -gt 45) { return }
+    if ($null -eq $prev -or ($now - $prev).TotalMinutes -gt 45) {
+        # เพิ่งกลับมา — เวลาที่หายไปคือเวลาที่เครื่องหลับ ไม่ใช่เวลาที่ระบบพัง ต้องรีเซ็ต
+        # นาฬิกา "ตื่นตั้งแต่" ด้วย ไม่งั้นรอบถัดไป (อีก 30 นาที) จะเอาอายุที่สะสมตอนหลับ
+        # ไปตัดสินว่า publisher พัง = เตือนหลอกแบบเดียวกับที่ GitHub เคยทำ
+        $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $awakePath
+        return
+    }
+    $awakeSince = Read-TimeFile $awakePath
+    if ($null -eq $awakeSince) {
+        $awakeSince = $now
+        $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $awakePath
+    }
+    $awakeMin = ($now - $awakeSince).TotalMinutes
 
     $laneDir = Join-Path $DataDir "sync_lane"
     $observationComplete = $true
@@ -363,6 +385,30 @@ function Test-StaleLanes([string]$DataDir) {
                 "Garmin sync มีสายที่หยุดเดิน" `
                 ("$($STALE_LABEL[$name]): ไม่มีรอบใหม่เกินเพดานที่กำหนด" +
                  "`nเช็ค Task Scheduler + log C:\Backup\run-performance-logs\garmin-sync-*.log")
+        }
+    }
+
+    # publisher ของ heartbeat — นับเฉพาะเวลาที่เครื่องตื่นจริง ความเงียบระหว่างหลับ
+    # อธิบายตัวเองได้อยู่แล้ว ไม่ต้องเตือน
+    $hbMarkerPath = Join-Path $DataDir $HEARTBEAT_MARKER
+    $publishedAt = Read-TimeFile $hbMarkerPath
+    if ((Test-Path $hbMarkerPath) -and $null -eq $publishedAt) {
+        $observationComplete = $false
+        Add-Condition $scope "heartbeat-marker-invalid" `
+            "Garmin: heartbeat มี marker เสีย" `
+            "$($HEARTBEAT_LABEL): อ่านเวลาส่งล่าสุดไม่ได้ — เปิด log"
+    }
+    elseif ($null -ne $publishedAt -and $awakeMin -gt $HEARTBEAT_STALE_LIMIT_MIN) {
+        if ($publishedAt -gt $now.AddMinutes(10)) {
+            Add-Condition $scope "heartbeat-future" `
+                "Garmin: heartbeat มีเวลาในอนาคต" `
+                "$($HEARTBEAT_LABEL): เวลาส่งล่าสุดอยู่ในอนาคต — เช็คนาฬิกาเครื่อง"
+        }
+        elseif (($now - $publishedAt).TotalMinutes -gt $HEARTBEAT_STALE_LIMIT_MIN) {
+            Add-Condition $scope "heartbeat-stale" `
+                "Garmin: heartbeat หยุดส่ง" `
+                ("$($HEARTBEAT_LABEL): เครื่องตื่นมา $([int]$awakeMin) นาทีแล้วยังไม่มีรอบส่งใหม่" +
+                 "`nเช็ค Task Scheduler งาน Run-Performance-SystemHealth")
         }
     }
     $script:ScopeComplete[$scope] = $observationComplete

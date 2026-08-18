@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -24,9 +25,11 @@ except ModuleNotFoundError:  # ถูกโหลดตรงด้วย import
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = GARMIN_ROOT.parent
+DATA_DIR = Path(os.environ.get("GARMIN_DATA_DIR", GARMIN_ROOT / "data"))
 HEALTH_REPORT = GARMIN_ROOT / "scripts" / "health_report.py"
 RELEASE_TAG = "system-health"
 ASSET_NAME = "system-health.json"
+PUBLISH_MARKER = "heartbeat_published_at.txt"
 
 
 class HeartbeatError(RuntimeError):
@@ -101,6 +104,21 @@ def _ensure_release(gh: str, repository: str) -> None:
     )
 
 
+def record_publish(*, data_dir=None, now=None) -> Path:
+    """บันทึกเวลาที่ส่ง heartbeat สำเร็จไว้ในเครื่อง.
+
+    GitHub เห็นได้แค่ "ไม่มีของใหม่มา" ซึ่งแปลว่าเครื่องหลับก็ได้ publisher พังก็ได้ —
+    แยกไม่ออกจากข้างนอก. ในเครื่องแยกออก เพราะรู้ว่าตัวเองตื่นมานานแค่ไหน; marker นี้
+    คือฝั่งหนึ่งของการเทียบนั้น (อีกฝั่งคือ notify_sync.ps1 -CheckStale).
+    """
+    target = Path(data_dir) if data_dir is not None else DATA_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    stamp = (now or datetime.now().astimezone()).isoformat(timespec="seconds")
+    marker = target / PUBLISH_MARKER
+    marker.write_text(stamp, encoding="ascii")
+    return marker
+
+
 def publish() -> dict:
     gh = shutil.which("gh")
     if not gh:
@@ -127,6 +145,9 @@ def publish() -> dict:
                 "--repo", repository, "--clobber",
             ]
         )
+    # หลัง upload สำเร็จเท่านั้น — รอบที่อัปโหลดล้มต้องไม่ทิ้งหลักฐานว่าสำเร็จไว้
+    # ไม่งั้น watchdog ในเครื่องจะเงียบทั้งที่ publisher พังอยู่
+    record_publish()
     return heartbeat
 
 

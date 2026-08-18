@@ -43,22 +43,48 @@ jobs:
           --pattern system-health.json
           --dir "$RUNNER_TEMP"
 
+      # exit 2 = "เงียบแต่ยังไม่ตัดสิน" (โน้ตบุ๊กอาจหลับอยู่) ซึ่งต้องแยกจาก exit 1 ให้ได้
+      # แต่ steps.<id>.outcome บอกได้แค่ success/failure จึงต้องส่ง exit code ออกมาเอง
       - name: Validate heartbeat
         id: validate
         if: always()
         continue-on-error: true
-        run: >-
-          python garmin/scripts/validate_system_heartbeat.py
-          "$RUNNER_TEMP/system-health.json"
-          --timezone Asia/Bangkok
-          --offline-start 01:00
-          --offline-end 08:00
+        run: |
+          set +e
+          python garmin/scripts/validate_system_heartbeat.py \
+            "$RUNNER_TEMP/system-health.json" \
+            --timezone Asia/Bangkok \
+            --offline-start 01:00 \
+            --offline-end 08:00 \
+            --incident-after-hours 12
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
 
-      - name: Open or recover the system incident
+      - name: Decide the incident verdict
+        id: verdict
         if: always()
         env:
+          FORCED: ${{ inputs.force_failure }}
+          DOWNLOAD: ${{ steps.download.outcome }}
+          CODE: ${{ steps.validate.outputs.code }}
+        run: |
+          if [ "$FORCED" = "true" ] || [ "$DOWNLOAD" != "success" ] \
+             || [ -z "$CODE" ] || [ "$CODE" = "1" ]; then
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+          elif [ "$CODE" = "2" ]; then
+            echo "status=quiet" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=healthy" >> "$GITHUB_OUTPUT"
+          fi
+
+      # quiet = ไม่แตะ incident เลย ทั้งไม่เปิดใหม่และไม่ปิดของเดิม — ปิดให้เท่ากับ
+      # โกหกว่า "recovered" ทั้งที่ยังไม่มี heartbeat ใหม่มายืนยันสักรอบ
+      - name: Open or recover the system incident
+        if: always() && steps.verdict.outputs.status != 'quiet'
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HEARTBEAT_STATUS: ${{ (inputs.force_failure == true || steps.download.outcome != 'success' || steps.validate.outcome != 'success') && 'failure' || 'healthy' }}
+          HEARTBEAT_STATUS: ${{ steps.verdict.outputs.status }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           python garmin/scripts/heartbeat_issue_alert.py
@@ -67,5 +93,5 @@ jobs:
           --run-url "$RUN_URL"
 
       - name: Fail after incident delivery
-        if: always() && (inputs.force_failure == true || steps.download.outcome != 'success' || steps.validate.outcome != 'success')
+        if: always() && steps.verdict.outputs.status == 'failure'
         run: exit 1

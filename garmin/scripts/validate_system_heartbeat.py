@@ -12,6 +12,16 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 MAX_FUTURE_MINUTES = 10
+# ความเงียบจากนอกเครื่องแปลได้สองอย่างเสมอ: โน้ตบุ๊กหลับ หรือ publisher พัง — และจาก
+# GitHub มองไม่ออกว่าอันไหน (18 ส.ค. 69 เครื่องหลับ 16:19–20:17 เปิด incident หลอก
+# 3 รอบ) จึงรอจนความเงียบยาวเกินกว่าที่การหลับอธิบายได้ก่อนค่อยเรียกว่าเหตุขัดข้อง
+# ส่วน "publisher พังตอนเครื่องเปิดอยู่" ให้ watchdog ในเครื่องจับแทน — มันรู้ว่า
+# ตัวเองตื่นมานานแค่ไหน ซึ่งเป็นข้อมูลที่ข้างนอกไม่มีทางรู้
+INCIDENT_AFTER_HOURS = 12
+# exit code: 0 = เขียว | 1 = เหตุขัดข้อง (เปิด/คงไว้ซึ่ง incident) | 2 = เงียบแต่ยังไม่ตัดสิน
+EXIT_HEALTHY = 0
+EXIT_INCIDENT = 1
+EXIT_UNDECIDED = 2
 
 
 class ValidationError(ValueError):
@@ -85,7 +95,10 @@ def validate(
     offline_start,
     offline_end,
     max_age_hours=3,
+    incident_after_hours=INCIDENT_AFTER_HOURS,
 ):
+    if incident_after_hours < max_age_hours:
+        raise ValidationError("incident_after_invalid")
     summary = _validated_summary(payload)
     generated = _aware_datetime(payload.get("generated_at"), "generated_at")
     now = _aware_datetime(now, "now") if isinstance(now, str) else now
@@ -110,7 +123,15 @@ def validate(
         ) - timedelta(hours=max_age_hours)
         if generated.astimezone(local_timezone) >= earliest_expected:
             return {"ok": True, "reason": "planned_offline", **base}
+    if age.total_seconds() <= incident_after_hours * 3600:
+        return {"ok": False, "reason": "offline_grace", **base}
     return {"ok": False, "reason": "stale", **base}
+
+
+def exit_code(result):
+    if result["ok"]:
+        return EXIT_HEALTHY
+    return EXIT_UNDECIDED if result["reason"] == "offline_grace" else EXIT_INCIDENT
 
 
 def main(argv=None):
@@ -121,6 +142,9 @@ def main(argv=None):
     parser.add_argument("--offline-start", default="01:00")
     parser.add_argument("--offline-end", default="08:00")
     parser.add_argument("--max-age-hours", type=float, default=3)
+    parser.add_argument(
+        "--incident-after-hours", type=float, default=INCIDENT_AFTER_HOURS
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -134,13 +158,14 @@ def main(argv=None):
             offline_start=_clock(args.offline_start),
             offline_end=_clock(args.offline_end),
             max_age_hours=args.max_age_hours,
+            incident_after_hours=args.incident_after_hours,
         )
     except (
         OSError, json.JSONDecodeError, ValidationError, ZoneInfoNotFoundError
     ):
         result = {"ok": False, "reason": "invalid"}
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0 if result["ok"] else 1
+    return exit_code(result)
 
 
 if __name__ == "__main__":
