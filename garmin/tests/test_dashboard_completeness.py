@@ -322,3 +322,36 @@ class AcwrDisplayTests(unittest.TestCase):
     def test_missing_acwr_shows_a_dash_instead_of_a_base_it_never_used(self):
         acwr_display = extract_acwr_display()
         self.assertEqual(acwr_display(float("nan"), "ระยะวิ่ง"), "–")
+
+
+class ChartGapPolicyTests(unittest.TestCase):
+    """Which charts may bridge a missing day depends on how the value behaves."""
+
+    def _trace_kwargs(self, name_literal):
+        # แต่ละกราฟสร้างเป็น go.Scatter ก้อนเดียว — ดึงเฉพาะก้อนที่ name ตรงมาตรวจ
+        for node in ast.walk(ast.parse(DASHBOARD_SRC)):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "Scatter"):
+                continue
+            kwargs = {kw.arg: kw.value for kw in node.keywords}
+            name = kwargs.get("name")
+            if isinstance(name, ast.Constant) and name.value == name_literal:
+                return kwargs
+        self.fail(f"ไม่พบ trace ชื่อ {name_literal!r}")
+
+    def test_vo2max_bridges_days_garmin_did_not_recalculate(self):
+        # Garmin คำนวณ VO2max ใหม่เฉพาะวันที่มีวิ่ง GPS เข้าเกณฑ์ (ยืนยันด้วย get_max_metrics
+        # ที่ตอบว่างเปล่าในวันที่ DB ว่าง) ค่าไม่ได้หายไปในวันที่ไม่ได้คำนวณ — เส้นขาดเป็นท่อน
+        # จึงสื่อผิด marker ยังอยู่เฉพาะวันที่วัดจริง เส้นแค่เชื่อมจุดที่มีจริงเข้าด้วยกัน
+        connect_gaps = self._trace_kwargs("VO2max").get("connectgaps")
+        self.assertIsInstance(connect_gaps, ast.Constant)
+        self.assertTrue(connect_gaps.value)
+
+    def test_daily_measured_charts_still_show_a_real_gap(self):
+        # ค่าพวกนี้วัดใหม่ทุกวัน วันที่ไม่มี = ไม่ได้ใส่นาฬิกาจริง ห้ามลากเส้นข้าม
+        for name in ("Training Readiness", "Recovery Time"):
+            with self.subTest(chart=name):
+                connect_gaps = self._trace_kwargs(name).get("connectgaps")
+                self.assertIsInstance(connect_gaps, ast.Constant)
+                self.assertFalse(connect_gaps.value)
