@@ -479,6 +479,36 @@ def device_inventory_labels(records, now_utc=None, stale_days=90):
     return labels
 
 
+def summarize_metric_group(fields, history_counts, selected_counts, latest_dates):
+    """Classify a metric group from observed Garmin data, never from model guesses."""
+    fields = tuple(fields)
+    history_available = sum(int(history_counts.get(field, 0) or 0) > 0 for field in fields)
+    selected_available = sum(int(selected_counts.get(field, 0) or 0) > 0 for field in fields)
+    real_dates = []
+    for field in fields:
+        if int(history_counts.get(field, 0) or 0) <= 0:
+            continue
+        parsed = pd.to_datetime(latest_dates.get(field), errors="coerce")
+        if pd.notna(parsed):
+            real_dates.append(parsed.date())
+
+    if history_available == 0:
+        state = "never_received"
+    elif selected_available == 0:
+        state = "outside_range"
+    elif selected_available < len(fields):
+        state = "partial"
+    else:
+        state = "available"
+    return {
+        "state": state,
+        "history_available": history_available,
+        "selected_available": selected_available,
+        "total_fields": len(fields),
+        "latest_date": max(real_dates) if real_dates else None,
+    }
+
+
 def field_freshness(field_snapshot, today_date):
     """Human-readable field date/freshness; never imply row freshness per field."""
     if not field_snapshot or not field_snapshot.get("date"):
@@ -589,6 +619,56 @@ def fmt_sec(sec):
     if s >= 3600:
         return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
     return f"{s // 60}:{s % 60:02d}"
+
+
+def acwr_display(acwr, metric):
+    """ACWR พร้อมฐานที่ใช้คำนวณ — คนที่นาฬิกาไม่ให้ training_load จะคิดจากระยะวิ่งแทน
+    ตัวเลขจากคนละฐานจึงเทียบกันตรง ๆ ไม่ได้ ต้องบอกฐานไว้ข้างตัวเลขเสมอ"""
+    if pd.isna(acwr):
+        return "–"
+    return f"{acwr:.2f} · {'โหลด Garmin' if metric == 'training_load' else 'ระยะวิ่ง'}"
+
+
+def personal_record_label(record_type_id, record_label):
+    """ชื่อรายการ PR ที่โค้ชอ่านได้ — บอกตรง ๆ เมื่อยังไม่รู้จักชนิดสถิตินี้
+
+    Garmin คืน `prTypeLabelKey` เป็น null ทุกแถว (ยืนยันจาก payload จริง 18 ส.ค. 69)
+    ชื่อจึงมาจาก PR_LABELS ที่ตั้งเองใน 03_backfill.py ซึ่งครอบแค่ typeId 1-9, 12-14
+    typeId นอกนั้น (เช่น 15-18) ถึงตารางโดยไม่มีชื่อ — ห้ามเดาความหมายให้โค้ช
+    """
+    if isinstance(record_label, str) and record_label:
+        return record_label
+    return f"รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส {record_type_id})"
+
+
+def personal_record_rows(records):
+    """แถวตาราง PR พร้อมหน่วยตามชนิดสถิติ — ชนิดที่ไม่รู้จักแสดงค่าดิบโดยไม่เดาหน่วย"""
+    # typeId ที่ค่าเป็น "เวลา (วินาที)" / "ระยะไกล (เมตร→กม.)" / "ไต่สะสม (เมตร)" / "จำนวนก้าว"
+    time_ids = {1, 2, 3, 4, 5, 6}
+    km_ids = {7, 8}
+    meter_ids = {9}
+    step_ids = {12, 13, 14}
+    rows = []
+    for _, record in records.iterrows():
+        type_id, value = int(record["record_type_id"]), record["value"]
+        if type_id in time_ids:
+            shown = fmt_sec(value)
+        elif type_id in km_ids:
+            shown = f"{value / 1000:.2f} km" if pd.notna(value) else "–"
+        elif type_id in meter_ids:
+            shown = f"{value:,.0f} m" if pd.notna(value) else "–"
+        elif type_id in step_ids:
+            shown = f"{value:,.0f} ก้าว" if pd.notna(value) else "–"
+        else:
+            shown = f"{value:,.0f}" if pd.notna(value) else "–"
+        achieved_date = record["achieved_date"]
+        rows.append({
+            "รายการ": personal_record_label(type_id, record["record_label"]),
+            "สถิติ": shown,
+            "ทำได้เมื่อ": (str(achieved_date)[:10]
+                          if isinstance(achieved_date, str) and achieved_date else "–"),
+        })
+    return rows
 
 
 def classify_intensity(avg_hr, lthr):
@@ -795,6 +875,38 @@ _WELLNESS_TEXT = {
 _ACTIVITY_TEXT = {"activity_type", "activity_name", "start_time_local", "start_time_utc",
                   "training_effect_label", "location_name", "fetched_at"}
 
+# แต่ละกลุ่มวัดจากประวัติจริงทั้งบัญชีและช่วงวันที่ที่ผู้ใช้เลือก ไม่ผูก capability
+# กับชื่อรุ่นนาฬิกา เพราะ firmware/account/API อาจให้ข้อมูลต่างกันได้.
+DATA_AVAILABILITY_GROUPS = (
+    {
+        "key": "core_wellness", "label": "สุขภาพพื้นฐาน", "table": "fact_daily_wellness",
+        "fields": ("resting_hr", "sleep_score", "body_battery_high", "stress_avg",
+                   "hrv_last_night", "avg_sleep_respiration"),
+    },
+    {
+        "key": "readiness", "label": "ความพร้อมและการฟื้นตัว", "table": "fact_daily_wellness",
+        "fields": ("training_readiness", "recovery_time_min", "acute_load", "training_status"),
+    },
+    {
+        "key": "advanced", "label": "สมรรถนะขั้นสูง", "table": "fact_daily_wellness",
+        "fields": ("vo2max_trend", "fitness_age", "endurance_score", "hill_score_overall",
+                   "lactate_threshold_hr"),
+    },
+    {
+        "key": "activity_detail", "label": "รายละเอียดกิจกรรม", "table": "fact_activity",
+        "fields": ("avg_hr", "avg_cadence", "avg_power", "training_load",
+                   "avg_ground_contact_time_ms", "begin_stamina"),
+    },
+    {
+        "key": "body", "label": "องค์ประกอบร่างกาย", "table": "fact_body_composition",
+        "fields": ("weight_kg", "bmi", "body_fat_pct"),
+    },
+    {
+        "key": "race", "label": "คาดการณ์เวลาแข่ง", "table": "fact_race_prediction",
+        "fields": ("time_5k_sec", "time_10k_sec", "time_half_sec", "time_full_sec"),
+    },
+)
+
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_wellness_data(athlete_id, start_date, end_date):
@@ -827,6 +939,57 @@ def load_activity_data(athlete_id, start_date, end_date):
         if col not in _ACTIVITY_TEXT:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def load_data_availability(athlete_id, start_date, end_date):
+    """Return all-history and selected-range evidence for Dashboard metric groups."""
+    conn = connect_db()
+    result = {}
+    try:
+        for table in {group["table"] for group in DATA_AVAILABILITY_GROUPS}:
+            fields = tuple(
+                field
+                for group in DATA_AVAILABILITY_GROUPS if group["table"] == table
+                for field in group["fields"]
+            )
+            date_expr = (
+                "SUBSTR(start_time_local, 1, 10)"
+                if table == "fact_activity" else "calendar_date"
+            )
+            expressions = []
+            for field in fields:
+                expressions.extend((
+                    f'COUNT({field}) AS "{field}__history"',
+                    f'COUNT(CASE WHEN {date_expr} >= ? AND {date_expr} <= ? '
+                    f'THEN {field} END) AS "{field}__selected"',
+                    f'MAX(CASE WHEN {field} IS NOT NULL THEN {date_expr} END) '
+                    f'AS "{field}__latest"',
+                ))
+            active_filter = " AND deleted_at IS NULL" if table == "fact_activity" else ""
+            params = []
+            for _ in fields:
+                params.extend((start_date, end_date))
+            params.append(athlete_id)
+            cursor = conn.execute(
+                f"SELECT {', '.join(expressions)} FROM {table} "
+                f"WHERE athlete_id = ?{active_filter}",
+                tuple(params),
+            )
+            columns = [description[0] for description in cursor.description]
+            row = cursor.fetchone()
+            values = dict(zip(columns, row))
+            result[table] = {
+                field: {
+                    "history_count": values[f"{field}__history"],
+                    "selected_count": values[f"{field}__selected"],
+                    "latest_date": values[f"{field}__latest"],
+                }
+                for field in fields
+            }
+    finally:
+        conn.close()
+    return result
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -1241,6 +1404,70 @@ if not activity_df.empty:
     activity_df["start_time_local"] = pd.to_datetime(activity_df["start_time_local"])
     activity_df["distance_km"] = activity_df["distance_m"] / 1000
 
+# สรุปความพร้อมจากหลักฐานทั้งประวัติ ไม่ตีความ NULL ว่า sync ล้ม และไม่เดา capability
+# จากชื่อรุ่นนาฬิกาเพียงอย่างเดียว.
+availability_stats = load_data_availability(
+    athlete_id, start_date.isoformat(), end_date.isoformat()
+)
+availability_by_key = {}
+availability_rows = []
+_availability_labels = {
+    "available": ("พร้อม", "มีข้อมูลในช่วงที่เลือก"),
+    "partial": ("บางส่วน", "Garmin Connect ส่งมาเฉพาะบางเมตริก"),
+    "outside_range": ("นอกช่วง", "มีประวัติ แต่นอกช่วงที่เลือก"),
+    "never_received": ("ยังไม่เคยได้รับ", "Garmin Connect ยังไม่เคยส่ง"),
+}
+for group in DATA_AVAILABILITY_GROUPS:
+    table_stats = availability_stats[group["table"]]
+    summary = summarize_metric_group(
+        group["fields"],
+        {field: table_stats[field]["history_count"] for field in group["fields"]},
+        {field: table_stats[field]["selected_count"] for field in group["fields"]},
+        {field: table_stats[field]["latest_date"] for field in group["fields"]},
+    )
+    availability_by_key[group["key"]] = summary
+    status_label, meaning = _availability_labels[summary["state"]]
+    availability_rows.append({
+        "ชุดข้อมูล": group["label"],
+        "สถานะ": status_label,
+        "เมตริกที่เคยได้รับ": f'{summary["history_available"]}/{summary["total_fields"]}',
+        "เมตริกในช่วงนี้": f'{summary["selected_available"]}/{summary["total_fields"]}',
+        "ล่าสุด": (summary["latest_date"].strftime("%d/%m/%Y")
+                   if summary["latest_date"] else "—"),
+        "ความหมาย": meaning,
+    })
+
+with st.sidebar:
+    with st.popover(
+        "สถานะข้อมูล Garmin",
+        icon=":material/database:",
+        width="stretch",
+    ):
+        st.markdown("**ความพร้อมของข้อมูลจาก Garmin**")
+        st.caption(
+            "ตรวจจากประวัติทั้งหมดของนักกีฬาคนนี้ · ตัวเลขคือจำนวนชนิดเมตริกที่ Garmin "
+            "เคยส่งจริง ไม่ใช่คะแนนคุณภาพและไม่ใช่สถานะระบบ"
+        )
+        st.dataframe(
+            pd.DataFrame(availability_rows),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "ชุดข้อมูล": st.column_config.TextColumn(pinned=True),
+                "สถานะ": st.column_config.TextColumn(),
+                "เมตริกที่เคยได้รับ": st.column_config.TextColumn(),
+                "เมตริกในช่วงนี้": st.column_config.TextColumn(),
+                "ล่าสุด": st.column_config.TextColumn(),
+                "ความหมาย": st.column_config.TextColumn(),
+            },
+        )
+        _availability_devices = load_athlete_devices(athlete_id)
+        st.caption(
+            "อุปกรณ์ที่พบใน 90 วัน: "
+            + (", ".join(_availability_devices) if _availability_devices else "ยังไม่มีทะเบียนอุปกรณ์")
+            + " · ค่าว่างยังไม่ถูกใช้ฟันธงว่ารุ่นไม่รองรับ"
+        )
+
 # --- MAIN DASHBOARD TABS ---
 tab_today, tab_team, tab_health, tab_train, tab_progress, tab_splits = st.tabs([
     ":material/today: วันนี้",
@@ -1385,7 +1612,7 @@ with tab_team:
             # อยู่ต้นตาราง (ไม่ใช่ท้ายสุด) เพราะตารางนี้มี 13 คอลัมน์ กว้างเกินจอปกติ —
             # วางไว้ท้ายก่อนหน้านี้ทำให้มองข้ามว่า "ไม่ขึ้น" ทั้งที่จริงมีข้อมูล แค่ต้องเลื่อนดู
             "สถานะซ้อม (Garmin)": _ts_base.title() if _ts_base else "–",
-            "ACWR": round(acwr, 2) if pd.notna(acwr) else None,
+            "ACWR": acwr_display(acwr, metric),
             "โซน ACWR": f"{emoji} {acwr_txt}",
             "โหลด 7 วัน": (f"{acute:.0f} {unit}" if metric == "training_load"
                           else f"{acute:.1f} {unit}") if pd.notna(acute) else "–",
@@ -1420,9 +1647,9 @@ with tab_team:
         hide_index=True,
         column_config={
             "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-            "ACWR": st.column_config.NumberColumn("ACWR", format="%.2f",
-                                                  help="โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ 28 วัน — ปลอดภัย 0.8–1.3 | "
-                                                       "TL = Garmin training_load (รวม cross-training), km = ระยะวิ่ง"),
+            "ACWR": st.column_config.TextColumn("ACWR",
+                                                help="โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ 28 วัน — ปลอดภัย 0.8–1.3 | "
+                                                     "ฐานต่างกันเทียบข้ามคนไม่ได้"),
             "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
                 "Body Battery ตอนนี้/ล่าสุด", format="%.0f",
                 help="วันนี้ = ระดับล่าสุดระหว่างวัน; ถ้าไม่มีของวันนี้ = high ของวันล่าสุด "
@@ -1437,7 +1664,7 @@ with tab_team:
             hide_index=True,
             column_config={
                 "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-                "ACWR": st.column_config.NumberColumn("ACWR", format="%.2f"),
+                "ACWR": st.column_config.TextColumn("ACWR"),
                 "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
                     "Body Battery ตอนนี้/ล่าสุด", format="%.0f"),
                 "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
@@ -1665,7 +1892,7 @@ with tab_today:
         with st.container(horizontal=True):
             st.metric(
                 "ACWR ของระบบ",
-                fmt_num(team_row["ACWR"], decimals=2),
+                team_row["ACWR"],
                 help="อัตราส่วนโหลด 7 วัน ÷ ฐาน 28 วัน ไม่ใช่ acwrFactorPercent ของ Garmin Readiness",
                 border=True,
             )
@@ -1987,6 +2214,24 @@ with tab_health:
                 with st.expander("ดูองค์ประกอบที่ Garmin ใช้คำนวณ Readiness", icon=":material/tune:"):
                     st.dataframe(pd.DataFrame(factor_rows), hide_index=True)
                     st.caption("คะแนนเหล่านี้เป็น factor ของ Readiness ไม่ใช่ค่า ACWR ratio")
+        else:
+            st.subheader("ความพร้อมซ้อมและเวลาฟื้นตัวจาก Garmin")
+            readiness_summary = availability_by_key["readiness"]
+            if readiness_summary["state"] == "outside_range":
+                readiness_missing_message = (
+                    "บัญชีนี้เคยมีข้อมูลความพร้อม/การฟื้นตัว แต่ไม่มีค่าในช่วงวันที่ที่เลือก "
+                    "ลองเลือก ‘ทั้งหมด’ หรือช่วงที่ยาวขึ้น"
+                )
+            else:
+                readiness_missing_message = (
+                    "Garmin Connect ยังไม่เคยส่ง Training Readiness, Recovery Time, Acute Load "
+                    "หรือ Training Status ให้บัญชีนี้ ระบบ Sync จึงไม่มีค่าจริงให้แสดง"
+                )
+            st.info(readiness_missing_message, icon=":material/watch:")
+            st.caption(
+                "Garmin อาจแสดง Recovery Time เฉพาะบนนาฬิกาในอุปกรณ์ที่ไม่มี "
+                "Training Readiness บน Garmin Connect · Dashboard จะไม่เดาหรือคำนวณค่าทดแทน"
+            )
 
         # --- รายละเอียดที่เก็บแล้ว: collapsed เพื่อให้ตรวจเทียบนาฬิกาได้โดยไม่ทำหน้าหลักแน่น ---
         detail_specs = [
@@ -2320,6 +2565,26 @@ with tab_progress:
         "ใช้ค่าจาก Garmin ดูทิศทาง ส่วนค่าสัมบูรณ์ให้ยึดผลเทสจริง"
     )
 
+    advanced_summary = availability_by_key["advanced"]
+    advanced_performance_missing_message = None
+    if advanced_summary["state"] == "never_received":
+        advanced_performance_missing_message = (
+            "Garmin Connect ยังไม่เคยส่ง VO2max, Fitness Age, Endurance/Hill Score "
+            "หรือ Lactate Threshold ให้บัญชีนี้"
+        )
+    elif advanced_summary["state"] == "outside_range":
+        advanced_performance_missing_message = (
+            "มีประวัติเมตริกสมรรถนะขั้นสูง แต่ไม่มีค่าในช่วงวันที่ที่เลือก"
+        )
+    elif advanced_summary["state"] == "partial":
+        advanced_performance_missing_message = (
+            f"Garmin Connect เคยส่งเมตริกสมรรถนะขั้นสูง "
+            f"{advanced_summary['history_available']}/{advanced_summary['total_fields']} ชนิด; "
+            "ส่วนที่ไม่แสดงคือค่าที่บัญชีนี้ยังไม่เคยได้รับ"
+        )
+    if advanced_performance_missing_message:
+        st.info(advanced_performance_missing_message, icon=":material/insights:")
+
     # ---------------- VO2max trend ----------------
     vo2 = (wellness_df.dropna(subset=["vo2max_trend"])
            if "vo2max_trend" in wellness_df else wellness_df.iloc[0:0])
@@ -2456,6 +2721,12 @@ with tab_progress:
             st.metric("LT Pace", f"{fmt_pace(lt_pace)} /km" if lt_pace is not None else "–", border=True)
             st.metric("วันที่วัด", lt_date, border=True)
         st.caption("ค่าประเมินจากการวิ่งจริงด้วยสาย HR — เทียบกับผลเทสแลบ (ถ้ามี) ก่อนใช้ปรับโซน")
+    else:
+        st.info(
+            "Garmin Connect ยังไม่เคยส่ง Lactate Threshold สำหรับนักกีฬาคนนี้ "
+            "ค่านี้ต้องอาศัยอุปกรณ์/กิจกรรมที่เข้าเงื่อนไขของ Garmin",
+            icon=":material/speed:",
+        )
     # ---------------- Endurance / Hill score (device-dependent) ----------------
     eh_cols = [c for c in ("endurance_score", "hill_score_overall") if c in wellness_df]
     eh = wellness_df.dropna(subset=eh_cols, how="all") if eh_cols else wellness_df.iloc[0:0]
@@ -2481,40 +2752,19 @@ with tab_progress:
                 xaxis_title="วันที่", yaxis_title="Endurance Score", showlegend=False,
             )
             st.plotly_chart(fig_end, width="stretch")
+    else:
+        st.info(
+            "ไม่มี Endurance Score หรือ Hill Score ในช่วงนี้; Garmin ให้เมตริกเหล่านี้ "
+            "ตามความสามารถของอุปกรณ์ บัญชี และประวัติกิจกรรม",
+            icon=":material/landscape:",
+        )
     # ---------------- Personal records ----------------
     st.subheader("สถิติส่วนตัวจาก Garmin")
     prs = load_personal_records(athlete_id)
-    # typeId ที่ค่าเป็น "เวลา (วินาที)" / "ระยะไกล (เมตร→กม.)" / "ไต่สะสม (เมตร)" / "จำนวนก้าว"
-    _PR_TIME_IDS = {1, 2, 3, 4, 5, 6}
-    _PR_KM_IDS = {7, 8}
-    _PR_METER_IDS = {9}
-    _PR_STEP_IDS = {12, 13, 14}
     if prs.empty:
         st.info("ไม่มีข้อมูล PR")
     else:
-        rows = []
-        for _, pr in prs.iterrows():
-            tid, val = int(pr["record_type_id"]), pr["value"]
-            if tid in _PR_TIME_IDS:
-                shown = fmt_sec(val)
-            elif tid in _PR_KM_IDS:
-                shown = f"{val / 1000:.2f} km" if pd.notna(val) else "–"
-            elif tid in _PR_METER_IDS:
-                shown = f"{val:,.0f} m" if pd.notna(val) else "–"
-            elif tid in _PR_STEP_IDS:
-                shown = f"{val:,.0f} ก้าว" if pd.notna(val) else "–"
-            else:
-                shown = f"{val:,.0f}" if pd.notna(val) else "–"
-            # ห้ามใช้ `label or default` — record_label ที่ว่างมาเป็น NaN ซึ่ง truthy ใน Python
-            label_val = pr["record_label"]
-            label_txt = label_val if (isinstance(label_val, str) and label_val) else f"ประเภท {tid}"
-            date_val = pr["achieved_date"]
-            rows.append({
-                "รายการ": label_txt,
-                "สถิติ": shown,
-                "ทำได้เมื่อ": str(date_val)[:10] if isinstance(date_val, str) and date_val else "–",
-            })
-        st.dataframe(pd.DataFrame(rows), hide_index=True)
+        st.dataframe(pd.DataFrame(personal_record_rows(prs)), hide_index=True)
         st.caption("PR นับตามที่นาฬิกาบันทึกอัตโนมัติ — ระยะที่ GPS วัดไม่ถึงเกณฑ์ (เช่น 4.98 กม.) จะไม่ถูกนับเป็น 5K")
 
 
@@ -2523,7 +2773,10 @@ with tab_progress:
 # =====================================================================
 with tab_splits:
     st.header(f"รายละเอียดเซสชัน — {selected_name}", anchor=f"sessions-{selected_anchor}")
-    st.caption(f"เลือกกิจกรรมระหว่าง {start_date.strftime('%d/%m/%Y')}–{end_date.strftime('%d/%m/%Y')}")
+    st.caption(
+        f"เลือกกิจกรรมระหว่าง {start_date.strftime('%d/%m/%Y')}–{end_date.strftime('%d/%m/%Y')} · "
+        "เครื่องหมาย – หมายถึง Garmin ไม่ได้ส่งเมตริกนั้นมากับกิจกรรมที่เลือก ไม่ใช่ค่า 0"
+    )
 
     if activity_df.empty:
         st.info("ไม่มีกิจกรรมในช่วงเวลานี้")

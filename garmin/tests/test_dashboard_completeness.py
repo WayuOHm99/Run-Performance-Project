@@ -213,3 +213,112 @@ class DashboardCompletenessSourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def extract_personal_record_label():
+    tree = ast.parse(DASHBOARD_SRC)
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "personal_record_label"
+    ]
+    namespace = {}
+    exec(
+        compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
+        namespace,
+    )
+    return namespace["personal_record_label"]
+
+
+class PersonalRecordLabelTests(unittest.TestCase):
+    def test_record_garmin_never_named_says_so_instead_of_showing_a_type_code(self):
+        # Garmin ส่ง prTypeLabelKey = null ทุกแถว จึงไม่มีชื่อจริงให้เก็บ และ PR_LABELS
+        # ครอบแค่ typeId 1-9, 12-14 → typeId 15 ถึงตาราง Dashboard โดยไม่มีชื่อ
+        personal_record_label = extract_personal_record_label()
+        self.assertEqual(
+            personal_record_label(15, float("nan")),
+            "รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส 15)",
+        )
+
+    def test_named_record_keeps_the_label_the_pipeline_stored(self):
+        personal_record_label = extract_personal_record_label()
+        self.assertEqual(
+            personal_record_label(3, "วิ่ง 5 กม. (วินาที)"),
+            "วิ่ง 5 กม. (วินาที)",
+        )
+
+
+def extract_personal_record_rows():
+    tree = ast.parse(DASHBOARD_SRC)
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"personal_record_label", "personal_record_rows", "fmt_sec"}
+    ]
+    namespace = {"pd": pd}
+    exec(
+        compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
+        namespace,
+    )
+    return namespace["personal_record_rows"]
+
+
+class PersonalRecordRowTests(unittest.TestCase):
+    def test_unnamed_record_reaches_the_table_without_an_invented_name_or_unit(self):
+        personal_record_rows = extract_personal_record_rows()
+        records = pd.DataFrame([{
+            "record_type_id": 15,
+            "record_label": None,
+            "value": 6.0,
+            "achieved_date": "2026-07-18",
+        }])
+        self.assertEqual(
+            personal_record_rows(records),
+            [{
+                "รายการ": "รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส 15)",
+                "สถิติ": "6",
+                "ทำได้เมื่อ": "2026-07-18",
+            }],
+        )
+
+    def test_known_record_types_keep_their_units_after_the_seam_moved(self):
+        personal_record_rows = extract_personal_record_rows()
+        records = pd.DataFrame([
+            {"record_type_id": 3, "record_label": "วิ่ง 5 กม. (วินาที)",
+             "value": 1347.63, "achieved_date": "2026-08-15"},
+            {"record_type_id": 7, "record_label": "วิ่งไกลสุด (เมตร)",
+             "value": 21217.44, "achieved_date": "2026-07-11"},
+            {"record_type_id": 12, "record_label": "ก้าวมากสุด/วัน",
+             "value": 33888.0, "achieved_date": "2026-07-15"},
+        ])
+        self.assertEqual(
+            [row["สถิติ"] for row in personal_record_rows(records)],
+            ["22:28", "21.22 km", "33,888 ก้าว"],
+        )
+
+
+def extract_acwr_display():
+    tree = ast.parse(DASHBOARD_SRC)
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "acwr_display"
+    ]
+    namespace = {"pd": pd}
+    exec(
+        compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
+        namespace,
+    )
+    return namespace["acwr_display"]
+
+
+class AcwrDisplayTests(unittest.TestCase):
+    def test_acwr_states_which_base_it_was_calculated_from(self):
+        # ตารางทีมวางตัวเลขของทุกคนไว้คอลัมน์เดียว แต่ P'kao คิดจาก Garmin training_load
+        # ส่วน Tong/Dan คิดจากระยะวิ่ง — ตัวเลขเปล่า ๆ ชวนให้เทียบข้ามคนทั้งที่เทียบไม่ได้
+        acwr_display = extract_acwr_display()
+        self.assertEqual(acwr_display(1.41, "training_load"), "1.41 · โหลด Garmin")
+        self.assertEqual(acwr_display(0.83, "ระยะวิ่ง"), "0.83 · ระยะวิ่ง")
+
+    def test_missing_acwr_shows_a_dash_instead_of_a_base_it_never_used(self):
+        acwr_display = extract_acwr_display()
+        self.assertEqual(acwr_display(float("nan"), "ระยะวิ่ง"), "–")

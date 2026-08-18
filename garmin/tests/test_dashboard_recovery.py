@@ -58,6 +58,7 @@ HELPERS = extract_helpers(
     "bangkok_date",
     "to_bangkok_timestamp",
     "device_inventory_labels",
+    "summarize_metric_group",
     "field_freshness",
     "readiness_when",
     "wellness_quality_flags",
@@ -66,6 +67,73 @@ HELPERS = extract_helpers(
     "aggregate_pace_min_per_km",
     "usable_hr_zone_rows",
 )
+
+
+class DataAvailabilitySummaryTests(unittest.TestCase):
+    def test_distinguishes_available_partial_outside_range_and_never_received(self):
+        summarize = HELPERS["summarize_metric_group"]
+        fields = ("score", "recovery", "load")
+
+        available = summarize(
+            fields,
+            history_counts={"score": 10, "recovery": 10, "load": 10},
+            selected_counts={"score": 3, "recovery": 3, "load": 3},
+            latest_dates={"score": "2026-08-17", "recovery": "2026-08-17"},
+        )
+        partial = summarize(
+            fields,
+            history_counts={"score": 10, "recovery": 0, "load": 0},
+            selected_counts={"score": 3, "recovery": 0, "load": 0},
+            latest_dates={"score": "2026-08-16"},
+        )
+        outside = summarize(
+            fields,
+            history_counts={"score": 10, "recovery": 10, "load": 10},
+            selected_counts={"score": 0, "recovery": 0, "load": 0},
+            latest_dates={"score": "2026-06-01"},
+        )
+        missing = summarize(
+            fields,
+            history_counts={field: 0 for field in fields},
+            selected_counts={field: 0 for field in fields},
+            latest_dates={},
+        )
+
+        self.assertEqual(available["state"], "available")
+        self.assertEqual(partial["state"], "partial")
+        self.assertEqual(partial["history_available"], 1)
+        self.assertEqual(outside["state"], "outside_range")
+        self.assertEqual(missing["state"], "never_received")
+        self.assertEqual(missing["latest_date"], None)
+
+    def test_latest_date_is_taken_only_from_fields_that_have_real_values(self):
+        result = HELPERS["summarize_metric_group"](
+            ("score", "recovery"),
+            history_counts={"score": 2, "recovery": 0},
+            selected_counts={"score": 1, "recovery": 0},
+            latest_dates={"score": "2026-08-15", "recovery": "2099-01-01"},
+        )
+
+        self.assertEqual(result["latest_date"], date(2026, 8, 15))
+
+
+class DataAvailabilitySourceIntegrationTests(unittest.TestCase):
+    def test_dashboard_puts_availability_in_a_sidebar_popover(self):
+        self.assertIn("def load_data_availability(athlete_id, start_date, end_date):", DASHBOARD_SRC)
+        self.assertIn("ความพร้อมของข้อมูลจาก Garmin", DASHBOARD_SRC)
+        self.assertIn('with st.sidebar:\n    with st.popover(', DASHBOARD_SRC)
+        self.assertNotIn(
+            'with st.expander(\n    "ความพร้อมของข้อมูลจาก Garmin"',
+            DASHBOARD_SRC,
+        )
+        self.assertIn("Garmin Connect ยังไม่เคยส่ง", DASHBOARD_SRC)
+        self.assertIn("มีประวัติ แต่นอกช่วงที่เลือก", DASHBOARD_SRC)
+        self.assertIn("AND deleted_at IS NULL", DASHBOARD_SRC)
+
+    def test_recovery_and_progress_do_not_hide_unsupported_sections(self):
+        self.assertIn("readiness_missing_message", DASHBOARD_SRC)
+        self.assertIn("Garmin อาจแสดง Recovery Time เฉพาะบนนาฬิกา", DASHBOARD_SRC)
+        self.assertIn("advanced_performance_missing_message", DASHBOARD_SRC)
 
 
 class LatestPerFieldTests(unittest.TestCase):

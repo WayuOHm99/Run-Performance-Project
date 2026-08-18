@@ -124,6 +124,12 @@ function Publish-Scope([string]$Scope, [string]$DataRoot) {
                        else { "unknown" }
         $previousErrorAction = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
+        # notification_policy.py พ่น UTF-8 (-X utf8) แต่ PowerShell ถอดรหัส stdout ของลูก
+        # ตาม [Console]::OutputEncoding ซึ่งเป็น OEM codepage ของสภาพแวดล้อม (เช่น IBM437
+        # ตอนถูกเรียกโดยไม่มี console ติดมา อย่างใน Scheduled Task) ทำให้ข้อความไทยใน toast
+        # กลายเป็น α╕üα╕┤α╕ê... ต้องปักหมุด UTF-8 ไว้เอง ห้ามพึ่ง codepage ของเครื่อง
+        $previousOutputEncoding = [Console]::OutputEncoding
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         try {
             $raw = & $python -X utf8 $policy --state $statePath --scope $Scope `
                 --conditions $conditionPath --now $nowText `
@@ -131,6 +137,7 @@ function Publish-Scope([string]$Scope, [string]$DataRoot) {
         }
         finally {
             $ErrorActionPreference = $previousErrorAction
+            [Console]::OutputEncoding = $previousOutputEncoding
         }
         if ($LASTEXITCODE -ne 0) {
             $details = ($raw | Out-String).Trim()
