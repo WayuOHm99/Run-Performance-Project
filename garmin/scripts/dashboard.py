@@ -2602,13 +2602,17 @@ with tab_progress:
             if not _fit_age.empty:
                 st.metric("Fitness Age", fmt_num(_fit_age.iloc[-1]), border=True)
     if not vo2.empty:
+        # ต่างจากกราฟสุขภาพรายวันตรงที่ connectgaps=True: Garmin คำนวณ VO2max ใหม่เฉพาะ
+        # วันที่มีวิ่ง GPS เข้าเกณฑ์ (get_max_metrics ตอบว่างเปล่าในวันอื่น — ตรวจแล้ว
+        # 18 ส.ค. 69) ค่าไม่ได้หายไปในวันที่ไม่ได้คำนวณ เส้นขาดเป็นท่อนจึงสื่อผิด
+        # marker ยังอยู่เฉพาะวันที่ Garmin วัดจริง เส้นแค่เชื่อมจุดที่มีจริงเข้าด้วยกัน
         fig_vo2 = go.Figure(go.Scatter(
             x=wellness_plot_df["calendar_date"], y=wellness_plot_df["vo2max_trend"],
-            mode="lines+markers", name="VO2max", connectgaps=False,
+            mode="lines+markers", name="VO2max", connectgaps=True,
             hovertemplate="%{x|%d %b}<br>VO2max: %{y:.1f}<extra></extra>",
         ))
         fig_vo2.update_layout(
-            title="แนวโน้ม VO2max (ค่าประเมินรายวันของ Garmin)",
+            title="แนวโน้ม VO2max (Garmin อัปเดตเฉพาะวันที่มีวิ่ง GPS)",
             xaxis_title="วันที่", yaxis_title="VO2max", showlegend=False,
         )
         st.plotly_chart(fig_vo2, width="stretch")
