@@ -621,6 +621,14 @@ def fmt_sec(sec):
     return f"{s // 60}:{s % 60:02d}"
 
 
+def acwr_display(acwr, metric):
+    """ACWR พร้อมฐานที่ใช้คำนวณ — คนที่นาฬิกาไม่ให้ training_load จะคิดจากระยะวิ่งแทน
+    ตัวเลขจากคนละฐานจึงเทียบกันตรง ๆ ไม่ได้ ต้องบอกฐานไว้ข้างตัวเลขเสมอ"""
+    if pd.isna(acwr):
+        return "–"
+    return f"{acwr:.2f} · {'โหลด Garmin' if metric == 'training_load' else 'ระยะวิ่ง'}"
+
+
 def personal_record_label(record_type_id, record_label):
     """ชื่อรายการ PR ที่โค้ชอ่านได้ — บอกตรง ๆ เมื่อยังไม่รู้จักชนิดสถิตินี้
 
@@ -1604,7 +1612,7 @@ with tab_team:
             # อยู่ต้นตาราง (ไม่ใช่ท้ายสุด) เพราะตารางนี้มี 13 คอลัมน์ กว้างเกินจอปกติ —
             # วางไว้ท้ายก่อนหน้านี้ทำให้มองข้ามว่า "ไม่ขึ้น" ทั้งที่จริงมีข้อมูล แค่ต้องเลื่อนดู
             "สถานะซ้อม (Garmin)": _ts_base.title() if _ts_base else "–",
-            "ACWR": round(acwr, 2) if pd.notna(acwr) else None,
+            "ACWR": acwr_display(acwr, metric),
             "โซน ACWR": f"{emoji} {acwr_txt}",
             "โหลด 7 วัน": (f"{acute:.0f} {unit}" if metric == "training_load"
                           else f"{acute:.1f} {unit}") if pd.notna(acute) else "–",
@@ -1639,9 +1647,9 @@ with tab_team:
         hide_index=True,
         column_config={
             "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-            "ACWR": st.column_config.NumberColumn("ACWR", format="%.2f",
-                                                  help="โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ 28 วัน — ปลอดภัย 0.8–1.3 | "
-                                                       "TL = Garmin training_load (รวม cross-training), km = ระยะวิ่ง"),
+            "ACWR": st.column_config.TextColumn("ACWR",
+                                                help="โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ 28 วัน — ปลอดภัย 0.8–1.3 | "
+                                                     "ฐานต่างกันเทียบข้ามคนไม่ได้"),
             "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
                 "Body Battery ตอนนี้/ล่าสุด", format="%.0f",
                 help="วันนี้ = ระดับล่าสุดระหว่างวัน; ถ้าไม่มีของวันนี้ = high ของวันล่าสุด "
@@ -1656,7 +1664,7 @@ with tab_team:
             hide_index=True,
             column_config={
                 "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-                "ACWR": st.column_config.NumberColumn("ACWR", format="%.2f"),
+                "ACWR": st.column_config.TextColumn("ACWR"),
                 "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
                     "Body Battery ตอนนี้/ล่าสุด", format="%.0f"),
                 "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
@@ -1884,7 +1892,7 @@ with tab_today:
         with st.container(horizontal=True):
             st.metric(
                 "ACWR ของระบบ",
-                fmt_num(team_row["ACWR"], decimals=2),
+                team_row["ACWR"],
                 help="อัตราส่วนโหลด 7 วัน ÷ ฐาน 28 วัน ไม่ใช่ acwrFactorPercent ของ Garmin Readiness",
                 border=True,
             )

@@ -295,3 +295,30 @@ class PersonalRecordRowTests(unittest.TestCase):
             [row["สถิติ"] for row in personal_record_rows(records)],
             ["22:28", "21.22 km", "33,888 ก้าว"],
         )
+
+
+def extract_acwr_display():
+    tree = ast.parse(DASHBOARD_SRC)
+    functions = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "acwr_display"
+    ]
+    namespace = {"pd": pd}
+    exec(
+        compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
+        namespace,
+    )
+    return namespace["acwr_display"]
+
+
+class AcwrDisplayTests(unittest.TestCase):
+    def test_acwr_states_which_base_it_was_calculated_from(self):
+        # ตารางทีมวางตัวเลขของทุกคนไว้คอลัมน์เดียว แต่ P'kao คิดจาก Garmin training_load
+        # ส่วน Tong/Dan คิดจากระยะวิ่ง — ตัวเลขเปล่า ๆ ชวนให้เทียบข้ามคนทั้งที่เทียบไม่ได้
+        acwr_display = extract_acwr_display()
+        self.assertEqual(acwr_display(1.41, "training_load"), "1.41 · โหลด Garmin")
+        self.assertEqual(acwr_display(0.83, "ระยะวิ่ง"), "0.83 · ระยะวิ่ง")
+
+    def test_missing_acwr_shows_a_dash_instead_of_a_base_it_never_used(self):
+        acwr_display = extract_acwr_display()
+        self.assertEqual(acwr_display(float("nan"), "ระยะวิ่ง"), "–")
