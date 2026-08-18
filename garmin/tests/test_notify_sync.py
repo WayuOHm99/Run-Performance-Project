@@ -140,5 +140,101 @@ class NotifySyncBehaviorTests(unittest.TestCase):
         self.assertIn("คลี่คลาย", notifications[-1]["title"])
 
 
+@unittest.skipUnless(POWERSHELL, "PowerShell is required for notification behavior")
+class HeartbeatPublisherWatchdogTests(unittest.TestCase):
+    """18 ส.ค. 69: โน้ตบุ๊กหลับ 16:19–20:17 → GitHub เห็นแค่ "เงียบ" แล้วเปิด incident หลอก
+    3 รอบติด. จากนอกเครื่อง "หลับ" กับ "publisher พัง" หน้าตาเหมือนกันเป๊ะ แต่ในเครื่อง
+    แยกออก เพราะรู้ว่าตัวเองตื่นมานานแค่ไหน → ย้ายการเฝ้ามาไว้ตรงนี้ และนับเฉพาะเวลาตื่น
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="heartbeat-watchdog-")
+        self.addCleanup(self.temp.cleanup)
+        self.data = Path(self.temp.name) / "data"
+        (self.data / "sync_lane").mkdir(parents=True)
+        self.sink = Path(self.temp.name) / "notifications.jsonl"
+        self.outputs = []
+
+    def write_time(self, name, value):
+        (self.data / name).write_text(value, encoding="ascii")
+
+    def invoke(self, now):
+        completed = subprocess.run(
+            [
+                POWERSHELL,
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", str(SCRIPT),
+                "-CheckStale",
+                "-StaleOnly",
+                "-DataDir", str(self.data),
+                "-NotificationLog", str(self.sink),
+                "-NowIso", now,
+                "-CooldownMinutes", "360",
+            ],
+            cwd=GARMIN_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+            check=False,
+        )
+        self.outputs.append(completed.stdout + completed.stderr)
+        self.assertEqual(
+            completed.returncode, 0, msg=completed.stdout + completed.stderr
+        )
+
+    def notifications(self):
+        if not self.sink.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in self.sink.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_alerts_when_the_publisher_is_silent_while_the_machine_stays_awake(self):
+        self.write_time("notify_heartbeat.txt", "2026-08-18T13:31:00+07:00")
+        self.write_time("notify_awake_since.txt", "2026-08-18T08:00:00+07:00")
+        self.write_time("heartbeat_published_at.txt", "2026-08-18T08:25:00+07:00")
+
+        self.invoke("2026-08-18T14:01:00+07:00")
+
+        bodies = " ".join(item["body"] for item in self.notifications())
+        self.assertIn("heartbeat", bodies, msg="\n".join(self.outputs))
+
+    def test_stays_quiet_when_the_gap_was_the_machine_sleeping(self):
+        # tick ล่าสุดค้างที่ก่อนหลับ (16:18) → รอบแรกหลังตื่นรู้ตัวว่าเพิ่งกลับมา
+        self.write_time("notify_heartbeat.txt", "2026-08-18T16:18:00+07:00")
+        self.write_time("notify_awake_since.txt", "2026-08-18T12:00:00+07:00")
+        self.write_time("heartbeat_published_at.txt", "2026-08-18T14:25:00+07:00")
+
+        self.invoke("2026-08-18T20:31:00+07:00")  # รอบแรกหลังตื่น
+        # รอบถัดไปคือจุดที่เตือนหลอกได้จริง: ถ้านาฬิกา "ตื่นตั้งแต่" ไม่ถูกรีเซ็ตตอนตื่น
+        # มันจะเห็นว่าเครื่องตื่นมา 9 ชม. และ heartbeat เก่า 6.6 ชม. แล้วเตือนทันที
+        self.invoke("2026-08-18T21:01:00+07:00")
+
+        self.assertEqual(self.notifications(), [], msg="\n".join(self.outputs))
+
+    def test_stays_quiet_until_the_machine_has_been_awake_long_enough_to_judge(self):
+        # ตื่นมา 40 นาที ยังไม่ถึงช่องส่งถัดไปด้วยซ้ำ — ความเงียบยังอธิบายได้ด้วยการหลับ
+        self.write_time("notify_heartbeat.txt", "2026-08-18T20:31:00+07:00")
+        self.write_time("notify_awake_since.txt", "2026-08-18T20:21:00+07:00")
+        self.write_time("heartbeat_published_at.txt", "2026-08-18T14:25:00+07:00")
+
+        self.invoke("2026-08-18T21:01:00+07:00")
+
+        self.assertEqual(self.notifications(), [], msg="\n".join(self.outputs))
+
+    def test_never_alerts_when_the_publisher_has_no_history_yet(self):
+        self.write_time("notify_heartbeat.txt", "2026-08-18T13:31:00+07:00")
+        self.write_time("notify_awake_since.txt", "2026-08-18T08:00:00+07:00")
+
+        self.invoke("2026-08-18T14:01:00+07:00")
+
+        self.assertEqual(self.notifications(), [], msg="\n".join(self.outputs))
+
+
 if __name__ == "__main__":
     unittest.main()
