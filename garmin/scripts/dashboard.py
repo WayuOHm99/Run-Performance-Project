@@ -621,6 +621,48 @@ def fmt_sec(sec):
     return f"{s // 60}:{s % 60:02d}"
 
 
+def personal_record_label(record_type_id, record_label):
+    """ชื่อรายการ PR ที่โค้ชอ่านได้ — บอกตรง ๆ เมื่อยังไม่รู้จักชนิดสถิตินี้
+
+    Garmin คืน `prTypeLabelKey` เป็น null ทุกแถว (ยืนยันจาก payload จริง 18 ส.ค. 69)
+    ชื่อจึงมาจาก PR_LABELS ที่ตั้งเองใน 03_backfill.py ซึ่งครอบแค่ typeId 1-9, 12-14
+    typeId นอกนั้น (เช่น 15-18) ถึงตารางโดยไม่มีชื่อ — ห้ามเดาความหมายให้โค้ช
+    """
+    if isinstance(record_label, str) and record_label:
+        return record_label
+    return f"รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส {record_type_id})"
+
+
+def personal_record_rows(records):
+    """แถวตาราง PR พร้อมหน่วยตามชนิดสถิติ — ชนิดที่ไม่รู้จักแสดงค่าดิบโดยไม่เดาหน่วย"""
+    # typeId ที่ค่าเป็น "เวลา (วินาที)" / "ระยะไกล (เมตร→กม.)" / "ไต่สะสม (เมตร)" / "จำนวนก้าว"
+    time_ids = {1, 2, 3, 4, 5, 6}
+    km_ids = {7, 8}
+    meter_ids = {9}
+    step_ids = {12, 13, 14}
+    rows = []
+    for _, record in records.iterrows():
+        type_id, value = int(record["record_type_id"]), record["value"]
+        if type_id in time_ids:
+            shown = fmt_sec(value)
+        elif type_id in km_ids:
+            shown = f"{value / 1000:.2f} km" if pd.notna(value) else "–"
+        elif type_id in meter_ids:
+            shown = f"{value:,.0f} m" if pd.notna(value) else "–"
+        elif type_id in step_ids:
+            shown = f"{value:,.0f} ก้าว" if pd.notna(value) else "–"
+        else:
+            shown = f"{value:,.0f}" if pd.notna(value) else "–"
+        achieved_date = record["achieved_date"]
+        rows.append({
+            "รายการ": personal_record_label(type_id, record["record_label"]),
+            "สถิติ": shown,
+            "ทำได้เมื่อ": (str(achieved_date)[:10]
+                          if isinstance(achieved_date, str) and achieved_date else "–"),
+        })
+    return rows
+
+
 def classify_intensity(avg_hr, lthr):
     """จำแนกความหนักของเซสชันจาก avg HR เทียบ LTHR (โซน Friel)"""
     if pd.isna(avg_hr) or not lthr:
@@ -2711,37 +2753,10 @@ with tab_progress:
     # ---------------- Personal records ----------------
     st.subheader("สถิติส่วนตัวจาก Garmin")
     prs = load_personal_records(athlete_id)
-    # typeId ที่ค่าเป็น "เวลา (วินาที)" / "ระยะไกล (เมตร→กม.)" / "ไต่สะสม (เมตร)" / "จำนวนก้าว"
-    _PR_TIME_IDS = {1, 2, 3, 4, 5, 6}
-    _PR_KM_IDS = {7, 8}
-    _PR_METER_IDS = {9}
-    _PR_STEP_IDS = {12, 13, 14}
     if prs.empty:
         st.info("ไม่มีข้อมูล PR")
     else:
-        rows = []
-        for _, pr in prs.iterrows():
-            tid, val = int(pr["record_type_id"]), pr["value"]
-            if tid in _PR_TIME_IDS:
-                shown = fmt_sec(val)
-            elif tid in _PR_KM_IDS:
-                shown = f"{val / 1000:.2f} km" if pd.notna(val) else "–"
-            elif tid in _PR_METER_IDS:
-                shown = f"{val:,.0f} m" if pd.notna(val) else "–"
-            elif tid in _PR_STEP_IDS:
-                shown = f"{val:,.0f} ก้าว" if pd.notna(val) else "–"
-            else:
-                shown = f"{val:,.0f}" if pd.notna(val) else "–"
-            # ห้ามใช้ `label or default` — record_label ที่ว่างมาเป็น NaN ซึ่ง truthy ใน Python
-            label_val = pr["record_label"]
-            label_txt = label_val if (isinstance(label_val, str) and label_val) else f"ประเภท {tid}"
-            date_val = pr["achieved_date"]
-            rows.append({
-                "รายการ": label_txt,
-                "สถิติ": shown,
-                "ทำได้เมื่อ": str(date_val)[:10] if isinstance(date_val, str) and date_val else "–",
-            })
-        st.dataframe(pd.DataFrame(rows), hide_index=True)
+        st.dataframe(pd.DataFrame(personal_record_rows(prs)), hide_index=True)
         st.caption("PR นับตามที่นาฬิกาบันทึกอัตโนมัติ — ระยะที่ GPS วัดไม่ถึงเกณฑ์ (เช่น 4.98 กม.) จะไม่ถูกนับเป็น 5K")
 
 
