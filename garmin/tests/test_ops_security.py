@@ -183,6 +183,30 @@ class WrapperExitPropagationTests(unittest.TestCase):
                     f"{filename} must expose the real worker result to Task Scheduler",
                 )
 
+    def test_fast_lane_looks_back_far_enough_to_see_a_late_synced_evening_run(self):
+        """สาย fast ต้องมองย้อนถึงเมื่อวาน ไม่ใช่แค่วันนี้
+
+        นาฬิกาซิงค์เข้า Garmin ช้ากว่าเวลาวิ่งเป็นชั่วโมง และข้ามเที่ยงคืนได้
+        (วัดจริง 18 ส.ค. 69: dan วิ่ง 17 ส.ค. 19:18 แต่ข้อมูลเข้า Garmin หลังเที่ยงคืน)
+        ถ้าสายนี้ขอแค่ "วันนี้" กิจกรรมเย็นวานจะมองไม่เห็นไม่ว่ายิงถี่แค่ไหน
+        ต้องรอสาย full รอบ 08:00/21:00 มาเก็บ — ช้าได้ถึง 13 ชม.
+
+        การขยายหน้าต่างไม่เสีย API เพิ่ม: get_activities_by_date รับช่วงวันที่
+        จึงยิงครั้งเดียวเท่ากันไม่ว่าขอ 1 วันหรือ 2 วัน
+        """
+        source = (TASKS_DIR / "garmin-fast-sync-auto.bat").read_text(
+            encoding="utf-8-sig"
+        )
+        match = re.search(r"fetch_all\.py\s+--days\s+(\d+)", source)
+        self.assertIsNotNone(
+            match, "fast lane must pass an explicit --days window to fetch_all"
+        )
+        self.assertGreaterEqual(
+            int(match.group(1)), 1,
+            "fast lane must cover yesterday so an activity synced after midnight "
+            "is picked up within one round instead of waiting for the full sync",
+        )
+
     def test_deep_sync_propagates_drift_failure_with_explicit_context(self):
         source = (TASKS_DIR / "garmin-deepsync-auto.bat").read_text(
             encoding="ascii"
