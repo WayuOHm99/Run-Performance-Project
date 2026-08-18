@@ -26,6 +26,12 @@ ESSENTIAL_TABLES = (
 )
 
 
+# เพดานนี้มีไว้จับ "สคริปต์ค้าง" ไม่ใช่วัดความเร็วเครื่อง — Windows runner ของ GitHub
+# ช้าเป็นพัก ๆ จนสปอว์นโปรเซสเกิน 30 วิได้ (CI ล้มจริง 18 ส.ค. 69 ทั้ง prep_log.ps1 และ
+# setup_scheduled_tasks.ps1) งบเวลาจริงคุมด้วย timeout-minutes ของ job ไม่ใช่ตรงนี้
+SUBPROCESS_TIMEOUT_SEC = 120
+
+
 def create_minimal_garmin_database(path, data_date="2026-08-17"):
     connection = sqlite3.connect(path)
     for table in ESSENTIAL_TABLES:
@@ -155,7 +161,7 @@ class SqliteBackupValidationTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
             self.assertEqual(initialized.returncode, 0, msg=initialized.stderr)
@@ -222,7 +228,7 @@ class SqliteBackupValidationTests(unittest.TestCase):
                 cwd=PROJECT_ROOT / "garmin",
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
 
@@ -237,7 +243,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
             cwd=PROJECT_ROOT / "garmin",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
 
@@ -267,7 +273,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
 
@@ -287,7 +293,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
 
@@ -328,7 +334,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=30,
+                    timeout=SUBPROCESS_TIMEOUT_SEC,
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, msg=completed.stderr)

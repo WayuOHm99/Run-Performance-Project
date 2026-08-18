@@ -11,6 +11,12 @@ SCRIPT = GARMIN_ROOT / "scripts" / "notify_sync.ps1"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh")
 
 
+# เพดานนี้มีไว้จับ "สคริปต์ค้าง" ไม่ใช่วัดความเร็วเครื่อง — Windows runner ของ GitHub
+# ช้าเป็นพัก ๆ จนสปอว์นโปรเซสเกิน 30 วิได้ (CI ล้มจริง 18 ส.ค. 69 ทั้ง prep_log.ps1 และ
+# setup_scheduled_tasks.ps1) งบเวลาจริงคุมด้วย timeout-minutes ของ job ไม่ใช่ตรงนี้
+SUBPROCESS_TIMEOUT_SEC = 120
+
+
 @unittest.skipUnless(POWERSHELL, "PowerShell is required for notification behavior")
 class NotifySyncBehaviorTests(unittest.TestCase):
     def setUp(self):
@@ -50,7 +56,7 @@ class NotifySyncBehaviorTests(unittest.TestCase):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         self.outputs.append(completed.stdout + completed.stderr)

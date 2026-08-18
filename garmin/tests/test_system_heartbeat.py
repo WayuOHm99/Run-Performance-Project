@@ -12,6 +12,12 @@ SCRIPT = PROJECT_ROOT / "garmin" / "scripts" / "system_heartbeat.py"
 VALIDATOR = PROJECT_ROOT / "garmin" / "scripts" / "validate_system_heartbeat.py"
 
 
+# เพดานนี้มีไว้จับ "สคริปต์ค้าง" ไม่ใช่วัดความเร็วเครื่อง — Windows runner ของ GitHub
+# ช้าเป็นพัก ๆ จนสปอว์นโปรเซสเกิน 30 วิได้ (CI ล้มจริง 18 ส.ค. 69 ทั้ง prep_log.ps1 และ
+# setup_scheduled_tasks.ps1) งบเวลาจริงคุมด้วย timeout-minutes ของ job ไม่ใช่ตรงนี้
+SUBPROCESS_TIMEOUT_SEC = 120
+
+
 class SystemHeartbeatCliTests(unittest.TestCase):
     def run_validator(self, payload, now):
         with tempfile.TemporaryDirectory(prefix="heartbeat-validator-") as raw:
@@ -30,7 +36,7 @@ class SystemHeartbeatCliTests(unittest.TestCase):
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
         return completed, json.loads(completed.stdout)
@@ -68,7 +74,7 @@ class SystemHeartbeatCliTests(unittest.TestCase):
                 cwd=PROJECT_ROOT / "garmin",
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
 
@@ -192,7 +198,7 @@ class SystemHeartbeatCliTests(unittest.TestCase):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)

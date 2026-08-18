@@ -18,6 +18,12 @@ TOKEN_SCRIPT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TOKEN_SCRIPT)
 
 
+# เพดานนี้มีไว้จับ "สคริปต์ค้าง" ไม่ใช่วัดความเร็วเครื่อง — Windows runner ของ GitHub
+# ช้าเป็นพัก ๆ จนสปอว์นโปรเซสเกิน 30 วิได้ (CI ล้มจริง 18 ส.ค. 69 ทั้ง prep_log.ps1 และ
+# setup_scheduled_tasks.ps1) งบเวลาจริงคุมด้วย timeout-minutes ของ job ไม่ใช่ตรงนี้
+SUBPROCESS_TIMEOUT_SEC = 120
+
+
 class GarminConnectDependencyTests(unittest.TestCase):
     def test_matching_version_does_not_invoke_pip(self):
         with (
@@ -140,7 +146,7 @@ $rules = @($acl.GetAccessRules($true, $true,
             env={**os.environ, "RUNPERF_ACL_TEST_PATH": str(path)},
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         if completed.returncode != 0:
@@ -157,7 +163,7 @@ $rules = @($acl.GetAccessRules($true, $true,
                     "*S-1-5-32-545:(OI)(CI)RX",
                 ],
                 capture_output=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=True,
             )
 
@@ -168,7 +174,7 @@ $rules = @($acl.GetAccessRules($true, $true,
 
             whoami = subprocess.run(
                 ["whoami.exe", "/user", "/fo", "csv", "/nh"],
-                capture_output=True, text=True, timeout=30, check=True,
+                capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC, check=True,
             )
             expected = {
                 next(csv.reader([whoami.stdout.strip()]))[1],
