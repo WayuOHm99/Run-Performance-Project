@@ -41,6 +41,9 @@ SOURCES = (
     Path(r"C:\Backup\Run-Performance"),
 )
 RELEASE_TAG = "offsite-backup"
+# ข้อความที่ `gh` ใช้แยก "ไม่มีจริง" ออกจาก error อื่น — ตรวจกับ gh จริงแล้ว 18 ส.ค. 69
+RELEASE_NOT_FOUND = "release not found"
+RELEASE_ALREADY_EXISTS = "already exists"
 RETENTION = {"daily": 7, "weekly": 8, "monthly": 12, "release_assets": 3}
 ASSET_PREFIX = "restic-repository-"
 EXCLUDES = ("**/.git/**", "**/.venv*/**", "**/__pycache__/**")
@@ -181,6 +184,13 @@ def _latest_verified_daily_database() -> Path:
 
 
 def _ensure_release(gh: str, repo: str) -> None:
+    """ทำให้ release ปลายทางมีอยู่จริง — เป้าหมายคือ "มี" ไม่ใช่ "ได้สร้าง"
+
+    เคยพังจริง 17-18 ส.ค. 69 (สำรองข้อมูลนอกเครื่องหยุด 2 คืน): โค้ดเดิมเหมาว่า
+    `gh release view` ที่ exit ไม่ใช่ 0 = ยังไม่มี release แล้วสั่ง create ทันที
+    แต่ view ล้มได้จากเน็ต/rate limit/auth ด้วย พอ release มีอยู่จริง create เลยตอบ
+    "Release.tag_name already exists" แล้วล้มทั้งสาย ทั้งที่แค่ต้อง upload asset ต่อ
+    """
     existing = _run(
         [gh, "release", "view", RELEASE_TAG, "--repo", repo],
         allow_failure=True,
@@ -188,14 +198,33 @@ def _ensure_release(gh: str, repo: str) -> None:
     )
     if existing.returncode == 0:
         return
-    _run(
+    # แยก "ไม่มีจริง" ออกจาก "ถามไม่สำเร็จ" — gh ตอบ `release not found` เฉพาะกรณีแรก
+    # ถ้ายังไม่รู้สถานะ ห้ามเดาแล้วสั่งสร้าง ให้ล้มพร้อมบอกสาเหตุจริงไปเลย
+    view_error = (existing.stderr or existing.stdout).strip()
+    if RELEASE_NOT_FOUND not in view_error.lower():
+        raise OffsiteBackupError(
+            f"command_failed:gh release view:{view_error.splitlines()[-1][:300]}"
+            if view_error else "command_failed:gh release view:unknown"
+        )
+    created = _run(
         [
             gh, "release", "create", RELEASE_TAG, "--repo", repo,
             "--title", "Encrypted offsite backup",
             "--notes", "Automated encrypted Restic repository snapshots. Restore via the guarded recovery workflow.",
             "--latest=false", "--target", "main",
         ],
+        allow_failure=True,
         timeout=120,
+    )
+    if created.returncode == 0:
+        return
+    # อีก process สร้างทันเราระหว่างนี้ หรือ view เพิ่งพลาดไป — ปลายทางถูกต้องแล้ว
+    create_error = (created.stderr or created.stdout).strip()
+    if RELEASE_ALREADY_EXISTS in create_error.lower():
+        return
+    raise OffsiteBackupError(
+        f"command_failed:gh release create:{create_error.splitlines()[-1][:300]}"
+        if create_error else "command_failed:gh release create:unknown"
     )
 
 
