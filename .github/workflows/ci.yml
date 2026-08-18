@@ -1,11 +1,20 @@
 name: CI
 
+# push ต้องกรองเฉพาะ main — ถ้าปล่อยว่าง commit เดียวกันจะรันสองรอบ (รอบ push +
+# รอบ pull_request) เปลืองเวลาเท่าตัวและเจอ flake ของ Windows runner สองเท่า
+# branch งานได้ CI จากรอบ pull_request อยู่แล้ว ส่วน main ได้จากรอบ push ตอน merge
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+# push ตามมาติด ๆ ระหว่างทำงานบน branch เดียว ไม่จำเป็นต้องรันให้จบทุกรอบ
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

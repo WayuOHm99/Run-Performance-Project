@@ -26,6 +26,12 @@ ESSENTIAL_TABLES = (
 )
 
 
+# เพดานนี้มีไว้จับ "สคริปต์ค้าง" ไม่ใช่วัดความเร็วเครื่อง — Windows runner ของ GitHub
+# ช้าเป็นพัก ๆ จนสปอว์นโปรเซสเกิน 30 วิได้ (CI ล้มจริง 18 ส.ค. 69 ทั้ง prep_log.ps1 และ
+# setup_scheduled_tasks.ps1) งบเวลาจริงคุมด้วย timeout-minutes ของ job ไม่ใช่ตรงนี้
+SUBPROCESS_TIMEOUT_SEC = 120
+
+
 def create_minimal_garmin_database(path, data_date="2026-08-17"):
     connection = sqlite3.connect(path)
     for table in ESSENTIAL_TABLES:
@@ -155,7 +161,7 @@ class SqliteBackupValidationTests(unittest.TestCase):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
             self.assertEqual(initialized.returncode, 0, msg=initialized.stderr)
@@ -222,7 +228,7 @@ class SqliteBackupValidationTests(unittest.TestCase):
                 cwd=PROJECT_ROOT / "garmin",
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
 
@@ -237,7 +243,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
             cwd=PROJECT_ROOT / "garmin",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
 
@@ -267,7 +273,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
                 check=False,
             )
 
@@ -287,7 +293,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
 
@@ -328,7 +334,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=30,
+                    timeout=SUBPROCESS_TIMEOUT_SEC,
                     check=False,
                 )
                 self.assertEqual(completed.returncode, 0, msg=completed.stderr)
@@ -432,3 +438,76 @@ class OffsiteBackupCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def load_offsite_module():
+    # สคริปต์ import เพื่อนบ้านในโฟลเดอร์เดียวกัน (backup_db) จึงต้องมี scripts/ ใน sys.path
+    scripts_dir = str(OFFSITE_SCRIPT.parent)
+    added = scripts_dir not in sys.path
+    if added:
+        sys.path.insert(0, scripts_dir)
+    try:
+        spec = importlib.util.spec_from_file_location("offsite_backup_under_test", OFFSITE_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if added:
+            sys.path.remove(scripts_dir)
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+class EnsureReleaseTests(unittest.TestCase):
+    """The release only has to exist; creating it is a means, not the goal."""
+
+    def setUp(self):
+        self.module = load_offsite_module()
+        self.calls = []
+
+    def _patched_run(self, responses):
+        """แทน _run โดยรักษาสัญญาเดิม: exit != 0 และไม่ได้ขอ allow_failure = โยน error"""
+        def fake_run(command, *, allow_failure=False, **kwargs):
+            self.calls.append(command)
+            reply = responses[command[2]]
+            if reply.returncode != 0 and not allow_failure:
+                detail = (reply.stderr or reply.stdout).strip().splitlines()
+                raise self.module.OffsiteBackupError(
+                    f"command_failed:gh {command[1]} {command[2]}:"
+                    + (detail[-1][:300] if detail else str(reply.returncode))
+                )
+            return reply
+        return mock.patch.object(self.module, "_run", side_effect=fake_run)
+
+    def test_transient_view_failure_is_not_read_as_a_missing_release(self):
+        # `gh release view` ล้มได้จากเน็ต/rate limit/auth ไม่ใช่แค่ "ไม่มี release"
+        # ถ้าเหมาว่าไม่มีแล้วไปสั่ง create จะโดน "already exists" แล้วล้มทั้งสาย
+        # (เกิดจริง 17-18 ส.ค. 69: สำรองข้อมูลนอกเครื่องหยุดไป 2 คืน)
+        with self._patched_run({
+            "view": _FakeCompleted(1, stderr="dial tcp: lookup api.github.com: no such host"),
+        }):
+            with self.assertRaises(self.module.OffsiteBackupError):
+                self.module._ensure_release("gh", "owner/repo")
+        self.assertNotIn(
+            "create", [c[2] for c in self.calls],
+            msg="ห้ามสั่ง create เมื่อยังไม่รู้ว่ามี release อยู่หรือไม่",
+        )
+
+    def test_release_that_already_exists_is_the_goal_state_not_an_error(self):
+        # แข่งกันสร้างหรือ view พลาดชั่วคราว แล้ว create ตอบว่ามีอยู่แล้ว = สำเร็จ
+        with self._patched_run({
+            "view": _FakeCompleted(1, stderr="release not found"),
+            "create": _FakeCompleted(1, stderr="HTTP 422: Validation Failed (Release.tag_name already exists)"),
+        }):
+            self.module._ensure_release("gh", "owner/repo")
+
+    def test_missing_release_is_still_created(self):
+        with self._patched_run({
+            "view": _FakeCompleted(1, stderr="release not found"),
+            "create": _FakeCompleted(0),
+        }):
+            self.module._ensure_release("gh", "owner/repo")
+        self.assertIn("create", [c[2] for c in self.calls])

@@ -20,6 +20,12 @@ from unittest import mock
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 
 
+# เพดานนี้มีไว้จับ "สคริปต์ค้าง" ไม่ใช่วัดความเร็วเครื่อง — Windows runner ของ GitHub
+# ช้าเป็นพัก ๆ จนสปอว์นโปรเซสเกิน 30 วิได้ (CI ล้มจริง 18 ส.ค. 69 ทั้ง prep_log.ps1 และ
+# setup_scheduled_tasks.ps1) งบเวลาจริงคุมด้วย timeout-minutes ของ job ไม่ใช่ตรงนี้
+SUBPROCESS_TIMEOUT_SEC = 120
+
+
 def load_script(name, filename):
     spec = importlib.util.spec_from_file_location(name, GARMIN_ROOT / "scripts" / filename)
     module = importlib.util.module_from_spec(spec)
@@ -235,7 +241,7 @@ class HealthcheckSecretStorageTests(EnvVarIsolatedMixin, unittest.TestCase):
             env=env,
             capture_output=True,
             text=False,
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)

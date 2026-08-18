@@ -25,6 +25,12 @@ ACL_SCRIPT = PROJECT_ROOT / "scripts" / "harden_private_acl.ps1"
 SCHEDULER_VERIFY_SCRIPT = GARMIN_ROOT / "scripts" / "verify_scheduled_tasks.py"
 
 
+# เพดานนี้มีไว้จับ "สคริปต์ค้าง" ไม่ใช่วัดความเร็วเครื่อง — Windows runner ของ GitHub
+# ช้าเป็นพัก ๆ จนสปอว์นโปรเซสเกิน 30 วิได้ (CI ล้มจริง 18 ส.ค. 69 ทั้ง prep_log.ps1 และ
+# setup_scheduled_tasks.ps1) งบเวลาจริงคุมด้วย timeout-minutes ของ job ไม่ใช่ตรงนี้
+SUBPROCESS_TIMEOUT_SEC = 120
+
+
 def load_script(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -584,7 +590,7 @@ class SchedulerPlanTests(unittest.TestCase):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         if completed.returncode != 0:
@@ -670,7 +676,7 @@ class PrepLogPowerShellIntegrationTests(unittest.TestCase):
             ],
             capture_output=True,
             text=False,
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
 
@@ -713,7 +719,7 @@ class PrivateAclPowerShellIntegrationTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         self.assertTrue(
@@ -738,7 +744,7 @@ class PrivateAclPowerShellIntegrationTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=SUBPROCESS_TIMEOUT_SEC,
             )
             self.assertEqual(completed.returncode, 0, msg=completed.stderr)
 
