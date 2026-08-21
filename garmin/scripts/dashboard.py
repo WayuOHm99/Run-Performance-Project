@@ -3081,6 +3081,10 @@ with tab_splits:
                 table_data = {
                     "รอบที่": splits["split_num"].astype(int),
                     "ระยะ (km)": dist_km,
+                    # เวลาต่อรอบคือค่าที่นาฬิกาวัดตรง ๆ ส่วนเพซเป็นค่าที่หารมาอีกที —
+                    # เซสชัน interval (เที่ยว ~19 วิ สลับพัก ~50 วิ) อ่านจากเพซไม่ได้เลย
+                    # เพราะเพซของเที่ยวพักกลายเป็น 14:40 ทั้งที่ duration_sec มีครบทุกแถว
+                    "เวลา": [fmt_sec(value) for value in splits["duration_sec"]],
                     "เพซ": pace_txt,
                     "HR เฉลี่ย": splits["avg_hr"],
                     "HR สูงสุด": splits["max_hr"],
