@@ -77,6 +77,55 @@ def extract_distance_half_analysis():
     return ns["analyze_distance_halves"]
 
 
+def extract_helper(name):
+    """ดึงฟังก์ชันช่วยตัวเดียวจาก dashboard.py — เทสจึงใช้ตัวจัดรูปแบบตัวจริง ไม่เขียนซ้ำเอง"""
+    tree = ast.parse(DASHBOARD_SRC)
+    picked = [n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == name]
+    assert len(picked) == 1, f"ไม่พบ {name} ใน dashboard.py"
+    ns = {"pd": pd}
+    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
+    return ns[name]
+
+
+class _FakeColumnConfig:
+    """column_config ปลอม — บล็อกตารางเรียกแค่เพื่อประกอบ cfg ไม่ได้ render จริง"""
+
+    @staticmethod
+    def NumberColumn(**kwargs):
+        return kwargs
+
+
+class _FakeStreamlitTable:
+    column_config = _FakeColumnConfig
+
+
+def extract_split_table_block():
+    """โค้ดที่ประกอบ table_data/cfg ของตาราง Splits จนถึงก่อน st.dataframe()"""
+    block = re.search(
+        r"(^[ \t]*num0 = st\.column_config\.NumberColumn.*?)"
+        r"^[ \t]*st\.dataframe\(pd\.DataFrame\(table_data\)",
+        DASHBOARD_SRC, re.S | re.M)
+    assert block, "ไม่พบบล็อกสร้างตาราง Splits ใน dashboard.py"
+    return textwrap.dedent(block.group(1))
+
+
+def build_split_table(splits):
+    """ประกอบตาราง Splits ด้วยโค้ดจริงของ dashboard แล้วคืน (DataFrame, cfg)"""
+    fmt_pace = extract_helper("fmt_pace")
+    ns = {
+        "st": _FakeStreamlitTable,
+        "pd": pd,
+        "splits": splits,
+        "dist_km": (splits["distance_m"] / 1000).round(2),
+        "pace_txt": [fmt_pace(p) for p in splits["avg_pace_min_km"]],
+        "fmt_pace": fmt_pace,
+        "fmt_sec": extract_helper("fmt_sec"),
+    }
+    exec(compile(extract_split_table_block(), "dashboard.py", "exec"), ns)
+    return pd.DataFrame(ns["table_data"]), ns["cfg"]
+
+
 def extract_prep_block():
     """โค้ดที่แท็บ Splits ทำกับ splits ระหว่าง load_splits() กับ `if splits.empty:`
 
@@ -164,6 +213,58 @@ class ShortSplitDisplayTests(unittest.TestCase):
         # กิจกรรมที่ยังไม่ถูกดึง splits จริง ๆ = แถวว่าง → ข้อความ "ยังไม่ได้ดึง" ถูกต้อง
         splits = run_splits_tab(self.load_splits(self.ACTIVITY_ID + 1))
         self.assertTrue(splits.empty)
+
+
+class SplitLapTimeTests(unittest.TestCase):
+    """ตาราง Splits ต้องบอกเวลาต่อรอบ — เซสชัน interval อ่านจากเพซอย่างเดียวไม่ได้
+
+    ของจริง (Tong activity 23885677442): เที่ยววิ่ง ~19–21 วิ สลับเที่ยวพัก ~45–53 วิ
+    แต่ตารางแสดงเพซ 3:47 สลับ 14:40 ซึ่งบอกไม่ได้ว่ารักษาเที่ยวได้ไหม
+    ขณะที่ `fact_activity_split.duration_sec` มีค่าครบทุกแถวใน DB อยู่แล้ว
+    """
+
+    def make_splits(self):
+        rows = ShortSplitDisplayTests.TONG_SPLITS
+        return pd.DataFrame({
+            "split_num": [row[0] for row in rows],
+            "distance_m": [row[1] for row in rows],
+            "duration_sec": [row[2] for row in rows],
+            "avg_hr": [row[3] for row in rows],
+            "avg_cadence": [row[4] for row in rows],
+            "avg_pace_min_km": [row[5] for row in rows],
+            "max_hr": [None] * len(rows),
+            "elevation_gain_m": [0.0] * len(rows),
+        })
+
+    def test_each_lap_shows_the_time_the_watch_recorded(self):
+        table, _ = build_split_table(self.make_splits())
+
+        self.assertIn("เวลา", table.columns, "ตาราง Splits ไม่มีคอลัมน์เวลาต่อรอบ")
+        # เวลาจริงจาก Garmin ของ 6 เที่ยววิ่ง (รอบคี่) ปัดเป็นวินาทีเต็มตามรูปแบบ M:SS
+        self.assertEqual(
+            [table.loc[table["รอบที่"] == n, "เวลา"].iloc[0] for n in (1, 3, 5, 7, 9, 11)],
+            ["0:19", "0:21", "0:20", "0:19", "0:19", "0:21"],
+        )
+
+    def test_lap_without_pace_still_reports_its_time(self):
+        # ใน DB มี 54 แถวที่มี duration_sec แต่ Garmin ไม่ได้ให้ avg_pace_min_km
+        # ถ้าเวลาผูกกับเพซ รอบพวกนี้จะกลายเป็นแถวว่างทั้งที่นาฬิกาจับเวลาไว้แล้ว
+        splits = self.make_splits()
+        splits.loc[splits["split_num"] == 12, "avg_pace_min_km"] = None
+
+        table, _ = build_split_table(splits)
+        row = table[table["รอบที่"] == 12].iloc[0]
+
+        self.assertEqual(row["เพซ"], "–")
+        self.assertEqual(row["เวลา"], "0:07")
+
+    def test_time_is_read_before_pace_because_the_watch_measures_it_directly(self):
+        table, _ = build_split_table(self.make_splits())
+
+        self.assertEqual(
+            list(table.columns)[:4],
+            ["รอบที่", "ระยะ (km)", "เวลา", "เพซ"],
+        )
 
 
 class EqualDistanceHalfTests(unittest.TestCase):
