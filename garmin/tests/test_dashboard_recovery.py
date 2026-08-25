@@ -24,12 +24,21 @@ DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
 def extract_helpers(*names):
     tree = ast.parse(DASHBOARD_SRC)
     wanted = set(names)
-    nodes = [
-        node for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in wanted
-    ]
-    found = {node.name for node in nodes}
+    nodes = []
+    found = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted:
+            nodes.append(node)
+            found.add(node.name)
+        elif isinstance(node, ast.Assign):
+            # ค่าคงที่ระดับโมดูลที่ helper อ้างถึง (เช่น เกณฑ์ EF_*) ต้องมาด้วย
+            # ไม่งั้น helper จะ NameError ตอนถูกเรียกในเทส
+            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if targets & wanted:
+                nodes.append(node)
+                found |= targets & wanted
+            elif targets & {"EF_REST_PCT", "EF_WATCH_PCT", "EF_GAIN_PCT"}:
+                nodes.append(node)
     missing = wanted - found
     if missing:
         raise AssertionError(f"dashboard.py missing helper(s): {sorted(missing)}")
@@ -63,7 +72,7 @@ HELPERS = extract_helpers(
     "readiness_when",
     "wellness_quality_flags",
     "team_status",
-    "compute_acwr",
+    "compute_load_windows",
     "aggregate_pace_min_per_km",
     "usable_hr_zone_rows",
 )
@@ -283,18 +292,17 @@ class TrainingMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(pace, 5.8)
 
-    def test_acwr_counts_known_rest_days_before_the_first_recent_workload(self):
+    def test_load_windows_count_known_rest_days_before_the_first_recent_workload(self):
         end = date(2026, 8, 9)
         daily = pd.DataFrame({"date": [pd.Timestamp(end)], "value": [10.0]})
 
-        result = HELPERS["compute_acwr"](
+        result = HELPERS["compute_load_windows"](
             daily, end, history_start=end - datetime.timedelta(days=27)
         )
 
         self.assertEqual(len(result), 28)
         self.assertAlmostEqual(result.iloc[-1]["acute"], 10.0)
         self.assertAlmostEqual(result.iloc[-1]["chronic"], 2.5)
-        self.assertAlmostEqual(result.iloc[-1]["acwr"], 4.0)
 
     def test_zero_only_hr_zone_rows_are_not_treated_as_measurements(self):
         columns = [f"hr_zone{i}_sec" for i in range(1, 6)]
@@ -429,19 +437,24 @@ class FormattingAndVisibilityTests(unittest.TestCase):
             ("body_battery_high", "Body Battery สูงสุด"),
         ])
 
-    def test_team_cannot_be_green_when_acwr_or_core_wellness_is_missing(self):
+    def test_team_cannot_be_green_when_training_or_core_wellness_is_missing(self):
         status = HELPERS["team_status"](
             float("nan"), [], has_workload=True, wellness_core_count=0
         )
         self.assertEqual(status, "⚪ ข้อมูลไม่พอ")
 
         status = HELPERS["team_status"](
-            1.0, [], has_workload=True, wellness_core_count=2
+            0.0, [], has_workload=True, wellness_core_count=2
         )
         self.assertEqual(status, "⚪ ข้อมูลไม่พอ")
 
         status = HELPERS["team_status"](
-            1.0, [], has_workload=True, wellness_core_count=4
+            0.0, [], has_workload=False, wellness_core_count=4
+        )
+        self.assertEqual(status, "⚪ ข้อมูลไม่พอ")
+
+        status = HELPERS["team_status"](
+            0.0, [], has_workload=True, wellness_core_count=4
         )
         self.assertEqual(status, "🟢 พร้อมซ้อม")
 
@@ -620,9 +633,9 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
         self.assertIn("avg_pace_raw = aggregate_pace_min_per_km(runs_df)", DASHBOARD_SRC)
         self.assertIn("history_start=history_start", DASHBOARD_SRC)
         self.assertIn("zdf = usable_hr_zone_rows(activity_df, zone_cols)", DASHBOARD_SRC)
-        self.assertIn('acwr_valid = acwr_view.dropna(subset=["acwr"])', DASHBOARD_SRC)
+        self.assertIn('load_valid = load_view.dropna(subset=["acute"])', DASHBOARD_SRC)
         self.assertNotIn(
-            'acwr_df[(acwr_df["date"] >= pd.Timestamp(start_date)) & acwr_df["acwr"].notna()]',
+            'load_df[(load_df["date"] >= pd.Timestamp(start_date)) & load_df["acute"].notna()]',
             DASHBOARD_SRC,
         )
 

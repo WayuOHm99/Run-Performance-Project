@@ -297,31 +297,39 @@ class PersonalRecordRowTests(unittest.TestCase):
         )
 
 
-def extract_acwr_display():
+def extract_load_trend_display():
     tree = ast.parse(DASHBOARD_SRC)
     functions = [
         node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "acwr_display"
+        if isinstance(node, ast.FunctionDef) and node.name == "load_trend_display"
     ]
     namespace = {"pd": pd}
     exec(
         compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
         namespace,
     )
-    return namespace["acwr_display"]
+    return namespace["load_trend_display"]
 
 
-class AcwrDisplayTests(unittest.TestCase):
-    def test_acwr_states_which_base_it_was_calculated_from(self):
+class LoadTrendDisplayTests(unittest.TestCase):
+    def test_load_states_which_base_it_was_calculated_from(self):
         # ตารางทีมวางตัวเลขของทุกคนไว้คอลัมน์เดียว แต่ P'kao คิดจาก Garmin training_load
-        # ส่วน Tong/Dan คิดจากระยะวิ่ง — ตัวเลขเปล่า ๆ ชวนให้เทียบข้ามคนทั้งที่เทียบไม่ได้
-        acwr_display = extract_acwr_display()
-        self.assertEqual(acwr_display(1.41, "training_load"), "1.41 · โหลด Garmin")
-        self.assertEqual(acwr_display(0.83, "ระยะวิ่ง"), "0.83 · ระยะวิ่ง")
+        # ส่วน Tong/Dan คิดจากระยะวิ่ง — หน่วยที่ติดมาคือสิ่งที่กันไม่ให้เทียบข้ามคนโดยไม่รู้ตัว
+        load_trend_display = extract_load_trend_display()
+        self.assertEqual(
+            load_trend_display(711.0, 515.0, "training_load", "TL"),
+            "711 TL · +38% จากฐาน 28 วัน",
+        )
+        self.assertEqual(
+            load_trend_display(64.1, 54.3, "ระยะวิ่ง", "km"),
+            "64.1 km · +18% จากฐาน 28 วัน",
+        )
 
-    def test_missing_acwr_shows_a_dash_instead_of_a_base_it_never_used(self):
-        acwr_display = extract_acwr_display()
-        self.assertEqual(acwr_display(float("nan"), "ระยะวิ่ง"), "–")
+    def test_missing_load_shows_a_dash_instead_of_a_base_it_never_used(self):
+        load_trend_display = extract_load_trend_display()
+        self.assertEqual(
+            load_trend_display(float("nan"), float("nan"), "ระยะวิ่ง", "km"), "–"
+        )
 
 
 class ChartGapPolicyTests(unittest.TestCase):
