@@ -171,14 +171,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- PLOTLY DEFAULT TEMPLATE ---
-# ธีมสว่าง: พื้น transparent (โชว์พื้นขาวของหน้า) + ฟอนต์สีเข้ม อ่านได้ทั้งบนจอและตอนพิมพ์
-_print_friendly = pio.templates["plotly"]
-_print_friendly.layout.paper_bgcolor = "rgba(0,0,0,0)"
-_print_friendly.layout.plot_bgcolor = "rgba(0,0,0,0)"
-_print_friendly.layout.font = dict(color="#31333F")  # เทาเข้ม (ตรงกับ text ธีม light ของ Streamlit)
-pio.templates.default = _print_friendly
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("GARMIN_DATA_DIR", PROJECT_ROOT / "data"))
 DB_PATH = DATA_DIR / "garmin.db"
@@ -229,12 +221,61 @@ C_CRIT = "#d03b3b"
 C_NEUTRAL = "#c3c9d2"  # เทาอมฟ้าอ่อน — เห็นได้บนพื้นขาว
 C_BLUE = "#2a78d6"   # เส้นข้อมูลหลัก
 C_SECOND = "#eb6834" # เส้นที่สองในกราฟเดียวกัน (ตรวจ CVD แล้ว ΔE 24.7 จาก C_BLUE)
-C_RED = "#e34948"    # เส้น HR
-C_GREEN = "#008300"  # โดนัท: เบา
-C_AMBER = "#eda100"  # โดนัท: กลาง
+
+C_CONTEXT = "#8a8d94"  # เส้นฐาน เส้นตาราง วันพัก — บริบทต้องถอยไปข้างหลัง (กฎกราฟ 04)
+
+# กฎกราฟ 02: ค่าที่มีลำดับใช้สีเดียวไล่อ่อน→เข้ม ไม่ใช่รุ้ง — เขียว-เหลือง-แดงทำให้ "เบา"
+# อ่านว่าดี และ "หนัก" อ่านว่าอันตราย ทั้งที่เป็นแค่ระดับความหนัก ไม่ใช่คำตัดสิน
+# และมันยังไปชนสีสถานะซึ่งจองไว้ให้สถานะอย่างเดียว (กฎกราฟ 03)
+BLUE_RAMP_3 = ["#cde2fb", C_BLUE, "#104281"]
+BLUE_RAMP_5 = ["#cde2fb", "#86b6ef", C_BLUE, "#1a5aa8", "#104281"]
 
 INTENSITY_ORDER = ["เบา (Z1–2)", "กลาง (Z3)", "หนัก (Z4–5)"]
-INTENSITY_COLORS = {"เบา (Z1–2)": C_GREEN, "กลาง (Z3)": C_AMBER, "หนัก (Z4–5)": C_RED}
+INTENSITY_COLORS = dict(zip(INTENSITY_ORDER, BLUE_RAMP_3))
+
+# กฎกราฟ 07: ค่าเดียวกันใช้สีเดียวกันทุกแท็บ — ตารางนี้คือที่เดียวที่ตัดสินว่าค่าไหนสีอะไร
+# เดิมแต่ละกราฟเลือกสีเอง ทำให้ HR เป็นแดงในกราฟหนึ่ง แต่ Readiness เป็นเขียวในอีกกราฟ
+# ทั้งที่ทั้งคู่ไม่ใช่สถานะ · หลักที่ใช้: หัวเรื่องของกราฟ = น้ำเงิน · ค่าที่สอง = ส้ม ·
+# เส้นฐาน/ค่าเฉลี่ยเคลื่อนที่ = เทา
+SERIES_COLORS = {
+    "sleep_score": C_BLUE,
+    "body_battery_high": C_SECOND,
+    "stress_avg": C_SECOND,
+    "training_readiness": C_BLUE,
+    "resting_hr": C_SECOND,
+    "hrv_last_night": C_BLUE,
+    "hrv_weekly_avg": C_CONTEXT,
+    "avg_sleep_respiration": C_BLUE,
+    "avg_waking_respiration": C_SECOND,
+    "recovery_time": C_BLUE,
+    "avg_hr": C_SECOND,
+    "avg_pace_min_per_km": C_BLUE,
+    "avg_cadence": C_BLUE,
+    "avg_power": C_SECOND,
+    "elevation_gain_m": C_CONTEXT,
+    "distance_km": C_BLUE,
+    "vo2max_trend": C_BLUE,
+    "time_5k_sec": C_BLUE,
+    "time_10k_sec": C_SECOND,
+}
+
+# --- PLOTLY DEFAULT TEMPLATE ---
+# ธีมสว่าง: พื้น transparent (โชว์พื้นขาวของหน้า) + ฟอนต์สีเข้ม อ่านได้ทั้งบนจอและตอนพิมพ์
+# ต้องอยู่หลังค่าคงที่สี เพราะ colorway ใช้ token เดียวกับที่กราฟใช้ — ระบบดีไซน์อยู่ที่นี่
+# ที่เดียว กราฟไหนไม่ได้ตั้งสีเองจะได้ลำดับนี้แทนสีเริ่มต้นสิบสีของ plotly
+_print_friendly = pio.templates["plotly"]
+_print_friendly.layout.paper_bgcolor = "rgba(0,0,0,0)"
+_print_friendly.layout.plot_bgcolor = "rgba(0,0,0,0)"
+_print_friendly.layout.font = dict(
+    color="#31333F",  # เทาเข้ม (ตรงกับ text ธีม light ของ Streamlit)
+    family="'IBM Plex Sans Thai', 'IBM Plex Sans', sans-serif",
+)
+_print_friendly.layout.colorway = [C_BLUE, C_SECOND, "#104281", "#86b6ef", C_CONTEXT]
+for _axis in (_print_friendly.layout.xaxis, _print_friendly.layout.yaxis):
+    _axis.gridcolor = "#e4e1da"   # เท่ากับ borderColor ใน .streamlit/config.toml
+    _axis.linecolor = "#e4e1da"
+    _axis.zerolinecolor = "#e4e1da"
+pio.templates.default = _print_friendly
 
 
 # --- HELPERS ---
@@ -620,7 +661,7 @@ def mark_partial_today(fig, today_date, period_start, period_end):
         x_value = datetime.datetime.combine(today_date, datetime.time.min)
         fig.add_shape(
             type="line", x0=x_value, x1=x_value, y0=0, y1=1,
-            xref="x", yref="paper", line=dict(color="#7a7f87", dash="dot", width=1),
+            xref="x", yref="paper", line=dict(color=C_CONTEXT, dash="dot", width=1),
         )
         fig.add_annotation(
             x=x_value, y=1, xref="x", yref="paper", text="วันนี้ · ยังไม่ครบวัน",
@@ -2770,12 +2811,11 @@ with tab_health:
         })
         if health_series:
             fig_health = go.Figure()
-            health_colors = {"sleep_score": C_BLUE, "body_battery_high": C_GREEN}
             for column, label in health_series:
                 fig_health.add_trace(go.Scatter(
                     x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                     mode="lines+markers", name=label, connectgaps=False,
-                    line=dict(color=health_colors[column]),
+                    line=dict(color=SERIES_COLORS[column]),
                     hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
                 ))
             fig_health.update_layout(
@@ -2802,7 +2842,7 @@ with tab_health:
                 fig_stress.add_trace(go.Scatter(
                     x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                     mode="lines+markers", name=label, connectgaps=False,
-                    line=dict(color=C_GREEN if secondary else C_RED),
+                    line=dict(color=SERIES_COLORS[column]),
                     hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
                 ), secondary_y=secondary)
             fig_stress.update_layout(
@@ -2837,11 +2877,11 @@ with tab_health:
             fig_hrv = make_subplots(specs=[[{"secondary_y": True}]])
             for column, label in rhr_hrv_series:
                 secondary = column != "resting_hr"
-                color = C_RED if column == "resting_hr" else (C_BLUE if column == "hrv_last_night" else C_GREEN)
                 fig_hrv.add_trace(go.Scatter(
                     x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                     mode="lines+markers", name=label, connectgaps=False,
-                    line=dict(color=color, dash="dot" if column == "hrv_weekly_avg" else "solid"),
+                    line=dict(color=SERIES_COLORS[column],
+                              dash="dot" if column == "hrv_weekly_avg" else "solid"),
                     hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
                 ), secondary_y=secondary)
             fig_hrv.update_layout(
@@ -2967,7 +3007,7 @@ with tab_health:
                 fig_ready = go.Figure(go.Scatter(
                     x=wellness_plot_df["calendar_date"], y=wellness_plot_df["training_readiness"],
                     mode="lines+markers", name="Training Readiness", connectgaps=False,
-                    line=dict(color=C_GREEN),
+                    line=dict(color=SERIES_COLORS["training_readiness"]),
                     hovertemplate="%{x|%d %b}<br>Readiness: %{y:.0f}<extra></extra>",
                 ))
                 fig_ready.add_hrect(y0=0, y1=50, fillcolor=C_CRIT, opacity=0.08, line_width=0)
@@ -2990,7 +3030,7 @@ with tab_health:
                     y=recovery_minutes / 60,
                     customdata=recovery_labels,
                     mode="lines+markers", name="Recovery Time", connectgaps=False,
-                    line=dict(color=C_AMBER),
+                    line=dict(color=SERIES_COLORS["recovery_time"]),
                     hovertemplate="%{x|%d %b}<br>Recovery Time: %{customdata}<extra></extra>",
                 ))
                 fig_recovery.update_layout(
@@ -3220,7 +3260,7 @@ with tab_train:
             )
         else:
             emoji, txt = efficiency_status(ef_pct_tab)
-            baseline_median = ef_all[
+            ef_baseline_median = ef_all[
                 ef_all["date"] < ef_all["date"].iloc[-1]
             ].tail(20)["ef"].median()
             with st.container(horizontal=True):
@@ -3238,11 +3278,11 @@ with tab_train:
                 connectgaps=False,
                 hovertemplate="%{x|%d %b}<br>EF %{y:.3f}<extra></extra>",
             ))
-            if pd.notna(baseline_median):
+            if pd.notna(ef_baseline_median):
                 fig_ef.add_trace(go.Scatter(
                     x=ef_view["date"],
-                    y=[baseline_median] * len(ef_view),
-                    mode="lines", line=dict(color=C_SECOND, width=2, dash="dash"),
+                    y=[ef_baseline_median] * len(ef_view),
+                    mode="lines", line=dict(color=C_CONTEXT, width=2, dash="dash"),
                     name="ฐานของตัวเอง",
                     hovertemplate="ฐาน %{y:.3f}<extra></extra>",
                 ))
@@ -3300,7 +3340,7 @@ with tab_train:
             ))
             fig_load.add_trace(go.Scatter(
                 x=load_view["date"], y=load_view["chronic"], mode="lines",
-                line=dict(color=C_SECOND, width=2, dash="dash"),
+                line=dict(color=C_CONTEXT, width=2, dash="dash"),
                 name=f"ฐาน 28 วัน ({wl_unit}/สัปดาห์)", connectgaps=False,
                 hovertemplate="%{x|%d %b}<br>ฐาน %{y:,.1f}<extra></extra>",
             ))
@@ -3403,7 +3443,7 @@ with tab_train:
         fig_dist = px.bar(activity_df, x="start_time_local", y="distance_km",
                           title="ระยะทางของแต่ละกิจกรรม",
                           labels={"distance_km": "ระยะทาง (km)", "start_time_local": "วันที่และเวลา"})
-        fig_dist.update_traces(marker_color="rgb(55, 83, 109)")
+        fig_dist.update_traces(marker_color=SERIES_COLORS["distance_km"])
         st.plotly_chart(fig_dist, width="stretch")
 
         # ขนาดวงกลม = ความหนัก: ใช้ training_load ถ้านาฬิกาให้ ไม่งั้น Training Effect aerobic (ทุกคนมีครบ)
@@ -3562,7 +3602,8 @@ with tab_progress:
                           delta=(f"{delta_s:+.0f} วิ เทียบต้นช่วง" if pd.notna(delta_s) else None),
                           delta_color="inverse", border=True)  # เวลาลด = ดีขึ้น (เขียว)
         fig_pred = go.Figure()
-        for col, label, color in [("time_5k_sec", "5K", C_BLUE), ("time_10k_sec", "10K", C_GREEN)]:
+        for col, label, color in [("time_5k_sec", "5K", SERIES_COLORS["time_5k_sec"]),
+                                 ("time_10k_sec", "10K", SERIES_COLORS["time_10k_sec"])]:
             if preds[col].notna().any():
                 fig_pred.add_trace(go.Scatter(
                     x=preds["calendar_date"], y=preds[col], mode="lines", name=label,
@@ -3846,7 +3887,7 @@ with tab_splits:
                     zbar = pd.DataFrame({"โซน": ["Z1", "Z2", "Z3", "Z4", "Z5"], "นาที": zvals})
                     fig_z = px.bar(zbar, x="โซน", y="นาที", color="โซน",
                                    title="เวลาในโซน HR ของเซสชันนี้ (นาที)",
-                                   color_discrete_sequence=[C_GREEN, "#7ac043", C_AMBER, "#e8743b", C_RED])
+                                   color_discrete_sequence=BLUE_RAMP_5)
                     fig_z.update_layout(showlegend=False)
                     st.plotly_chart(fig_z, width="stretch")
 
@@ -3904,7 +3945,8 @@ with tab_splits:
                 if splits["avg_hr"].notna().any():
                     fig_sp.add_trace(go.Scatter(
                         x=x_labels, y=splits["avg_hr"], mode="lines+markers",
-                        line=dict(color=C_RED, width=2), marker=dict(size=8), name="HR เฉลี่ย",
+                        line=dict(color=SERIES_COLORS["avg_hr"], width=2),
+                        marker=dict(size=8), name="HR เฉลี่ย",
                         hovertemplate="รอบที่ %{x}<br>HR %{y:.0f} bpm<extra></extra>",
                     ), row=2, col=1)
 
@@ -3925,11 +3967,11 @@ with tab_splits:
                 # --- กราฟ Cadence + Power + Elevation ราย Split ---
                 extra_rows = []
                 if splits["avg_cadence"].notna().any():
-                    extra_rows.append(("avg_cadence", "Cadence (spm)", C_GREEN))
+                    extra_rows.append(("avg_cadence", "Cadence (spm)", SERIES_COLORS["avg_cadence"]))
                 if "avg_power" in splits and splits["avg_power"].notna().any():
-                    extra_rows.append(("avg_power", "Power (W)", C_BLUE))
+                    extra_rows.append(("avg_power", "Power (W)", SERIES_COLORS["avg_power"]))
                 if splits["elevation_gain_m"].notna().any():
-                    extra_rows.append(("elevation_gain_m", "Elevation Gain (m)", C_AMBER))
+                    extra_rows.append(("elevation_gain_m", "Elevation Gain (m)", SERIES_COLORS["elevation_gain_m"]))
 
                 if extra_rows:
                     fig_extra = make_subplots(
