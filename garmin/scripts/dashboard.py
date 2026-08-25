@@ -899,7 +899,7 @@ def status_shape_svg(key, size=12):
 
 TEAM_CARD_CSS = """
 <style>
-.team-card { display: grid; grid-template-columns: 250px minmax(0, 1fr) 430px;
+.team-card { display: grid; grid-template-columns: 232px minmax(0, 1fr) 500px;
   border: 1px solid #e4e1da; border-left-width: 4px; border-radius: 2px;
   background: #ffffff; margin-bottom: 10px; }
 .team-card > div { padding: 14px 18px; }
@@ -915,8 +915,8 @@ TEAM_CARD_CSS = """
 .team-card__chip { display: inline-flex; align-items: center; gap: 6px;
   padding: 3px 9px; border-radius: 2px; font-size: 12px; font-weight: 500; }
 .team-card__load { font-size: 12px; color: #55585f; margin-top: 9px; }
-.team-card__nums { display: grid; grid-template-columns: 138px repeat(3, minmax(0, 1fr));
-  gap: 12px; }
+.team-card__nums { display: grid; grid-template-columns: 132px repeat(4, minmax(0, 1fr));
+  gap: 10px; }
 .team-card__sub { flex-wrap: wrap; }
 .team-card__val { font-size: 21px; font-weight: 600; line-height: 1.2;
   font-variant-numeric: tabular-nums; }
@@ -974,6 +974,9 @@ def render_team_card(row):
         ("ประสิทธิภาพวิ่งเบา", esc(ef_value),
          f'{status_shape_svg(ef_key, 10)}'
          f'<span style="color:{ef_color}">{esc(ef_label)}</span>{ef_note}'),
+        # BB อยู่ในชุดเดียวกับอีก 3 ค่าที่ตัดสินว่าเขียวได้ไหม และเป็นเงื่อนไขธง BB<40
+        # ด้วย — โชว์วันที่ในบรรทัดความสดแต่ไม่โชว์ค่า ทำให้อ่านเหมือนลืม ไม่เหมือนเลือก
+        ("BODY BAT.", _num_text(row.get("Body Battery ตอนนี้/ล่าสุด")), ""),
         ("SLEEP", _num_text(row.get("Sleep")), ""),
         ("RHR", _num_text(row.get("RHR")),
          f'<span style="color:#55585f">{esc(str(row.get("ΔRHR") or "–"))}</span>'),

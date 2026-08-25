@@ -126,6 +126,7 @@ class CardMarkupTests(unittest.TestCase):
         "RHR": 41.0,
         "ΔRHR": "-5",
         "HRV คืนล่าสุด": "123 ms · UNBALANCED",
+        "Body Battery ตอนนี้/ล่าสุด": 89.0,
         "ความสดรายค่า": "BB 25/08 · Sleep 25/08",
         "ธงเฝ้าระวัง": "HRV UNBALANCED",
     }
@@ -152,6 +153,15 @@ class CardMarkupTests(unittest.TestCase):
         markup = HELPERS["render_team_card"](row)
         self.assertNotIn("<script>", markup)
         self.assertIn("&lt;script&gt;", markup)
+
+    def test_every_core_freshness_value_the_status_depends_on_is_shown(self):
+        # BB, Sleep, RHR, HRV คือ 4 ค่าที่นับเป็น fresh_core_count ซึ่งตัดสินว่าเขียวได้ไหม
+        # และ BB<40 ยังเป็นเงื่อนไขธง — โชว์วันที่ของมันในบรรทัดความสดแต่ไม่โชว์ค่า
+        # ทำให้อ่านเหมือนลืม ไม่เหมือนเลือก
+        markup = HELPERS["render_team_card"](dict(self.ROW))
+        for label in ("BODY BAT.", "SLEEP", "RHR", "HRV"):
+            self.assertIn(label, markup, f"การ์ดไม่ได้แสดง {label}")
+        self.assertIn(">89<", markup, "ค่า Body Battery ไม่ได้ขึ้นบนการ์ด")
 
     def test_blank_efficiency_says_why_instead_of_reading_like_a_broken_sync(self):
         # เคสจริงของ P'kao: ซ้อม cross-training เป็นหลัก จึงแทบไม่มีรัน easy ให้คำนวณ
