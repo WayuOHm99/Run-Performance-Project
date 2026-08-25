@@ -55,6 +55,7 @@ HELPERS = extract_helpers(
     "efficiency_factor",
     "easy_run_efficiency",
     "efficiency_change_pct",
+    "efficiency_recent_value",
     "efficiency_status",
     "efficiency_display",
     "load_trend_display",
@@ -167,6 +168,41 @@ class EfficiencyChangeTests(unittest.TestCase):
         )
 
         self.assertTrue(pd.isna(pct))
+
+
+class EfficiencyRecentValueTests(unittest.TestCase):
+    """ตัวเลข EF ที่โชว์ต้องผ่านเกณฑ์ 'ตอนนี้' เดียวกับที่ใช้ตัดสิน
+
+    พี่เก้ามีรัน easy 3 ครั้งล่าสุดห่างกัน 16 วัน (26/07 · 29/07 · 11/08) — median
+    ของสามค่านั้นคำนวณได้ก็จริง แต่ `efficiency_change_pct` ตัดสินแล้วว่าไม่ใช่
+    ความสดปัจจุบัน แท็บซ้อมจึงต้องไม่โชว์ตัวเลขนั้นคู่กับป้าย "ข้อมูลไม่พอ"
+    """
+
+    @staticmethod
+    def _series(pairs):
+        return pd.DataFrame(
+            [{"date": pd.Timestamp(day), "ef": ef} for day, ef in pairs]
+        )
+
+    def test_recent_value_is_shown_when_the_three_runs_count_as_current(self):
+        rows = [(f"2026-07-{day:02d}", 1.00) for day in (10, 12, 14, 16, 18)]
+        rows += [("2026-08-01", 0.90), ("2026-08-03", 0.90), ("2026-08-05", 0.90)]
+
+        value = HELPERS["efficiency_recent_value"](
+            self._series(rows), today=datetime.date(2026, 8, 6)
+        )
+
+        self.assertAlmostEqual(value, 0.90, places=6)
+
+    def test_recent_value_is_withheld_when_the_change_cannot_be_trusted(self):
+        rows = [(f"2026-07-{day:02d}", 1.00) for day in (10, 12, 14, 16, 18)]
+        rows += [("2026-07-26", 1.07), ("2026-07-29", 0.93), ("2026-08-11", 1.09)]
+
+        value = HELPERS["efficiency_recent_value"](
+            self._series(rows), today=datetime.date(2026, 8, 25)
+        )
+
+        self.assertTrue(pd.isna(value))
 
 
 class EfficiencyStatusTests(unittest.TestCase):
