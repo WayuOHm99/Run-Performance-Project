@@ -114,6 +114,12 @@ st.markdown("""
         widows: 3;
     }
 
+    /* ปุ่มบนกระดาษกดไม่ได้ — พิมพ์ออกมาเป็นกล่องเทาที่ไม่ได้ทำอะไร กินที่เปล่า ๆ
+       (ตั้งแต่มีปุ่ม "ดูรายละเอียดของ X" ใต้การ์ดทุกใบบนแท็บทีม) */
+    [data-testid="stButton"] {
+        display: none !important;
+    }
+
     /* รักษาแถว KPI เป็นหนึ่งชุด และย้ายกราฟทั้งก้อนไปหน้าใหม่เมื่อพื้นที่ไม่พอ */
     [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]),
     .stPlotlyChart,

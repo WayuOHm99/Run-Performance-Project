@@ -273,6 +273,13 @@ class CardIsADoorTests(unittest.TestCase):
         self.assertTrue("key=ATHLETE_STATE_KEY" in DASHBOARD_SRC,
                         "selectbox ไม่ได้ใช้คีย์เดียวกับที่ focus_athlete เขียนลงไป")
 
+    def test_buttons_do_not_print(self):
+        # โปรเจกต์ล็อกธีมสว่างไว้เพื่อให้พิมพ์ A4 ได้ — ปุ่มบนกระดาษกดไม่ได้
+        # พิมพ์ออกมาเป็นกล่องเทาใต้การ์ดทุกใบ กินที่เปล่า ๆ
+        print_css = DASHBOARD_SRC.split("@media print {", 1)[1]
+        self.assertTrue('[data-testid="stButton"]' in print_css,
+                        "ปุ่มยังไม่ถูกซ่อนตอนพิมพ์")
+
     def test_every_card_gets_its_own_button(self):
         team_tab = team_tab_source()
         self.assertTrue("on_click=focus_athlete" in team_tab,
