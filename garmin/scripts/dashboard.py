@@ -1,4 +1,5 @@
 import datetime
+import html
 import math
 import os
 import sqlite3
@@ -836,6 +837,176 @@ def team_status(efficiency_pct, flags, has_workload, wellness_core_count,
     if not has_workload or wellness_core_count < 3:
         return "⚪ ข้อมูลไม่พอ"
     return "🟢 พร้อมซ้อม"
+
+
+# team_status() คืนสตริงเดียว "อีโมจิ + ข้อความ" เพราะแท็บ "วันนี้" ยังใช้รูปแบบนั้นอยู่
+# การ์ดบนแท็บทีมต้องการรูปทรงวาดแทนอีโมจิ (อีโมจิเรนเดอร์ไม่เหมือนกันข้ามเครื่องและ
+# หายตอนพิมพ์ขาวดำ) จึงแยกออกเป็น (คีย์, ข้อความ) ที่นี่ที่เดียว แทนการ parse ซ้ำหลายที่
+STATUS_SHAPES = {"🔴": "rest", "🟡": "watch", "🟢": "ready",
+                 "🔵": "gain", "⚪": "unknown"}
+
+
+def status_parts(status):
+    """แยก "🔴 ต้องพัก/ลดโหลด" เป็น ("rest", "ต้องพัก/ลดโหลด")"""
+    text = str(status or "").strip()
+    for emoji, key in STATUS_SHAPES.items():
+        if text.startswith(emoji):
+            return key, text[len(emoji):].strip()
+    return "unknown", text
+
+
+# ลำดับการ์ดบนแท็บทีม — "ข้อมูลไม่พอ" มาก่อน "พร้อมซ้อม" เพราะช่องว่างของหลักฐาน
+# ต้องถูกเห็น ไม่ใช่ถูกกลบไว้ท้ายรายการหลังคนที่ไม่มีอะไรต้องทำ
+TEAM_URGENCY_ORDER = ("rest", "watch", "unknown", "ready")
+
+
+def team_urgency_rank(status):
+    """ลำดับความเร่งด่วนของสถานะ — คนที่ต้องตัดสินใจก่อนได้เลขน้อยสุด"""
+    key, _ = status_parts(status)
+    if key in TEAM_URGENCY_ORDER:
+        return TEAM_URGENCY_ORDER.index(key)
+    return len(TEAM_URGENCY_ORDER)
+
+
+STATUS_COLORS = {"rest": C_CRIT, "watch": C_WARN, "ready": C_GOOD,
+                 "gain": C_BLUE, "unknown": "#8a8d94"}
+# ข้อความสีสำหรับตัวหนังสือ — สีจุดสถานะบางตัวจางเกินจะอ่านเป็นตัวอักษรบนพื้นขาว
+STATUS_TEXT_COLORS = {"rest": C_CRIT, "watch": "#8a5b00", "ready": "#006300",
+                      "gain": "#184f95", "unknown": "#55585f"}
+
+
+def status_shape_svg(key, size=12):
+    """รูปทรงประจำสถานะแทนอีโมจิ — วงกลม/สี่เหลี่ยม/สามเหลี่ยม/วงว่าง
+
+    อีโมจิเรนเดอร์ไม่เหมือนกันข้ามเครื่องและหายตอนพิมพ์ขาวดำ ซึ่งเป็นเหตุผลเดียวกับที่
+    dashboard ล็อกธีมสว่างไว้ (ดู .streamlit/config.toml) — รูปทรงวาดอ่านได้ทั้งบนจอ
+    บนกระดาษขาวดำ และแยกออกโดยไม่ต้องพึ่งสีสำหรับคนตาบอดสี
+    """
+    color = STATUS_COLORS.get(key, STATUS_COLORS["unknown"])
+    if key == "rest":
+        box, body = "0 0 12 11", f'<path d="M6 0 L12 11 L0 11 Z" fill="{color}"/>'
+    elif key == "watch":
+        box, body = "0 0 11 11", f'<rect width="11" height="11" fill="{color}"/>'
+    elif key == "unknown":
+        box = "0 0 11 11"
+        body = (f'<circle cx="5.5" cy="5.5" r="4.7" fill="none" '
+                f'stroke="{color}" stroke-width="1.6"/>')
+    else:
+        box, body = "0 0 11 11", f'<circle cx="5.5" cy="5.5" r="5.5" fill="{color}"/>'
+    return (f'<svg width="{size}" height="{size}" viewBox="{box}" aria-hidden="true"'
+            f' style="flex-shrink:0">{body}</svg>')
+
+
+TEAM_CARD_CSS = """
+<style>
+.team-card { display: grid; grid-template-columns: 250px minmax(0, 1fr) 430px;
+  border: 1px solid #e4e1da; border-left-width: 4px; border-radius: 2px;
+  background: #ffffff; margin-bottom: 10px; }
+.team-card > div { padding: 14px 18px; }
+.team-card__flags, .team-card__nums { border-left: 1px solid #f4f2ee; }
+.team-card__who { display: flex; flex-direction: column; gap: 5px; }
+.team-card__head { display: flex; align-items: center; gap: 9px; }
+.team-card__name { font-size: 19px; font-weight: 700; }
+.team-card__status { font-size: 14px; font-weight: 600; }
+.team-card__fresh { font-size: 11px; color: #8a8d94; line-height: 1.45; }
+.team-card__lbl { font-size: 11px; letter-spacing: .06em; color: #8a8d94;
+  font-weight: 500; margin-bottom: 7px; }
+.team-card__chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.team-card__chip { display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 2px; font-size: 12px; font-weight: 500; }
+.team-card__load { font-size: 12px; color: #55585f; margin-top: 9px; }
+.team-card__nums { display: grid; grid-template-columns: 138px repeat(3, minmax(0, 1fr));
+  gap: 12px; }
+.team-card__sub { flex-wrap: wrap; }
+.team-card__val { font-size: 21px; font-weight: 600; line-height: 1.2;
+  font-variant-numeric: tabular-nums; }
+.team-card__sub { display: flex; align-items: center; gap: 5px; font-size: 12px;
+  margin-top: 2px; }
+/* การ์ดต้องไม่ถูกหั่นกลางใบตอนพิมพ์ A4 — ครึ่งใบอ่านไม่ได้ความ */
+@media print { .team-card { break-inside: avoid; page-break-inside: avoid; } }
+</style>
+"""
+
+
+def _num_text(value, digits=0):
+    return "–" if value is None or pd.isna(value) else f"{value:.{digits}f}"
+
+
+def render_team_card(row):
+    """การ์ดหนึ่งใบต่อนักกีฬาหนึ่งคน แทนหนึ่งแถวของตารางสรุปเดิม
+
+    อ่านจาก dict เดียวกับที่ team_df ใช้ — ห้ามเปลี่ยนชื่อคีย์ เพราะแท็บ "วันนี้"
+    อ่าน team_df ต่อจากที่นี่ (team_row["สถานะ"], ["โซน EF"], ["โหลด 7 วัน"] ฯลฯ)
+    """
+    esc = html.escape
+    key, label = status_parts(row["สถานะ"])
+    color = STATUS_COLORS.get(key, STATUS_COLORS["unknown"])
+    text_color = STATUS_TEXT_COLORS.get(key, STATUS_TEXT_COLORS["unknown"])
+
+    raw_flags = str(row.get("ธงเฝ้าระวัง") or "").strip()
+    flags = [part.strip() for part in raw_flags.split("|")
+             if part.strip() and part.strip() != "—"]
+    if flags:
+        flag_label = f"ธงเฝ้าระวัง {len(flags)} ข้อ"
+        chips = "".join(
+            f'<span class="team-card__chip" style="border:1px solid {color};'
+            f'color:{text_color}">{status_shape_svg(key, 9)}{esc(flag)}</span>'
+            for flag in flags
+        )
+    else:
+        flag_label = "ธงเฝ้าระวัง"
+        chips = '<div style="font-size:14px;color:#55585f">ไม่มี</div>'
+
+    ef_key, ef_label = status_parts(row.get("โซน EF") or "")
+    ef_color = STATUS_TEXT_COLORS.get(ef_key, STATUS_TEXT_COLORS["unknown"])
+
+    hrv_raw = str(row.get("HRV คืนล่าสุด") or "–")
+    hrv_val, _, hrv_note = hrv_raw.partition(" · ")
+    hrv_color = {"LOW": C_CRIT, "UNBALANCED": "#8a5b00"}.get(hrv_note, "#006300")
+
+    # ค่าว่างของ EF ต้องบอกเหตุผลตรงจุดที่มันว่าง ไม่งั้นโค้ชอ่านว่า sync พังแล้วไปไล่
+    # แก้ระบบที่ไม่ได้เสีย — ข้อความนี้โผล่เฉพาะตอนสรุปไม่ได้ ไม่ใช่คำอธิบายที่เห็นตลอด
+    ef_value = str(row.get("ประสิทธิภาพการวิ่งเบา (EF)") or "–")
+    ef_note = (' <span style="color:#8a8d94">— ต้องมีรัน easy 3 ครั้งภายใน 14 วัน '
+               'ไม่ใช่ระบบขัดข้อง</span>') if ef_value.strip() in ("–", "-", "") else ""
+
+    cells = [
+        ("ประสิทธิภาพวิ่งเบา", esc(ef_value),
+         f'{status_shape_svg(ef_key, 10)}'
+         f'<span style="color:{ef_color}">{esc(ef_label)}</span>{ef_note}'),
+        ("SLEEP", _num_text(row.get("Sleep")), ""),
+        ("RHR", _num_text(row.get("RHR")),
+         f'<span style="color:#55585f">{esc(str(row.get("ΔRHR") or "–"))}</span>'),
+        ("HRV", esc(hrv_val),
+         f'<span style="color:{hrv_color}">{esc(hrv_note)}</span>' if hrv_note else ""),
+    ]
+    numbers = "".join(
+        f'<div><div class="team-card__lbl" style="margin-bottom:2px">{esc(title)}</div>'
+        f'<div class="team-card__val">{value}</div>'
+        + (f'<div class="team-card__sub">{sub}</div>' if sub else "")
+        + "</div>"
+        for title, value, sub in cells
+    )
+
+    return (
+        f'<div class="team-card" style="border-left-color:{color}">'
+        f'<div class="team-card__who">'
+        f'<div class="team-card__head">{status_shape_svg(key, 13)}'
+        f'<span class="team-card__name">{esc(str(row["นักกีฬา"]))}</span></div>'
+        f'<div class="team-card__status" style="color:{text_color}">{esc(label)}</div>'
+        f'<div class="team-card__fresh">{esc(str(row.get("ความสดรายค่า") or ""))}</div>'
+        f'</div>'
+        f'<div class="team-card__flags">'
+        f'<div class="team-card__lbl">{esc(flag_label)}</div>'
+        f'<div class="team-card__chips">{chips}</div>'
+        f'<div class="team-card__load">โหลด 7 วัน '
+        f'{esc(str(row.get("โหลด 7 วัน") or "–"))} · '
+        f'{esc(str(row.get("เซสชัน 7 วัน") or 0))} เซสชัน '
+        f'<span style="color:#8a8d94">— บริบท ไม่ได้ตัดสินสถานะ</span></div>'
+        f'</div>'
+        f'<div class="team-card__nums">{numbers}</div>'
+        f'</div>'
+    )
 
 
 def compute_load_windows(daily, end_date, history_start=None):
@@ -1786,39 +1957,13 @@ with tab_team:
         })
 
     team_df = pd.DataFrame(team_rows)
-    team_summary_columns = [
-        "นักกีฬา",
-        "สถานะ",
-        "ธงเฝ้าระวัง",
-        "ประสิทธิภาพการวิ่งเบา (EF)",
-        "โซน EF",
-        "โหลด 7 วัน",
-        "Body Battery ตอนนี้/ล่าสุด",
-        "Sleep",
-        "HRV คืนล่าสุด",
-        "ความสดรายค่า",
-    ]
-    st.dataframe(
-        team_df[team_summary_columns],
-        hide_index=True,
-        column_config={
-            "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-            "ประสิทธิภาพการวิ่งเบา (EF)": st.column_config.TextColumn(
-                "ประสิทธิภาพการวิ่งเบา (EF)",
-                help="ความเร็ว (ม./นาที) ÷ HR เฉลี่ย ในรัน easy — median 3 รันล่าสุด "
-                     "เทียบ median ฐาน 28 วันของตัวเอง วิ่งเร็วขึ้นที่หัวใจเท่าเดิม = สดขึ้น | "
-                     "'–' = ยังมีรัน easy ไม่พอ ต้องมี 3 ครั้งภายใน 14 วัน · ไม่ใช่ระบบขัดข้อง"),
-            "โหลด 7 วัน": st.column_config.TextColumn(
-                "โหลด 7 วัน",
-                help="ปริมาณที่ทำไปใน 7 วันและทิศทางเทียบฐาน 28 วัน — เป็นบริบท ไม่ใช่คำตัดสิน "
-                     "ฐานต่างกันเทียบข้ามคนไม่ได้"),
-            "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
-                "Body Battery ตอนนี้/ล่าสุด", format="%.0f",
-                help="วันนี้ = ระดับล่าสุดระหว่างวัน; ถ้าไม่มีของวันนี้ = high ของวันล่าสุด "
-                     "โดยวันที่จริงอยู่ในคอลัมน์ความสดรายค่า"),
-            "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
-        },
-    )
+
+    # การ์ดต่อคนแทนตารางสรุป 10 คอลัมน์ที่กว้างเกินจอ — คอลัมน์ท้าย ๆ เคยถูกมองข้าม
+    # ทั้งที่มีข้อมูล แค่ต้องเลื่อนดู. เรียงตามความเร่งด่วน เพราะคำถามแรกของเช้าคือ
+    # "ใครต้องดูก่อน" ไม่ใช่ "เรียงตามชื่อแล้วใครอยู่บนสุด"
+    st.markdown(TEAM_CARD_CSS, unsafe_allow_html=True)
+    for row in sorted(team_rows, key=lambda item: team_urgency_rank(item["สถานะ"])):
+        st.markdown(render_team_card(row), unsafe_allow_html=True)
 
     with st.expander("ดูตัวเลขทีมทั้งหมด", icon=":material/table_view:"):
         st.dataframe(
@@ -1838,11 +1983,6 @@ with tab_team:
                     help="สถานะที่ Garmin คำนวณเองและขึ้นกับรุ่นนาฬิกา"),
             },
         )
-
-    st.caption(
-        "Body Battery ระหว่างวันแสดงเพื่อให้เห็นสภาพล่าสุด แต่ยังไม่ใช้เป็นธงเตือน: "
-        "ค่าต่ำระหว่างวันอาจเกิดจากกิจกรรมตามปกติ; ระบบใช้ Body Battery high ของวันที่จบแล้วแทน"
-    )
 
     with st.expander("เกณฑ์ที่ใช้ประเมิน", icon=":material/info:"):
         st.markdown(r"""
