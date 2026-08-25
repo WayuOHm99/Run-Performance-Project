@@ -279,14 +279,25 @@ class CardIsADoorTests(unittest.TestCase):
         self.assertTrue("key=ATHLETE_STATE_KEY" in DASHBOARD_SRC,
                         "selectbox ไม่ได้ใช้คีย์เดียวกับที่ focus_athlete เขียนลงไป")
 
-    def test_tab_bodies_are_never_guarded_by_open_because_they_share_state(self):
-        # Streamlit เปิดทาง lazy execution ด้วยการเช็ค `tab.open` ก่อนรันเนื้อในแท็บ
-        # แต่ที่นี่ใช้ไม่ได้: แท็บวันนี้อ่าน `team_df` ที่แท็บทีมสร้าง ถ้าแท็บทีมไม่รัน = NameError
+    def test_cross_tab_state_is_computed_outside_the_tab_blocks(self):
+        # แท็บวันนี้อ่าน `team_df` ที่มาจากลูปของแท็บทีม ตราบใดที่ลูปนั้นยังอยู่ใน
+        # `with tab_team:` การรันเฉพาะแท็บที่เปิดอยู่จะทำให้แท็บวันนี้ NameError ทันที
+        # ย้ายออกมานอกบล็อกแท็บแล้ว `.open` จึงปลอดภัย — เทสนี้กันไม่ให้ย้ายกลับเข้าไป
+        tabs_at = DASHBOARD_SRC.index("st.tabs(")
+        self.assertLess(
+            DASHBOARD_SRC.index("team_rows = []"), tabs_at,
+            "การคำนวณ team_rows ย้ายกลับเข้าไปในบล็อกแท็บแล้ว — lazy จะพังเงียบ ๆ",
+        )
+        self.assertLess(DASHBOARD_SRC.index("team_df = pd.DataFrame(team_rows)"), tabs_at)
+
+    def test_every_tab_body_only_runs_when_that_tab_is_open(self):
+        # กราฟ plotly คือตัวกินเวลาหลักของหนึ่งรอบรัน (วัดแล้ว ~0.7 จาก 1.1 วินาที)
+        # แท็บไหนหลุดการ์ดนี้ไปจะสร้างกราฟใหม่ทุกครั้งที่หน้าจอ rerun แม้ไม่มีใครเปิดดู
         for name in ("tab_today", "tab_team", "tab_health", "tab_train",
                      "tab_progress", "tab_splits"):
-            self.assertFalse(
-                f"{name}.open" in DASHBOARD_SRC,
-                f"{name}.open ถูกใช้เป็นเงื่อนไข — แท็บที่ไม่รันจะทำให้ state ข้ามแท็บพัง",
+            self.assertTrue(
+                f"if {name}.open:" in DASHBOARD_SRC,
+                f"{name} ไม่ได้ถูกครอบด้วย .open — มันจะรันทุกครั้งแม้ไม่ได้เปิดอยู่",
             )
 
     def test_buttons_do_not_print(self):

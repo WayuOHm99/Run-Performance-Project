@@ -558,7 +558,9 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
 
     def test_recovery_averages_use_period_metric_instead_of_silent_mean(self):
         self.assertIn("average_results = {", DASHBOARD_SRC)
-        self.assertIn("period_metric(\n                wellness_df", DASHBOARD_SRC)
+        # เดิม assert ติดจำนวนช่องอินเดนต์ ซึ่งขยับทุกครั้งที่บล็อกแท็บถูกครอบเพิ่ม
+        # เจตนาคือ "ค่าเฉลี่ยมาจาก period_metric บน wellness_df" ไม่ใช่รูปร่างการจัดบรรทัด
+        self.assertRegex(DASHBOARD_SRC, r"period_metric\(\s*\n\s*wellness_df")
         self.assertNotIn('wellness_df["sleep_score"].mean()', DASHBOARD_SRC)
         self.assertIn("วันมีข้อมูล", DASHBOARD_SRC)
         self.assertIn(
