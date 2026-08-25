@@ -6,6 +6,79 @@ base = "light"
 primaryColor = "#2a78d6"
 textColor = "#31333F"
 
+# --- ระบบดีไซน์ของใบงาน #18 (25 ส.ค. 69) ---
+# ฟอนต์ตัวเดียวรองรับทั้งไทยและอังกฤษ ตัวเลขใช้ mono เพื่อให้เรียงตรงคอลัมน์ในตาราง
+font = "IBM Plex Sans Thai"
+headingFont = "IBM Plex Sans Thai"
+codeFont = "IBM Plex Mono"
+
+# มุม 2 px ทั้งระบบ — คมแบบเครื่องมือ ไม่ใช่การ์ดมนซึ่งเป็นค่าเริ่มต้นที่ดูเหมือนกันไปหมด
+baseRadius = "2px"
+borderColor = "#e4e1da"
+
+# สีกราฟ: ชุดนี้ผ่านการตรวจตาบอดสีแล้ว (น้ำเงิน↔ส้ม ΔE 24.7) และตรงกับค่าคงที่
+# C_BLUE / C_SECOND ใน dashboard.py — กราฟที่ไม่ได้ระบุสีเองจะได้ชุดเดียวกันโดยอัตโนมัติ
+chartCategoricalColors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+chartSequentialColors = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#2a78d6", "#1c5cab", "#104281"]
+
+# ฟอนต์โหลดจาก Google Fonts โดยแยก subset ไทยกับละตินตามที่ Google ตัดมา
+# ต้องประกาศทั้งสอง subset ต่อหนึ่งน้ำหนัก ไม่งั้นตัวอักษรอีกชุดจะตกไปใช้ฟอนต์สำรอง
+[[theme.fontFaces]]
+family = "IBM Plex Sans Thai"
+url = "https://fonts.gstatic.com/s/ibmplexsansthai/v11/m8JPje1VVIzcq1HzJq2AEdo2Tj_qvLqMHdYgVcM.woff2"
+weight = "400"
+style = "normal"
+unicodeRange = "U+02D7, U+0303, U+0331, U+0E01-0E5B, U+200C-200D, U+25CC"
+
+[[theme.fontFaces]]
+family = "IBM Plex Sans Thai"
+url = "https://fonts.gstatic.com/s/ibmplexsansthai/v11/m8JPje1VVIzcq1HzJq2AEdo2Tj_qvLqMCdYg.woff2"
+weight = "400"
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "IBM Plex Sans Thai"
+url = "https://fonts.gstatic.com/s/ibmplexsansthai/v11/m8JMje1VVIzcq1HzJq2AEdo2Tj_qvLqE1vI1fuJHa74.woff2"
+weight = "600"
+style = "normal"
+unicodeRange = "U+02D7, U+0303, U+0331, U+0E01-0E5B, U+200C-200D, U+25CC"
+
+[[theme.fontFaces]]
+family = "IBM Plex Sans Thai"
+url = "https://fonts.gstatic.com/s/ibmplexsansthai/v11/m8JMje1VVIzcq1HzJq2AEdo2Tj_qvLqE1vI1auJH.woff2"
+weight = "600"
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "IBM Plex Sans Thai"
+url = "https://fonts.gstatic.com/s/ibmplexsansthai/v11/m8JMje1VVIzcq1HzJq2AEdo2Tj_qvLqEsvM1fuJHa74.woff2"
+weight = "700"
+style = "normal"
+unicodeRange = "U+02D7, U+0303, U+0331, U+0E01-0E5B, U+200C-200D, U+25CC"
+
+[[theme.fontFaces]]
+family = "IBM Plex Sans Thai"
+url = "https://fonts.gstatic.com/s/ibmplexsansthai/v11/m8JMje1VVIzcq1HzJq2AEdo2Tj_qvLqEsvM1auJH.woff2"
+weight = "700"
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1i8q1w.woff2"
+weight = "400"
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "https://fonts.gstatic.com/s/ibmplexmono/v20/-F6qfjptAgt5VM-kVkqdyU8n3vAOwlBFgg.woff2"
+weight = "600"
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
 # ต้องระบุ textColor ของ sidebar ตรงๆ — Streamlit 1.59 มีบั๊ก: ถ้าตั้งธีมเองแต่ไม่กำหนด
 # ค่านี้ frontend จะได้สตริงว่างแล้วสแปม console warning "Invalid color passed for textColor"
 [theme.sidebar]
