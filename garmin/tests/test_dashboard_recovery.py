@@ -537,16 +537,23 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
                 DASHBOARD_SRC,
             )
         self.assertIn(
-            "bb_snap, _ = body_battery_snapshots(recent_wellness, today)",
+            "bb_snap, bb_completed_snap = body_battery_snapshots(recent_wellness, today)",
             DASHBOARD_SRC,
         )
         self.assertIn(
             "bb_display_snap, bb_completed_snap = body_battery_snapshots(w, today)",
             DASHBOARD_SRC,
         )
-        self.assertIn(
-            "สถานะโหลดต้องเตือนแม้ wellness วันนี้ยังไม่มา",
-            DASHBOARD_SRC,
+
+        # สถานะโหลดต้องเตือนแม้ wellness วันนี้ยังไม่มา — เดิมเทสนี้ยืนยันด้วยคอมเมนต์
+        # ตอนนี้ยืนยันด้วยลำดับจริง: แผงคำตัดสินถูกวาดก่อนอ่านค่า wellness ค่าแรก
+        # จึงเป็นไปไม่ได้ที่มันจะไปห้อยอยู่ใต้เงื่อนไข "วันนี้มี wellness ไหม"
+        today_tab = DASHBOARD_SRC.split("with tab_today:", 1)[1]
+        today_tab = today_tab.split("with tab_health:", 1)[0]
+        self.assertLess(
+            today_tab.index("render_today_verdict("),
+            today_tab.index('latest_field(recent_wellness, "sleep_score")'),
+            "แผงคำตัดสินถูกวาดหลังอ่าน wellness — เสี่ยงเงียบเมื่อวันนี้ยังไม่มีค่า",
         )
 
     def test_recovery_averages_use_period_metric_instead_of_silent_mean(self):

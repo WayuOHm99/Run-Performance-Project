@@ -203,12 +203,14 @@ class DashboardCompletenessSourceTests(unittest.TestCase):
             self.assertIn(snippet, DASHBOARD_SRC)
 
     def test_red_athlete_status_is_not_presented_as_a_system_failure(self):
-        self.assertIn("สถานะนักกีฬา:", DASHBOARD_SRC)
+        # เจตนาเดิมยังอยู่: สถานะแดงคือคำเตือนเรื่องตัวนักกีฬา ไม่ใช่ระบบพัง — ถ้าอ่านผิด
+        # โค้ชจะไปไล่แก้ sync ที่ไม่ได้เสีย  ส่วนวิธีวาดเปลี่ยนไปเป็นแผงคำตัดสิน (ใบงาน #18)
+        # จึงเลิกผูกกับกล่อง st.warning ที่เลือกด้วยอีโมจินำหน้าสตริง
         self.assertIn("ไม่ใช่ข้อผิดพลาดของระบบ", DASHBOARD_SRC)
-        status_branch = DASHBOARD_SRC.split('if status_text.startswith("🔴"):', 1)[1]
-        status_branch = status_branch.split('elif status_text.startswith("🟡"):', 1)[0]
-        self.assertIn("st.warning(", status_branch)
-        self.assertNotIn("st.error(", status_branch)
+        today_tab = DASHBOARD_SRC.split("with tab_today:", 1)[1]
+        today_tab = today_tab.split("with tab_health:", 1)[0]
+        self.assertNotIn("st.error(", today_tab)
+        self.assertNotIn('startswith("🔴")', today_tab)
 
 
 if __name__ == "__main__":

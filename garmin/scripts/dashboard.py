@@ -1012,6 +1012,327 @@ def render_team_card(row):
     )
 
 
+# --- แท็บ "วันนี้": แผงคำตัดสิน ไทล์ค่าเดี่ยว แถบโหลด และแถวเซสชัน ---
+# แท็บนี้เคยวางตัวเลข 17 ช่องขนาดเท่ากันหมด ตัวตัดสิน (EF) จึงจมอยู่กับค่าที่ประกอบมัน
+# แผงใหม่เรียงตามลำดับการตัดสินใจ: คำตัดสิน → ธงที่ทำให้ตัดสินแบบนั้น → ค่าที่ประกอบ
+# → บริบทโหลด → เซสชันจริง
+
+# เกณฑ์ธงของ wellness อยู่ที่เดียว เพราะแท็บทีมใช้ตัดสินสถานะ ส่วนแท็บวันนี้ใช้
+# ตีกรอบไทล์ให้ตรงกัน — เขียนคนละที่เมื่อไหร่ หน้าจอสองแท็บจะขัดกันเองโดยไม่มีอะไรฟ้อง
+BB_LOW = 40           # Body Battery high ของวันที่จบแล้ว ต่ำกว่านี้ = ธง
+SLEEP_LOW = 60
+RHR_RISE = 5.0        # RHR สูงกว่าฐานตั้งแต่นี้ = ธง
+HRV_ALERT = {"LOW": "rest", "UNBALANCED": "watch"}
+READINESS_ALERT = ("POOR", "LOW")
+
+EF_SCALE_MIN = -12.0  # กว้างกว่าเกณฑ์ทุกตัวเล็กน้อย เพื่อให้เห็นว่าค่าอยู่ใกล้ขอบแค่ไหน
+EF_SCALE_MAX = 12.0
+
+# ความหนักเป็นค่ามีลำดับ (เบา→กลาง→หนัก) จึงไล่น้ำเงินเฉดเดียว — เขียว/เหลือง/แดง
+# จองไว้ให้ "สถานะ" เท่านั้น ถ้ายืมมาใช้ที่นี่ด้วย สีเดียวกันจะแปลสองความหมายในหน้าเดียว
+INTENSITY_CHIP_COLORS = {
+    INTENSITY_ORDER[0]: ("#cde2fb", "#104281"),
+    INTENSITY_ORDER[1]: (C_BLUE, "#ffffff"),
+    INTENSITY_ORDER[2]: ("#104281", "#ffffff"),
+}
+
+
+def baseline_median(df, column, before_date, days=14, min_points=5):
+    """median ของ ``days`` วันก่อนหน้า ``before_date`` — คืน NaN เมื่อจุดไม่ถึง ``min_points``
+
+    ตัดวันของค่านั้นเองออกเสมอ ไม่งั้นค่าจะดึงฐานเข้าหาตัวเองจนส่วนต่างหด
+    และฐานจากไม่กี่วันต้องคืน NaN ไม่ใช่ตัวเลข เพราะบนหน้าจอมันจะดูน่าเชื่อถือเท่ากัน
+    """
+    if df is None or getattr(df, "empty", True):
+        return float("nan")
+    if column not in df.columns or "calendar_date" not in df.columns:
+        return float("nan")
+    anchor = pd.Timestamp(before_date).normalize()
+    parsed = pd.to_datetime(df["calendar_date"], errors="coerce")
+    window = df.loc[
+        parsed.notna() & (parsed < anchor) & (parsed >= anchor - pd.Timedelta(days=days)),
+        column,
+    ]
+    values = pd.to_numeric(window, errors="coerce").dropna()
+    if len(values) < min_points:
+        return float("nan")
+    return float(values.median())
+
+
+def tile_note(value, baseline, digits=0):
+    """บรรทัดเทียบฐานใต้ตัวเลข — บอกส่วนต่างเฉย ๆ ไม่ตัดสิน
+
+    เกณฑ์ว่าค่าไหน "แย่" อยู่ที่ธงเฝ้าระวังของแท็บทีมที่เดียว บรรทัดนี้แค่บอกว่า
+    วันนี้ห่างจากปกติของคนนี้เท่าไหร่ ซึ่งเป็นคำถามที่ตัวเลขลอย ๆ ตอบไม่ได้
+    """
+    if value is None or pd.isna(value):
+        return ""
+    if baseline is None or pd.isna(baseline):
+        return "ยังไม่มีฐาน 14 วัน"
+    return f"เทียบฐาน 14 วัน {float(value) - float(baseline):+.{digits}f}"
+
+
+def sparkline_svg(values, width=104, height=22, color=C_BLUE):
+    """เส้นแนวโน้มเล็กใต้ตัวเลข — คืน "" เมื่อจุดใช้ได้น้อยกว่า 3 จุด
+
+    วันที่นาฬิกาไม่ส่งค่าถูกข้าม ไม่ใช่ลากลงศูนย์ ซึ่งจะวาดหลุมที่ไม่มีอยู่จริง
+    """
+    series = pd.to_numeric(pd.Series(list(values), dtype="object"), errors="coerce")
+    points = [float(value) for value in series.dropna()]
+    if len(points) < 3:
+        return ""
+    low, high = min(points), max(points)
+    span = high - low
+    step = width / (len(points) - 1)
+    pad = 2.0
+    inner = height - pad * 2
+    coords = " ".join(
+        f"{index * step:.1f},{pad + inner * (1 - (0.5 if span == 0 else (value - low) / span)):.1f}"
+        for index, value in enumerate(points)
+    )
+    return (f'<svg class="today-spark" width="{width}" height="{height}" '
+            f'viewBox="0 0 {width} {height}" aria-hidden="true">'
+            f'<polyline fill="none" stroke="{color}" stroke-width="1.5" '
+            f'stroke-linejoin="round" points="{coords}"/></svg>')
+
+
+def ef_scale_position(pct):
+    """ตำแหน่ง 0..1 ของหมุดบนแถบเกณฑ์ EF — คืน None เมื่อไม่มีค่า
+
+    ค่าว่างต้องไม่มีตำแหน่ง: หมุดที่วางไว้กลางแถบอ่านได้ว่า "ปกติ" ซึ่งตรงข้ามกับความจริง
+    """
+    if pct is None or pd.isna(pct):
+        return None
+    span = EF_SCALE_MAX - EF_SCALE_MIN
+    return min(1.0, max(0.0, (float(pct) - EF_SCALE_MIN) / span))
+
+
+def render_ef_scale(pct):
+    """แถบเกณฑ์ EF พร้อมหมุดค่าปัจจุบัน — เห็นทันทีว่าอยู่ห่างเส้นตัดแค่ไหน"""
+    span = EF_SCALE_MAX - EF_SCALE_MIN
+    widths = [
+        ((EF_REST_PCT - EF_SCALE_MIN) / span, C_CRIT),
+        ((EF_WATCH_PCT - EF_REST_PCT) / span, C_WARN),
+        ((EF_GAIN_PCT - EF_WATCH_PCT) / span, C_GOOD),
+        ((EF_SCALE_MAX - EF_GAIN_PCT) / span, C_BLUE),
+    ]
+    bands = "".join(
+        f'<div style="width:{ratio * 100:.1f}%;background:{color}"></div>'
+        for ratio, color in widths
+    )
+    position = ef_scale_position(pct)
+    marker = ""
+    if position is not None:
+        marker = (
+            f'<div class="today-ef__pin" style="left:{position * 100:.1f}%">'
+            f'<div class="today-ef__pin-val">{float(pct):+.1f}%</div>'
+            f'<div class="today-ef__pin-tip"></div></div>'
+        )
+    ticks = "".join(
+        f'<div class="today-ef__tick" style="left:{(value - EF_SCALE_MIN) / span * 100:.1f}%">'
+        f'{value:+.0f}%</div>'
+        for value in (EF_REST_PCT, EF_WATCH_PCT, EF_GAIN_PCT)
+    )
+    return (f'<div class="today-ef__scale">{marker}'
+            f'<div class="today-ef__bands">{bands}</div>'
+            f'<div class="today-ef__ticks">{ticks}</div></div>')
+
+
+def render_today_tile(label, value, unit="", note="", spark="", alert=None):
+    """ไทล์ค่าเดียว: ชื่อ ค่า หน่วย/ที่มา ส่วนต่างจากฐาน และเส้นแนวโน้ม
+
+    ไทล์ที่ติดธงถูกตีกรอบสีสถานะ *และ* มีรูปทรงกับข้อความกำกับ — สีอย่างเดียวอ่านไม่ได้
+    บนกระดาษขาวดำ ซึ่งเป็นเหตุผลเดียวกับที่โปรเจกต์ล็อกธีมสว่างไว้
+    """
+    esc = html.escape
+    border = STATUS_COLORS.get(alert, "#e4e1da") if alert else "#e4e1da"
+    note_color = STATUS_TEXT_COLORS.get(alert, "#55585f") if alert else "#55585f"
+    mark = status_shape_svg(alert, 9) if alert else ""
+    note_html = (
+        f'<div class="today-tile__note" style="color:{note_color}">{mark}{esc(note)}</div>'
+        if note else ""
+    )
+    unit_html = f'<span class="today-tile__unit">{esc(unit)}</span>' if unit else ""
+    return (f'<div class="today-tile" style="border-color:{border}">'
+            f'<div class="today-lbl">{esc(label)}</div>'
+            f'<div class="today-tile__val">{esc(str(value))}{unit_html}</div>'
+            f'{note_html}{spark}</div>')
+
+
+def render_today_verdict(row):
+    """แผงคำตัดสินของนักกีฬาที่เลือก — อ่านจบก่อนตัวเลขใด ๆ
+
+    เดิมเป็นกล่อง st.warning/success ที่เลือกชนิดด้วย ``status_text.startswith("🔴")``
+    ซึ่งผูกกับอีโมจิในสตริงโดยตรง ถ้าแท็บทีมถอดอีโมจิออกเมื่อไหร่กล่องจะเงียบไปทั้งอัน
+    ที่นี่จึงอ่านสถานะผ่าน ``status_parts()`` ที่เดียวเหมือนการ์ดของแท็บทีม
+    """
+    esc = html.escape
+    key, label = status_parts(row["สถานะ"])
+    color = STATUS_COLORS.get(key, STATUS_COLORS["unknown"])
+    text_color = STATUS_TEXT_COLORS.get(key, STATUS_TEXT_COLORS["unknown"])
+
+    raw_flags = str(row.get("ธงเฝ้าระวัง") or "").strip()
+    flags = [part.strip() for part in raw_flags.split("|")
+             if part.strip() and part.strip() != "—"]
+    if flags:
+        chips = "".join(
+            f'<span class="today-chip" style="border:1px solid {color};color:{text_color}">'
+            f'{status_shape_svg(key, 9)}{esc(flag)}</span>'
+            for flag in flags
+        )
+        flag_block = f'<div class="today-chips">{chips}</div>'
+    else:
+        flag_block = '<div class="today-none">ไม่มีธงเฝ้าระวัง</div>'
+
+    # "แดง" คือคำเตือนเรื่องตัวนักกีฬา ไม่ใช่ระบบพัง — ประโยคนี้เคยอยู่ในกล่อง st.warning
+    # และต้องอยู่ต่อ เพราะโค้ชที่อ่านผิดจะไปไล่แก้ sync ที่ไม่ได้เสีย
+    note = ('<div class="today-verdict__note">เป็นคำเตือนจากข้อมูลซ้อม/การฟื้นตัว '
+            'ไม่ใช่ข้อผิดพลาดของระบบ</div>') if key == "rest" else ""
+
+    figures = "".join(
+        f'<div><div class="today-lbl">{esc(title)}</div>'
+        f'<div class="today-verdict__fig">{esc(str(value))}</div></div>'
+        for title, value in (
+            ("ประสิทธิภาพวิ่งเบา", row.get("ประสิทธิภาพการวิ่งเบา (EF)") or "–"),
+            ("โหลด 7 วัน", row.get("โหลด 7 วัน") or "–"),
+            ("เซสชัน 7 วัน", row.get("เซสชัน 7 วัน") or 0),
+        )
+    )
+    return (
+        f'<div class="today-verdict" style="border-top-color:{color}">'
+        f'<div class="today-verdict__main">'
+        f'<div class="today-verdict__head">{status_shape_svg(key, 17)}'
+        f'<span class="today-verdict__title">{esc(str(row["นักกีฬา"]))} '
+        f'<span style="color:{text_color}">{esc(label)}</span></span></div>'
+        f'{flag_block}{note}</div>'
+        f'<div class="today-verdict__figs">{figures}</div>'
+        f'</div>'
+    )
+
+
+def session_intensity_chip(label):
+    """ชิปความหนักของเซสชัน — ค่าว่างไม่วาดอะไรเลย
+
+    ไม่มี HR = ไม่รู้ความหนัก การเดาว่า "เบา" ทำให้สัดส่วน 80-20 ที่โค้ชอ่านผิดไปด้วย
+    """
+    if not label or label not in INTENSITY_CHIP_COLORS:
+        return ""
+    background, text = INTENSITY_CHIP_COLORS[label]
+    return (f'<span class="today-chip today-chip--zone" '
+            f'style="background:{background};color:{text}">{html.escape(str(label))}</span>')
+
+
+def render_session_row(when, title, distance_km, duration_sec, pace, avg_hr, intensity):
+    """หนึ่งเซสชันหนึ่งแถว แทนการ์ดซ้อนการ์ดที่มี st.metric ห้าช่องต่อกิจกรรม"""
+    esc = html.escape
+    distance = ("–" if distance_km is None or pd.isna(distance_km)
+                else f"{float(distance_km):.2f} กม.")
+    heart = "–" if avg_hr is None or pd.isna(avg_hr) else f"{float(avg_hr):.0f}"
+    cells = "".join(
+        f'<div class="today-sess__num">{esc(text)}</div>'
+        for text in (distance, fmt_sec(duration_sec), fmt_pace(pace), heart)
+    )
+    return (f'<div class="today-sess__row">'
+            f'<div class="today-sess__when">{esc(str(when))}</div>'
+            f'<div class="today-sess__name">{esc(str(title))}</div>'
+            f'{cells}'
+            f'<div class="today-sess__zone">{session_intensity_chip(intensity)}</div>'
+            f'</div>')
+
+
+def render_load_strip(days, digits=1):
+    """แถบโหลดรายวัน 7 ช่อง — วันพักเป็นขีด ไม่ใช่แท่งสูงศูนย์ที่อ่านเหมือนมีข้อมูล"""
+    esc = html.escape
+    values = [value for _, value in days
+              if value is not None and not pd.isna(value) and float(value) > 0]
+    peak = max(values) if values else 0.0
+    columns = []
+    for label, value in days:
+        has_value = value is not None and not pd.isna(value) and float(value) > 0
+        height = (float(value) / peak * 100) if has_value and peak > 0 else 0
+        bar = (f'<div class="today-strip__bar" style="height:{height:.0f}%"></div>'
+               if has_value else '<div class="today-strip__rest"></div>')
+        text = f"{float(value):.{digits}f}" if has_value else "–"
+        columns.append(
+            f'<div class="today-strip__col">'
+            f'<div class="today-strip__plot">{bar}</div>'
+            f'<div class="today-strip__val">{esc(text)}</div>'
+            f'<div class="today-strip__day">{esc(str(label))}</div></div>'
+        )
+    return f'<div class="today-strip">{"".join(columns)}</div>'
+
+
+TODAY_PANEL_CSS = """
+<style>
+.today-lbl { font-size: 11px; letter-spacing: .06em; color: #8a8d94; font-weight: 500; }
+.today-verdict { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  gap: 26px; align-items: center; background: #ffffff; border: 1px solid #e4e1da;
+  border-top-width: 3px; border-radius: 2px; padding: 16px 20px; margin-bottom: 12px; }
+.today-verdict__head { display: flex; align-items: center; gap: 11px; }
+.today-verdict__title { font-size: 26px; font-weight: 700; line-height: 1.2; }
+.today-verdict__note { font-size: 12px; color: #8a8d94; margin-top: 7px; }
+.today-verdict__figs { display: flex; gap: 26px; padding-left: 24px;
+  border-left: 1px solid #e4e1da; }
+.today-verdict__fig { font-size: 18px; font-weight: 600; line-height: 1.35;
+  font-variant-numeric: tabular-nums; }
+.today-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.today-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
+  border-radius: 2px; font-size: 12px; font-weight: 500; }
+.today-chip--zone { border: none; }
+.today-none { font-size: 13px; color: #55585f; margin-top: 9px; }
+.today-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 10px; margin-bottom: 12px; }
+.today-tile { background: #ffffff; border: 1px solid #e4e1da; border-radius: 2px;
+  padding: 12px 14px 10px; }
+.today-tile__val { font-size: 26px; font-weight: 600; line-height: 1.15; margin-top: 5px;
+  font-variant-numeric: tabular-nums; }
+.today-tile__unit { font-size: 12px; color: #8a8d94; font-weight: 400; margin-left: 5px; }
+.today-tile__note { display: flex; align-items: center; gap: 5px; font-size: 12px;
+  margin-top: 4px; }
+.today-spark { display: block; margin-top: 8px; }
+.today-panel { background: #ffffff; border: 1px solid #e4e1da; border-radius: 2px;
+  padding: 15px 20px 18px; margin-bottom: 12px; }
+.today-panel__head { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; margin-bottom: 13px; }
+.today-panel__title { font-size: 15px; font-weight: 600; }
+.today-panel__hint { font-size: 12px; color: #8a8d94; }
+.today-ef__val { font-size: 34px; font-weight: 600; line-height: 1;
+  font-variant-numeric: tabular-nums; }
+.today-ef__scale { position: relative; padding-top: 24px; margin-top: 16px; }
+.today-ef__bands { display: flex; height: 11px; border-radius: 2px; overflow: hidden; gap: 1px; }
+.today-ef__ticks { position: relative; height: 15px; margin-top: 4px; }
+.today-ef__tick { position: absolute; transform: translateX(-50%); font-size: 11px;
+  color: #8a8d94; font-variant-numeric: tabular-nums; }
+.today-ef__pin { position: absolute; top: 0; transform: translateX(-50%);
+  display: flex; flex-direction: column; align-items: center; }
+.today-ef__pin-val { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.today-ef__pin-tip { width: 0; height: 0; border-left: 4px solid transparent;
+  border-right: 4px solid transparent; border-top: 5px solid #14161a; margin-top: 2px; }
+.today-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.today-strip__col { text-align: center; }
+.today-strip__plot { display: flex; align-items: flex-end; justify-content: center;
+  height: 54px; }
+.today-strip__bar { width: 60%; background: #2a78d6; border-radius: 1px; min-height: 2px; }
+.today-strip__rest { width: 60%; height: 2px; background: #e4e1da; }
+.today-strip__val { font-size: 13px; font-weight: 600; margin-top: 5px;
+  font-variant-numeric: tabular-nums; }
+.today-strip__day { font-size: 11px; color: #8a8d94; font-variant-numeric: tabular-nums; }
+.today-sess__row, .today-sess__head { display: grid;
+  grid-template-columns: 108px minmax(0, 1fr) 92px 78px 72px 62px 104px;
+  gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid #f4f2ee; }
+.today-sess__head { border-bottom: 1px solid #e4e1da; padding-bottom: 7px; }
+.today-sess__when { font-size: 13px; color: #55585f; font-variant-numeric: tabular-nums; }
+.today-sess__name { font-size: 14px; overflow-wrap: anywhere; }
+.today-sess__num { font-size: 14px; text-align: right; font-variant-numeric: tabular-nums; }
+.today-sess__zone { text-align: right; }
+/* แผงต้องไม่ถูกหั่นกลางใบตอนพิมพ์ A4 — ครึ่งใบอ่านไม่ได้ความ */
+@media print {
+  .today-verdict, .today-tile, .today-panel { break-inside: avoid; page-break-inside: avoid; }
+}
+</style>
+"""
+
+
 def compute_load_windows(daily, end_date, history_start=None):
     """โหลดสะสมรายวันจากตาราง (date, value): acute = ผลรวม 7 วัน, chronic = 28 วัน / 4
 
@@ -1882,24 +2203,32 @@ with tab_team:
             and 0 <= field_age_days(snapshot, today) <= 1
         )
 
-        # ธงเฝ้าระวัง
+        # ธงเฝ้าระวัง — เก็บคู่กับ "ค่าไหนเป็นคนจุดธง" เพราะแท็บวันนี้ต้องตีกรอบไทล์ให้ตรงกัน
+        # ถ้าแท็บนั้นคำนวณเกณฑ์เองซ้ำ สองหน้าจะขัดกันเงียบ ๆ ทันทีที่เกณฑ์ฝั่งใดฝั่งหนึ่งขยับ
         flags = []
+        flag_fields = []
         if pd.notna(ef_pct) and ef_pct < EF_REST_PCT:
             flags.append(f"ประสิทธิภาพตก {ef_pct:.0f}% จากฐาน")
+            flag_fields.append("ef")
         elif pd.notna(ef_pct) and ef_pct < EF_WATCH_PCT:
             flags.append(f"ประสิทธิภาพลด {ef_pct:.0f}% จากฐาน")
-        if (pd.notna(bb) and bb < 40 and bb_completed_snap
+            flag_fields.append("ef")
+        if (pd.notna(bb) and bb < BB_LOW and bb_completed_snap
                 and field_age_days(bb_completed_snap, today) is not None
                 and 0 <= field_age_days(bb_completed_snap, today) <= 1):
             flags.append(f"Body Battery ต่ำ ({bb:.0f})")
-        if pd.notna(sleep) and sleep < 60 and field_age_days(sleep_snap, today) <= 1:
+            flag_fields.append("bb")
+        if pd.notna(sleep) and sleep < SLEEP_LOW and field_age_days(sleep_snap, today) <= 1:
             flags.append(f"นอนแย่ ({sleep:.0f})")
-        if (pd.notna(rhr_delta) and rhr_delta >= 5
+            flag_fields.append("sleep")
+        if (pd.notna(rhr_delta) and rhr_delta >= RHR_RISE
                 and field_age_days(rhr_snap, today) <= 1):
             flags.append(f"RHR สูงกว่าฐาน +{rhr_delta:.0f}")
-        if (hrv_stat in ("LOW", "UNBALANCED")
+            flag_fields.append("rhr")
+        if (hrv_stat in HRV_ALERT
                 and field_age_days(hrv_snap, today) <= 1):
             flags.append(f"HRV {hrv_stat}")
+            flag_fields.append("hrv")
         # Training Status ขึ้นกับอุปกรณ์/บัญชีและ endpoint; ใช้ค่าที่เคยได้รับจริงโดยไม่
         # เหมารวมกับ respiration หรือสรุปจาก NULL ว่าอุปกรณ์ไม่รองรับ
         # ค่าดิบมี suffix ตัวเลข เช่น STRAINED_1 / UNPRODUCTIVE_5 → ตัดเหลือคำหลักก่อนเทียบ
@@ -1912,10 +2241,11 @@ with tab_team:
             flags.append(f"Garmin: {_ts_flag[_ts_base]}")
         # Training Readiness: ประวัติปัจจุบันมีเฉพาะ P'kao ส่วน Tong/Dan ยังไม่เคยได้รับค่า;
         # นี่คือสถานะข้อมูล ไม่ใช่ข้อสรุปความสามารถของรุ่นนาฬิกา และค่าอัปเดตได้ระหว่างวัน
-        if (ready_level in ("POOR", "LOW") and ready_snap
+        if (ready_level in READINESS_ALERT and ready_snap
                 and field_age_days(ready_snap, today) <= 1):
             flags.append(f"Readiness ต่ำ ({ready:.0f} {ready_level.title()})"
                          if pd.notna(ready) else f"Readiness {ready_level.title()}")
+            flag_fields.append("readiness")
 
         # ห้ามเขียวเมื่อไม่มีหลักฐานการซ้อม หรือ wellness สดมีไม่พอให้ประเมิน
         status = team_status(
@@ -1957,9 +2287,14 @@ with tab_team:
             "ธงเฝ้าระวัง": (" | ".join(flags) if flags else "—")
                            + ((" · ข้อมูลไม่พอ: " + ", ".join(coverage_notes))
                               if status.startswith("⚪") and coverage_notes else ""),
+            # สองคีย์ล่างนี้ไม่ได้ไว้อ่านบนตาราง — แท็บวันนี้ใช้ต่อ จึงถูกซ่อนจาก
+            # "ดูตัวเลขทีมทั้งหมด" แต่ต้องอยู่ใน team_rows เพื่อให้สองแท็บใช้ค่าเดียวกัน
+            "ธงเฝ้าระวังรายค่า": flag_fields,
+            "EF จากฐาน (%)": ef_pct,
         })
 
     team_df = pd.DataFrame(team_rows)
+    TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "EF จากฐาน (%)"]
 
     # การ์ดต่อคนแทนตารางสรุป 10 คอลัมน์ที่กว้างเกินจอ — คอลัมน์ท้าย ๆ เคยถูกมองข้าม
     # ทั้งที่มีข้อมูล แค่ต้องเลื่อนดู. เรียงตามความเร่งด่วน เพราะคำถามแรกของเช้าคือ
@@ -1970,7 +2305,7 @@ with tab_team:
 
     with st.expander("ดูตัวเลขทีมทั้งหมด", icon=":material/table_view:"):
         st.dataframe(
-            team_df,
+            team_df.drop(columns=TEAM_INTERNAL_COLUMNS),
             hide_index=True,
             column_config={
                 "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
@@ -2021,57 +2356,52 @@ _โหลด 7 วันเป็นบริบทว่าทำไปเท�
 with tab_today:
     st.header(f"วันนี้ของ {selected_name}", anchor=f"today-{selected_anchor}")
     st.caption(
-        f"{today.strftime('%d/%m/%Y')} · ใช้ค่าของวันนี้เมื่อมี มิฉะนั้นแสดงค่าล่าสุดพร้อมวันที่ "
-        "ส่วนสถานะโหลดใช้บริบทสะสม 7–28 วันเพื่อไม่ตัดสินจากวันเดียว"
+        f"{today.strftime('%d/%m/%Y')} · ตัวตัดสินคือประสิทธิภาพการวิ่งเบา (EF) "
+        "โหลด 7 วันเป็นบริบท · ค่าที่ยังไม่มาของวันนี้แสดงค่าล่าสุดพร้อมวันที่กำกับ"
     )
 
     selected_team = team_df[team_df["นักกีฬา"] == selected_name]
     team_row = selected_team.iloc[0] if not selected_team.empty else None
+    # ค่าไหนเป็นคนจุดธง มาจากแท็บทีมโดยตรง ไม่ได้คำนวณเกณฑ์ซ้ำที่นี่
+    flagged_fields = set(team_row["ธงเฝ้าระวังรายค่า"]) if team_row is not None else set()
 
     recent_wellness = load_wellness_data(
         athlete_id, (today - datetime.timedelta(days=30)).isoformat(), today.isoformat()
     )
     today_wellness = load_wellness_data(athlete_id, today.isoformat(), today.isoformat())
-    today_activities = load_activity_data(athlete_id, today.isoformat(), today.isoformat())
-    if not today_activities.empty:
-        today_activities["start_time_local"] = pd.to_datetime(today_activities["start_time_local"])
-        today_activities["distance_km"] = today_activities["distance_m"] / 1000
+    # ดึงย้อน 14 วันเพราะวันพักต้องยังมีของให้ดู — วันที่ไม่มีกิจกรรมไม่ใช่วันที่ไม่มีบริบท
+    recent_activities = load_activity_data(
+        athlete_id, (today - datetime.timedelta(days=13)).isoformat(), today.isoformat()
+    )
+    if not recent_activities.empty:
+        recent_activities = recent_activities.copy()
+        recent_activities["start_time_local"] = pd.to_datetime(
+            recent_activities["start_time_local"]
+        )
+        recent_activities["distance_km"] = recent_activities["distance_m"] / 1000
+        recent_activities = recent_activities.sort_values(
+            "start_time_local", ascending=False
+        )
+        today_activities = recent_activities[
+            recent_activities["start_time_local"].dt.date == today
+        ]
+    else:
+        today_activities = recent_activities
 
     readiness_supported = athlete_has_training_readiness(athlete_id)
     training_load_supported = athlete_has_load(athlete_id)
     device_names = load_athlete_devices(athlete_id)
 
-    # สถานะโหลดต้องเตือนแม้ wellness วันนี้ยังไม่มา — ไม่ผูกไว้กับ if/elif เดียวกัน
+    st.markdown(TODAY_PANEL_CSS, unsafe_allow_html=True)
+
+    # ---- คำตัดสิน: อ่านจบก่อนตัวเลขใด ๆ ----
+    # สถานะโหลดต้องเตือนแม้ wellness วันนี้ยังไม่มา จึงวาดก่อนอ่านค่า wellness ทั้งหมด
+    # และไม่ผูกอยู่กับเงื่อนไขใด ๆ ของ wellness
     if team_row is not None:
-        status_text = str(team_row["สถานะ"])
-        flag_text = str(team_row["ธงเฝ้าระวัง"])
-        message = f"**สถานะนักกีฬา: {status_text}**"
-        if flag_text not in ("—", ""):
-            message += f" · {flag_text}"
-        if status_text.startswith("🔴"):
-            st.warning(
-                message + " · เป็นคำเตือนจากข้อมูลซ้อม/การฟื้นตัว ไม่ใช่ข้อผิดพลาดของระบบ",
-                icon=":material/warning:",
-            )
-        elif status_text.startswith("🟡"):
-            st.warning(message, icon=":material/visibility:")
-        elif status_text.startswith("🟢"):
-            st.success(message, icon=":material/check_circle:")
-        else:
-            st.info(message, icon=":material/info:")
+        st.markdown(render_today_verdict(team_row), unsafe_allow_html=True)
 
-    today_core_present = has_any_value(
-        today_wellness,
-        ["resting_hr", "sleep_score", "body_battery_high", "bb_most_recent", "hrv_last_night"],
-    )
-    if not today_core_present:
-        st.info(
-            "ยังไม่มีข้อมูลสุขภาพของวันนี้จากนาฬิกา "
-            "จึงแสดงค่าล่าสุดที่ยังใช้ได้พร้อมวันที่กำกับด้านล่าง",
-            icon=":material/sync:",
-        )
-
-    bb_snap, _ = body_battery_snapshots(recent_wellness, today)
+    # ---- ค่าที่ประกอบคำตัดสิน ----
+    bb_snap, bb_completed_snap = body_battery_snapshots(recent_wellness, today)
     sleep_snap = latest_field(recent_wellness, "sleep_score")
     rhr_snap = latest_field(recent_wellness, "resting_hr")
     hrv_snap = latest_field(recent_wellness, "hrv_last_night")
@@ -2083,141 +2413,254 @@ with tab_today:
     hrv_status = fmt_text(hrv_snap["row"].get("hrv_status")) if hrv_snap else ""
     readiness_level = fmt_text(ready_snap["row"].get("readiness_level")) if ready_snap else ""
 
-    st.subheader("การฟื้นตัวล่าสุด")
-    with st.container(horizontal=True):
-        st.metric(
-            "Body Battery ตอนนี้/ล่าสุด",
-            fmt_num(bb_snap["value"] if bb_snap else float("nan")),
-            help=("วันนี้ใช้ระดับล่าสุดระหว่างวัน; ถ้าไม่มีจะใช้ค่าล่าสุดที่มี · "
-                  + field_freshness(bb_snap, today)),
-            border=True,
-        )
-        st.metric(
-            "Sleep score",
-            fmt_num(sleep_snap["value"] if sleep_snap else float("nan")),
-            help=field_freshness(sleep_snap, today),
-            border=True,
-        )
-        st.metric(
-            "Resting HR",
-            fmt_num(rhr_snap["value"] if rhr_snap else float("nan"), " bpm"),
-            help=field_freshness(rhr_snap, today),
-            border=True,
-        )
-        st.metric(
-            "HRV คืนล่าสุด",
-            fmt_num(hrv_snap["value"] if hrv_snap else float("nan"), " ms"),
-            delta=hrv_status.replace("_", " ") or None,
-            delta_color="off",
-            help=field_freshness(hrv_snap, today),
-            border=True,
-        )
-        st.metric(
-            "ความพร้อมซ้อม",
-            fmt_num(ready_snap["value"] if ready_snap else float("nan")),
-            delta=readiness_level.replace("_", " ") or None,
-            delta_color="off",
-            help=("Garmin Training Readiness ขึ้นกับอุปกรณ์/บัญชีและอัปเดตได้ระหว่างวัน · "
-                  + readiness_when(ready_snap, today)),
-            border=True,
-        )
-
-    st.caption(
-        "วันที่ของแต่ละค่า — "
-        + " · ".join(
-            f"{label}: {readiness_when(snapshot, today) if label == 'Readiness' else field_freshness(snapshot, today)}"
-            for label, snapshot in (
-                ("BB", bb_snap), ("Sleep", sleep_snap), ("RHR", rhr_snap),
-                ("HRV", hrv_snap), ("Readiness", ready_snap),
-            )
-        )
+    wellness_history = (
+        recent_wellness.sort_values("calendar_date")
+        if not recent_wellness.empty else recent_wellness
     )
 
-    pending_today = []
-    for label, column in (("Sleep", "sleep_score"), ("HRV", "hrv_last_night")):
-        if latest_field(today_wellness, column) is None:
-            pending_today.append(label)
-    if readiness_supported and latest_field(today_wellness, "training_readiness") is None:
-        pending_today.append("Training Readiness")
-    if pending_today:
-        st.caption(
-            "Garmin ยังไม่มีค่า " + ", ".join(pending_today)
-            + " ของวันนี้ ระบบจะลองเติมในรอบ sync ถัดไป; ค่าที่แสดงจากวันก่อนมีวันที่กำกับ "
-              "และไม่ได้ถูกคาดเดา"
+    def recent_series(column):
+        """ค่า 14 วันล่าสุดของฟิลด์เดียว สำหรับเส้นแนวโน้มเล็กใต้ไทล์"""
+        if wellness_history.empty or column not in wellness_history.columns:
+            return []
+        return list(wellness_history[column].tail(14))
+
+    def fresh_short(snapshot):
+        """"วันนี้" / "เมื่อวาน" / "3 วันก่อน" — วันที่เต็มอยู่ใน expander ด้านล่าง"""
+        return field_freshness(snapshot, today).split(" · ")[-1]
+
+    def snapshot_value(snapshot):
+        return snapshot["value"] if snapshot else float("nan")
+
+    def snapshot_anchor(snapshot):
+        return snapshot["date"] if snapshot and snapshot.get("date") else today
+
+    # Body Battery: ตัวเลขใหญ่คือระดับล่าสุดระหว่างวัน แต่ฐานเทียบได้เฉพาะ high ของวันที่
+    # จบแล้ว — สองอย่างนี้คนละหน่วยความหมาย จึงเขียนแยกให้เห็น ไม่เอามาลบกันเงียบ ๆ
+    bb_completed_value = snapshot_value(bb_completed_snap)
+    bb_note = tile_note(
+        bb_completed_value,
+        baseline_median(recent_wellness, "body_battery_high",
+                        snapshot_anchor(bb_completed_snap)),
+    )
+    if pd.notna(bb_completed_value) and bb_note:
+        bb_note = f"high วันล่าสุด {fmt_num(bb_completed_value)} · {bb_note}"
+
+    hrv_note = tile_note(
+        snapshot_value(hrv_snap),
+        baseline_median(recent_wellness, "hrv_last_night", snapshot_anchor(hrv_snap)),
+    )
+    if hrv_status:
+        hrv_note = f"Garmin: {hrv_status.replace('_', ' ')}" + (f" · {hrv_note}" if hrv_note else "")
+
+    ready_note = tile_note(
+        snapshot_value(ready_snap),
+        baseline_median(recent_wellness, "training_readiness", snapshot_anchor(ready_snap)),
+    )
+    if readiness_level:
+        ready_note = f"Garmin: {readiness_level.replace('_', ' ')}" + (
+            f" · {ready_note}" if ready_note else ""
         )
 
-    if not readiness_supported:
-        models = ", ".join(device_names) if device_names else "ยังไม่มีทะเบียนอุปกรณ์ที่สดพอ"
-        st.caption(
-            "ยังไม่เคยได้รับ Training Readiness จากบัญชีนี้ในประวัติที่เก็บไว้ "
-            f"(อุปกรณ์ที่เคยพบ: {models}; กรองรายการที่ยืนยันว่า last_seen เกิน 90 วัน) "
-            "อาจเกิดจากความสามารถของอุปกรณ์ การตั้งค่าบัญชี "
-            "หรือ endpoint ไม่ส่งข้อมูล จึงยังไม่สรุปจากค่าว่างเพียงอย่างเดียวว่า ‘รุ่นไม่รองรับ’"
+    tile_specs = [
+        # ตัวเลขใหญ่คือระดับ ณ ตอนนี้ (ตกลงตลอดวันตามปกติ) ป้ายจึงต้องบอกเองว่านี่ไม่ใช่
+        # ค่าสูงสุดของวัน ไม่งั้น "5" ตอนสี่ทุ่มอ่านเหมือนสัญญาณอันตราย
+        ("BODY BATTERY ตอนนี้/ล่าสุด", bb_snap, "body_battery_high", "", bb_note,
+         "bb", "watch"),
+        ("SLEEP SCORE", sleep_snap, "sleep_score", "",
+         tile_note(snapshot_value(sleep_snap),
+                   baseline_median(recent_wellness, "sleep_score",
+                                   snapshot_anchor(sleep_snap))),
+         "sleep", "watch"),
+        ("RESTING HR", rhr_snap, "resting_hr", " bpm",
+         tile_note(snapshot_value(rhr_snap),
+                   baseline_median(recent_wellness, "resting_hr",
+                                   snapshot_anchor(rhr_snap))),
+         "rhr", "watch"),
+        ("HRV คืนล่าสุด", hrv_snap, "hrv_last_night", " ms", hrv_note, "hrv",
+         HRV_ALERT.get(hrv_status, "watch")),
+    ]
+    # ไทล์ความพร้อมซ้อมขึ้นเฉพาะนักกีฬาที่บัญชีเคยส่งค่านี้จริง — ช่องว่างถาวรของคนที่
+    # นาฬิกาไม่ส่ง อ่านได้ว่าระบบพัง ทั้งที่คำอธิบายอยู่ใน expander ด้านล่างแล้ว
+    if readiness_supported or ready_snap:
+        tile_specs.append(
+            ("ความพร้อมซ้อม", ready_snap, "training_readiness", "", ready_note,
+             "readiness", "watch")
         )
-    if not training_load_supported:
-        st.caption(
-            "ยังไม่เคยได้รับ Garmin Training Load จากกิจกรรมที่เก็บไว้; "
-            "โหลดสะสมของระบบจึงคำนวณจากระยะวิ่งและระบุแหล่งที่มาชัดเจน"
+
+    st.markdown(
+        '<div class="today-tiles">'
+        + "".join(
+            render_today_tile(
+                label,
+                fmt_num(snapshot_value(snapshot), suffix),
+                fresh_short(snapshot),
+                note,
+                sparkline_svg(recent_series(column)),
+                alert_key if field in flagged_fields else None,
+            )
+            for label, snapshot, column, suffix, note, field, alert_key in tile_specs
         )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
-    st.subheader("กิจกรรมวันนี้")
-    if today_activities.empty:
-        st.info("ยังไม่มีกิจกรรมที่บันทึกในวันนี้", icon=":material/event_available:")
-    else:
-        total_distance_today = today_activities["distance_km"].fillna(0).sum()
-        total_duration_today = today_activities["duration_sec"].fillna(0).sum()
-        total_load_today = today_activities["training_load"].fillna(0).sum()
-        with st.container(horizontal=True):
-            st.metric("กิจกรรม", f"{len(today_activities)} ครั้ง", border=True)
-            st.metric("ระยะทางรวม", f"{total_distance_today:.2f} km", border=True)
-            st.metric("เวลารวม", fmt_sec(total_duration_today), border=True)
-            st.metric(
-                "Training load",
-                f"{total_load_today:.0f}" if total_load_today > 0 else "–",
-                border=True,
-            )
-
-        for _, activity in today_activities.sort_values("start_time_local", ascending=False).iterrows():
-            activity_time = (
-                activity["start_time_local"].strftime("%H:%M")
-                if pd.notna(activity["start_time_local"])
-                else "ไม่ทราบเวลา"
-            )
-            activity_title = fmt_text(
-                activity.get("activity_name"),
-                fmt_text(activity.get("activity_type"), "กิจกรรม"),
-            )
-            with st.container(border=True):
-                st.markdown(f"**{activity_title}** · {activity_time} น.")
-                with st.container(horizontal=True):
-                    st.metric("ระยะทาง", fmt_num(activity.get("distance_km"), " km"))
-                    st.metric("เวลา", fmt_sec(activity.get("duration_sec")))
-                    st.metric(
-                        "เพซเฉลี่ย",
-                        f"{fmt_pace(activity.get('avg_pace_min_per_km'))} /km"
-                        if pd.notna(activity.get("avg_pace_min_per_km"))
-                        else "–",
-                    )
-                    st.metric("HR เฉลี่ย", fmt_num(activity.get("avg_hr"), " bpm"))
-                    st.metric("Training load", fmt_num(activity.get("training_load")))
-
+    # ---- ตัวตัดสินเต็ม ๆ กับบริบทโหลดข้างกัน ----
     if team_row is not None:
-        st.subheader("ความสดและบริบทโหลด")
-        with st.container(horizontal=True):
-            # EF เป็นตัวตัดสิน จึงมาก่อนและมีคำอ่านสถานะกำกับ ส่วนโหลดเป็นบริบทตามหลัง
-            st.metric(
-                "ประสิทธิภาพการวิ่งเบา (EF)",
-                team_row["ประสิทธิภาพการวิ่งเบา (EF)"],
-                delta=team_row["โซน EF"],
-                delta_color="off",
-                help="ความเร็ว ÷ HR ในรัน easy เทียบฐาน 28 วันของตัวเอง — "
-                     "วิ่งเร็วขึ้นที่หัวใจเท่าเดิม = สดขึ้น",
-                border=True,
+        ef_zone_key, ef_zone_label = status_parts(team_row["โซน EF"])
+        ef_pct_value = team_row["EF จากฐาน (%)"]
+        ef_color = STATUS_TEXT_COLORS.get(ef_zone_key, STATUS_TEXT_COLORS["unknown"])
+
+        left, right = st.columns([1.05, 1.35], gap="large")
+        with left:
+            # ค่าว่างต้องบอกเหตุผลตรงจุดที่มันว่าง ไม่งั้นโค้ชอ่านว่า sync พังแล้วไปไล่แก้ระบบ
+            ef_body = (
+                f'<div style="display:flex;align-items:baseline;gap:10px">'
+                f'<div class="today-ef__val" style="color:{ef_color}">'
+                f'{ef_pct_value:+.1f}%</div>'
+                f'<div style="font-size:13px;color:#55585f">จากฐาน 28 วัน</div></div>'
+                f'<div style="font-size:12px;color:#55585f;margin-top:5px">'
+                f'{status_shape_svg(ef_zone_key, 9)} {html.escape(ef_zone_label)}</div>'
+                + render_ef_scale(ef_pct_value)
+                if pd.notna(ef_pct_value) else
+                '<div class="today-ef__val" style="color:#8a8d94">–</div>'
+                '<div style="font-size:12px;color:#55585f;margin-top:5px;line-height:1.6">'
+                'ต้องมีรัน easy 3 ครั้งภายใน 14 วัน และฐานอย่างน้อย 5 ครั้งใน 28 วันก่อนหน้า '
+                '— ยังไม่ครบตามนี้ ไม่ใช่ระบบขัดข้อง</div>'
             )
-            st.metric("โหลด 7 วัน", team_row["โหลด 7 วัน"],
-                      help="ปริมาณที่ทำไปและทิศทางเทียบฐาน 28 วัน — เป็นบริบท ไม่ใช่คำตัดสิน",
-                      border=True)
-            st.metric("จำนวนเซสชัน 7 วัน", str(team_row["เซสชัน 7 วัน"]), border=True)
+            st.markdown(
+                '<div class="today-panel"><div class="today-panel__head">'
+                '<div class="today-panel__title">ประสิทธิภาพการวิ่งเบา (EF)</div>'
+                '<div class="today-panel__hint">ตัวตัดสิน</div></div>'
+                + ef_body + "</div>",
+                unsafe_allow_html=True,
+            )
+        with right:
+            strip_daily, strip_metric, strip_unit = load_daily_workload(
+                athlete_id, (today - datetime.timedelta(days=6)).isoformat(),
+                today.isoformat(),
+            )
+            by_date = {}
+            if not strip_daily.empty:
+                by_date = {
+                    row["date"].date(): row["value"]
+                    for _, row in strip_daily.iterrows()
+                }
+            strip_days = [
+                (
+                    (today - datetime.timedelta(days=offset)).strftime("%d/%m"),
+                    by_date.get(today - datetime.timedelta(days=offset)),
+                )
+                for offset in range(6, -1, -1)
+            ]
+            st.markdown(
+                '<div class="today-panel"><div class="today-panel__head">'
+                f'<div class="today-panel__title">โหลดรายวัน 7 วัน ({html.escape(strip_unit)})</div>'
+                '<div class="today-panel__hint">บริบท ไม่ได้ตัดสินสถานะ</div></div>'
+                + render_load_strip(
+                    strip_days, digits=0 if strip_metric == "training_load" else 1
+                )
+                + '<div style="font-size:13px;color:#55585f;margin-top:12px">รวม 7 วัน '
+                f'{html.escape(str(team_row["โหลด 7 วัน"] or "–"))} · '
+                f'{html.escape(str(team_row["เซสชัน 7 วัน"] or 0))} เซสชัน</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    # ---- เซสชันจริง ----
+    lthr_today, _ = get_lthr(selected_slug, athlete_id)
+    if not today_activities.empty:
+        session_rows, session_hint = today_activities, "กิจกรรมของวันนี้"
+    else:
+        # วันพักไม่ได้แปลว่าไม่มีอะไรให้ดู — ของสามครั้งก่อนหน้าคือบริบทของวันนี้
+        session_rows = recent_activities.head(3)
+        session_hint = "วันนี้ยังไม่มีกิจกรรม · แสดง 3 ครั้งก่อนหน้า"
+
+    if session_rows.empty:
+        st.markdown(
+            '<div class="today-panel"><div class="today-panel__title">เซสชัน</div>'
+            '<div style="font-size:13px;color:#55585f;margin-top:8px">'
+            'ยังไม่มีกิจกรรมที่บันทึกใน 14 วันล่าสุด</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        header = "".join(
+            f'<div class="today-lbl" style="{align}">{title}</div>'
+            for title, align in (
+                ("วันที่", ""), ("รายการ", ""), ("ระยะ", "text-align:right"),
+                ("เวลา", "text-align:right"), ("เพซ", "text-align:right"),
+                ("HR", "text-align:right"), ("ความหนัก", "text-align:right"),
+            )
+        )
+        body = "".join(
+            render_session_row(
+                activity["start_time_local"].strftime("%d/%m %H:%M")
+                if pd.notna(activity["start_time_local"]) else "ไม่ทราบเวลา",
+                fmt_text(activity.get("activity_name"),
+                         fmt_text(activity.get("activity_type"), "กิจกรรม")),
+                activity.get("distance_km"),
+                activity.get("duration_sec"),
+                activity.get("avg_pace_min_per_km"),
+                activity.get("avg_hr"),
+                classify_intensity(activity.get("avg_hr"), lthr_today),
+            )
+            for _, activity in session_rows.iterrows()
+        )
+        st.markdown(
+            '<div class="today-panel"><div class="today-panel__head">'
+            '<div class="today-panel__title">เซสชัน</div>'
+            f'<div class="today-panel__hint">{html.escape(session_hint)}</div></div>'
+            f'<div class="today-sess__head">{header}</div>{body}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # ---- คำอธิบายที่อ่านครั้งเดียวแล้วไม่ต้องอ่านอีก ----
+    with st.expander("วันที่ของแต่ละค่า และค่าที่นาฬิกายังไม่ส่ง", icon=":material/info:"):
+        st.markdown(
+            "**วันที่ของแต่ละค่า** — "
+            + " · ".join(
+                f"{label}: "
+                + (readiness_when(snapshot, today) if label == "Readiness"
+                   else field_freshness(snapshot, today))
+                for label, snapshot in (
+                    ("BB", bb_snap), ("Sleep", sleep_snap), ("RHR", rhr_snap),
+                    ("HRV", hrv_snap), ("Readiness", ready_snap),
+                )
+            )
+        )
+
+        pending_today = []
+        for label, column in (("Sleep", "sleep_score"), ("HRV", "hrv_last_night")):
+            if latest_field(today_wellness, column) is None:
+                pending_today.append(label)
+        if readiness_supported and latest_field(today_wellness, "training_readiness") is None:
+            pending_today.append("Training Readiness")
+        if not has_any_value(
+            today_wellness,
+            ["resting_hr", "sleep_score", "body_battery_high", "bb_most_recent",
+             "hrv_last_night"],
+        ):
+            st.markdown(
+                "ยังไม่มีข้อมูลสุขภาพของวันนี้จากนาฬิกา "
+                "จึงแสดงค่าล่าสุดที่ยังใช้ได้พร้อมวันที่กำกับ"
+            )
+        if pending_today:
+            st.markdown(
+                "Garmin ยังไม่มีค่า " + ", ".join(pending_today)
+                + " ของวันนี้ ระบบจะลองเติมในรอบ sync ถัดไป; ค่าที่แสดงจากวันก่อนมีวันที่กำกับ "
+                  "และไม่ได้ถูกคาดเดา"
+            )
+        if not readiness_supported:
+            models = ", ".join(device_names) if device_names else "ยังไม่มีทะเบียนอุปกรณ์ที่สดพอ"
+            st.markdown(
+                "ยังไม่เคยได้รับ Training Readiness จากบัญชีนี้ในประวัติที่เก็บไว้ "
+                f"(อุปกรณ์ที่เคยพบ: {models}; กรองรายการที่ยืนยันว่า last_seen เกิน 90 วัน) "
+                "อาจเกิดจากความสามารถของอุปกรณ์ การตั้งค่าบัญชี "
+                "หรือ endpoint ไม่ส่งข้อมูล จึงยังไม่สรุปจากค่าว่างเพียงอย่างเดียวว่า ‘รุ่นไม่รองรับ’"
+            )
+        if not training_load_supported:
+            st.markdown(
+                "ยังไม่เคยได้รับ Garmin Training Load จากกิจกรรมที่เก็บไว้; "
+                "โหลดสะสมของระบบจึงคำนวณจากระยะวิ่งและระบุแหล่งที่มาชัดเจน"
+            )
 
 
 # =====================================================================
