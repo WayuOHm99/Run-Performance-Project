@@ -114,6 +114,12 @@ st.markdown("""
         widows: 3;
     }
 
+    /* ปุ่มบนกระดาษกดไม่ได้ — พิมพ์ออกมาเป็นกล่องเทาที่ไม่ได้ทำอะไร กินที่เปล่า ๆ
+       (ตั้งแต่มีปุ่ม "ดูรายละเอียดของ X" ใต้การ์ดทุกใบบนแท็บทีม) */
+    [data-testid="stButton"] {
+        display: none !important;
+    }
+
     /* รักษาแถว KPI เป็นหนึ่งชุด และย้ายกราฟทั้งก้อนไปหน้าใหม่เมื่อพื้นที่ไม่พอ */
     [data-testid="stHorizontalBlock"]:has([data-testid="stMetric"]),
     .stPlotlyChart,
@@ -1024,6 +1030,9 @@ SLEEP_LOW = 60
 RHR_RISE = 5.0        # RHR สูงกว่าฐานตั้งแต่นี้ = ธง
 HRV_ALERT = {"LOW": "rest", "UNBALANCED": "watch"}
 READINESS_ALERT = ("POOR", "LOW")
+
+# คีย์ของ selectbox นักกีฬา — ปุ่มบนการ์ดทีมเขียนค่าลงคีย์นี้เพื่อสลับคนที่กำลังดู
+ATHLETE_STATE_KEY = "selected_athlete"
 
 EF_SCALE_MIN = -12.0  # กว้างกว่าเกณฑ์ทุกตัวเล็กน้อย เพื่อให้เห็นว่าค่าอยู่ใกล้ขอบแค่ไหน
 EF_SCALE_MAX = 12.0
@@ -1990,7 +1999,9 @@ with st.sidebar:
     st.caption("ข้อมูลจะรีเฟรชอัตโนมัติทุก 60 วินาที หรือกดรีเฟรชหลังนาฬิกา sync")
 
     athlete_options = dict(zip(athletes_df["display_name"], athletes_df["athlete_id"]))
-    selected_name = st.selectbox("นักกีฬา", options=list(athlete_options.keys()), key="selected_athlete")
+    selected_name = st.selectbox(
+        "นักกีฬา", options=list(athlete_options.keys()), key=ATHLETE_STATE_KEY
+    )
     athlete_id = athlete_options[selected_name]
     selected_slug = athletes_df.loc[athletes_df["athlete_id"] == athlete_id, "slug"].iloc[0]
     selected_anchor = "".join(
@@ -2113,14 +2124,38 @@ with st.sidebar:
         )
 
 # --- MAIN DASHBOARD TABS ---
-tab_today, tab_team, tab_health, tab_train, tab_progress, tab_splits = st.tabs([
-    ":material/today: วันนี้",
+# ป้ายแท็บเป็นค่าคงที่เพราะปุ่มบนการ์ดทีมสลับแท็บด้วยการเขียนป้ายลง session_state
+# ถ้าปล่อยเป็นสตริงลอยสองที่ วันที่ใครแก้ป้าย ปุ่มจะเงียบไปโดยไม่มีอะไรฟ้อง
+TAB_TODAY_LABEL = ":material/today: วันนี้"
+MAIN_TAB_LABELS = [
+    TAB_TODAY_LABEL,
     ":material/groups: ทีม",
     ":material/bedtime: การฟื้นตัว",
     ":material/directions_run: การซ้อม",
     ":material/trending_up: ความก้าวหน้า",
     ":material/query_stats: รายละเอียดเซสชัน",
-])
+]
+MAIN_TABS_KEY = "main_tabs"
+
+
+def focus_athlete(name):
+    """การ์ดบนแท็บทีมคือประตูไปหน้ารายคน — เลือกนักกีฬาแล้วพาไปแท็บ "วันนี้" เลย
+
+    ต้องตั้งสองคีย์คู่กันเสมอ: ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างอยู่แท็บเดิม ตั้งแค่แท็บจะย้าย
+    หน้าแต่ยังเป็นคนเดิม — ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน
+    """
+    st.session_state[ATHLETE_STATE_KEY] = name
+    st.session_state[MAIN_TABS_KEY] = TAB_TODAY_LABEL
+
+
+# `on_change` คือสิ่งที่ทำให้แท็บมี state จริง ไม่ใช่ `key` — ในซอร์สของ Streamlit 1.61
+# `is_stateful = on_change != "ignore"` ถ้าไม่ส่ง `on_change` มันจะไม่เรียก `register_widget`
+# เลย แท็บที่ `focus_athlete()` เขียนลง session_state จะไม่มีใครอ่านกลับ = ปุ่มเงียบ
+# (ห้ามใส่เงื่อนไข `.open` ครอบเนื้อในแท็บ — แท็บวันนี้อ่าน `team_df` ที่แท็บทีมสร้าง
+#  ถ้าแท็บทีมไม่รัน จะ NameError ทันที)
+tab_today, tab_team, tab_health, tab_train, tab_progress, tab_splits = st.tabs(
+    MAIN_TAB_LABELS, key=MAIN_TABS_KEY, on_change="rerun"
+)
 
 
 # =====================================================================
@@ -2302,6 +2337,15 @@ with tab_team:
     st.markdown(TEAM_CARD_CSS, unsafe_allow_html=True)
     for row in sorted(team_rows, key=lambda item: team_urgency_rank(item["สถานะ"])):
         st.markdown(render_team_card(row), unsafe_allow_html=True)
+        # การ์ดเองกดไม่ได้ — HTML ที่ฉีดผ่าน st.markdown คุยกลับหา Python ไม่ได้ ปุ่มจริง
+        # ใต้การ์ดจึงเป็นทางเดียวที่ได้ทั้งการกดและโฟกัสคีย์บอร์ดโดยไม่ต้องเขียน component
+        st.button(
+            f"ดูรายละเอียดของ {row['นักกีฬา']}",
+            key=f"open-athlete-{row['นักกีฬา']}",
+            on_click=focus_athlete,
+            args=(row["นักกีฬา"],),
+            icon=":material/arrow_forward:",
+        )
 
     with st.expander("ดูตัวเลขทีมทั้งหมด", icon=":material/table_view:"):
         st.dataframe(

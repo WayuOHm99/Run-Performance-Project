@@ -41,7 +41,11 @@ def extract_helpers(*names):
             targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
             if targets & wanted:
                 nodes.append(node)
-    namespace = {"pd": pd, "float": float, "html": html}
+    # `focus_athlete` เขียนลง st.session_state — ให้ตัวปลอมที่เก็บค่าจริงไว้ตรวจได้
+    class _FakeStreamlit:
+        session_state = {}
+
+    namespace = {"pd": pd, "float": float, "html": html, "st": _FakeStreamlit}
     exec(
         compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
         namespace,
@@ -231,3 +235,70 @@ class AlwaysOnTextBudgetTests(unittest.TestCase):
             team_tab.count("st.caption("), 1,
             "แท็บทีมมีคำอธิบายที่เห็นตลอดเกินโควตา — ย้ายเข้า expander เกณฑ์ที่ใช้ประเมิน",
         )
+
+
+class CardIsADoorTests(unittest.TestCase):
+    """การ์ดต้องพาไปหน้ารายคนได้ ไม่ใช่จอแสดงผลอย่างเดียว
+
+    ข้อจำกัดจริงของ Streamlit: HTML ที่ฉีดผ่าน `st.markdown` คุยกลับหา Python ไม่ได้
+    การ์ดเองจึงกดไม่ได้ ทางที่เหลือคือปุ่มจริงใต้การ์ด ซึ่งได้โฟกัสคีย์บอร์ดมาด้วยฟรี
+    """
+
+    def helpers(self):
+        namespace = extract_helpers(
+            "focus_athlete", "ATHLETE_STATE_KEY", "MAIN_TABS_KEY",
+            "TAB_TODAY_LABEL", "MAIN_TAB_LABELS",
+        )
+        return namespace
+
+    def test_one_click_switches_both_the_athlete_and_the_tab(self):
+        # ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างอยู่แท็บเดิม ตั้งแค่แท็บจะย้ายหน้าแต่ยังเป็นคนเดิม
+        # ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน
+        namespace = self.helpers()
+        state = {}
+        namespace["st"].session_state = state
+        namespace["focus_athlete"]("Dan")
+        self.assertEqual(state[namespace["ATHLETE_STATE_KEY"]], "Dan")
+        self.assertEqual(state[namespace["MAIN_TABS_KEY"]], namespace["TAB_TODAY_LABEL"])
+
+    def test_the_tab_label_written_to_state_is_one_streamlit_actually_renders(self):
+        # ป้ายแท็บถูกใช้สองที่ (สร้างแท็บ กับเขียนลง session_state) ถ้าดริฟต์จากกัน
+        # ปุ่มจะเงียบไปโดยไม่มี error — สลับคนสำเร็จแต่ไม่ย้ายหน้า
+        namespace = self.helpers()
+        self.assertIn(namespace["TAB_TODAY_LABEL"], namespace["MAIN_TAB_LABELS"])
+
+    def test_tabs_track_state_or_the_button_writes_into_a_void(self):
+        # `key` อย่างเดียว **ไม่พอ** — ในซอร์ส Streamlit 1.61 `is_stateful = on_change != "ignore"`
+        # ถ้าไม่ส่ง on_change มันไม่เรียก register_widget เลย ป้ายแท็บที่ focus_athlete()
+        # เขียนลง session_state จะไม่มีใครอ่านกลับ ปุ่มเงียบโดยไม่มี error
+        # (วัดมาแล้ว: key อย่างเดียว tab.open = None ทุกตัว · ใส่ on_change แล้วเป็น True/False)
+        self.assertTrue("key=MAIN_TABS_KEY" in DASHBOARD_SRC,
+                        "st.tabs ไม่มี key แล้ว ปุ่มบนการ์ดจะสลับแท็บไม่ได้")
+        self.assertTrue('on_change="rerun"' in DASHBOARD_SRC,
+                        "st.tabs ไม่มี on_change แล้ว แท็บจะไม่ track state ปุ่มจะเงียบ")
+        self.assertTrue("key=ATHLETE_STATE_KEY" in DASHBOARD_SRC,
+                        "selectbox ไม่ได้ใช้คีย์เดียวกับที่ focus_athlete เขียนลงไป")
+
+    def test_tab_bodies_are_never_guarded_by_open_because_they_share_state(self):
+        # Streamlit เปิดทาง lazy execution ด้วยการเช็ค `tab.open` ก่อนรันเนื้อในแท็บ
+        # แต่ที่นี่ใช้ไม่ได้: แท็บวันนี้อ่าน `team_df` ที่แท็บทีมสร้าง ถ้าแท็บทีมไม่รัน = NameError
+        for name in ("tab_today", "tab_team", "tab_health", "tab_train",
+                     "tab_progress", "tab_splits"):
+            self.assertFalse(
+                f"{name}.open" in DASHBOARD_SRC,
+                f"{name}.open ถูกใช้เป็นเงื่อนไข — แท็บที่ไม่รันจะทำให้ state ข้ามแท็บพัง",
+            )
+
+    def test_buttons_do_not_print(self):
+        # โปรเจกต์ล็อกธีมสว่างไว้เพื่อให้พิมพ์ A4 ได้ — ปุ่มบนกระดาษกดไม่ได้
+        # พิมพ์ออกมาเป็นกล่องเทาใต้การ์ดทุกใบ กินที่เปล่า ๆ
+        print_css = DASHBOARD_SRC.split("@media print {", 1)[1]
+        self.assertTrue('[data-testid="stButton"]' in print_css,
+                        "ปุ่มยังไม่ถูกซ่อนตอนพิมพ์")
+
+    def test_every_card_gets_its_own_button(self):
+        team_tab = team_tab_source()
+        self.assertTrue("on_click=focus_athlete" in team_tab,
+                        "การ์ดยังไม่มีปุ่มพาไปหน้ารายคน")
+        self.assertTrue('key=f"open-athlete-' in team_tab,
+                        "ปุ่มต้องมี key แยกต่อคน ไม่งั้น Streamlit ทับกันเอง")
