@@ -969,10 +969,44 @@ TEAM_CARD_CSS = """
   font-variant-numeric: tabular-nums; }
 .team-card__sub { display: flex; align-items: center; gap: 5px; font-size: 12px;
   margin-top: 2px; }
+/* ---- การ์ดทั้งใบคือปุ่ม ----
+   HTML ที่ฉีดผ่าน st.markdown คุยกลับหา Python ไม่ได้ จึงวาง "ปุ่มจริง" ทับทั้งใบ
+   แบบโปร่งใสแทน วิธีนี้ได้ทั้งการกดด้วยเมาส์ โฟกัสคีย์บอร์ด และสถานะครบทั้งหก
+   โดยไม่ต้องเขียน custom component  เจาะจงได้เพราะ Streamlit ติดคลาส st-key-<key>
+   ให้ทุก container/widget ที่มี key
+   ถ้าเบราว์เซอร์ไม่รับ CSS ชุดนี้ ปุ่มจะกลับไปเป็นปุ่มธรรมดาใต้การ์ด — หน้าตาเสีย
+   แต่ยังกดได้ ไม่ใช่ฟีเจอร์ที่หายไปเงียบ ๆ */
+[class*="st-key-teamcard-"] { position: relative; }
+[class*="st-key-teamcard-"] > div:last-child:has(.stButton) {
+  position: absolute; inset: 0; margin: 0; padding: 0; }
+[class*="st-key-teamcard-"] .stButton,
+[class*="st-key-teamcard-"] .stButton > button { height: 100%; width: 100%; }
+[class*="st-key-teamcard-"] .stButton > button {
+  opacity: 0; border: none; background: transparent; cursor: pointer; }
+/* เส้นโฟกัสวาดเอง ห้ามใช้ของเบราว์เซอร์ซึ่งหายไปบนพื้นขาว (กฎในระบบดีไซน์) */
+[class*="st-key-teamcard-"] .stButton > button:focus-visible {
+  opacity: 1; outline: 2px solid #184f95; outline-offset: 2px; }
+[class*="st-key-teamcard-"]:hover .team-card {
+  border-color: #184f95; transition: border-color 140ms ease-out; }
+[class*="st-key-teamcard-"]:active .team-card { background: #f4f2ee; }
+
 /* การ์ดต้องไม่ถูกหั่นกลางใบตอนพิมพ์ A4 — ครึ่งใบอ่านไม่ได้ความ */
 @media print { .team-card { break-inside: avoid; page-break-inside: avoid; } }
 </style>
 """
+
+
+def css_key(name):
+    """ชื่อนักกีฬา -> คีย์ที่ปลอดภัยสำหรับใช้เป็นคลาส CSS
+
+    Streamlit ติดคลาส ``st-key-<key>`` ให้ทุก container/widget ที่มี key แต่ชื่อจริง
+    มีอักขระที่ใช้ในคลาสไม่ได้ — "P'kao" จะกลายเป็นเซเลกเตอร์พังและ CSS ทั้งบล็อกถูกทิ้ง
+    """
+    cleaned = "".join(
+        character if character.isalnum() or character in "-_" else "-"
+        for character in str(name).lower()
+    ).strip("-")
+    return cleaned or "athlete"
 
 
 def _num_text(value, digits=0):
@@ -2384,17 +2418,23 @@ if tab_team.open:
         # ทั้งที่มีข้อมูล แค่ต้องเลื่อนดู. เรียงตามความเร่งด่วน เพราะคำถามแรกของเช้าคือ
         # "ใครต้องดูก่อน" ไม่ใช่ "เรียงตามชื่อแล้วใครอยู่บนสุด"
         st.markdown(TEAM_CARD_CSS, unsafe_allow_html=True)
-        for row in sorted(team_rows, key=lambda item: team_urgency_rank(item["สถานะ"])):
-            st.markdown(render_team_card(row), unsafe_allow_html=True)
-            # การ์ดเองกดไม่ได้ — HTML ที่ฉีดผ่าน st.markdown คุยกลับหา Python ไม่ได้ ปุ่มจริง
-            # ใต้การ์ดจึงเป็นทางเดียวที่ได้ทั้งการกดและโฟกัสคีย์บอร์ดโดยไม่ต้องเขียน component
-            st.button(
-                f"ดูรายละเอียดของ {row['นักกีฬา']}",
-                key=f"open-athlete-{row['นักกีฬา']}",
-                on_click=focus_athlete,
-                args=(row["นักกีฬา"],),
-                icon=":material/arrow_forward:",
-            )
+        ordered_team = sorted(team_rows, key=lambda item: team_urgency_rank(item["สถานะ"]))
+        for order, row in enumerate(ordered_team):
+            # การ์ดทั้งใบเป็นปุ่ม: ปุ่มจริงถูกวางทับทั้งใบแบบโปร่งใสด้วย CSS ที่เจาะจงผ่าน
+            # คลาส st-key-* ซึ่ง Streamlit ติดให้ทุก container/widget ที่มี key
+            # ถ้า CSS ไม่ทำงาน ปุ่มจะกลับไปอยู่ใต้การ์ดตามเดิม — เสียหน้าตา แต่ยังกดได้
+            # ต่อลำดับท้ายคีย์เสมอ เพราะชื่อไทยสองชื่อที่ต่างกันแค่วรรณยุกต์จะถูกล้างเหลือ
+            # สลักเดียวกัน แล้ว Streamlit จะโยน StreamlitDuplicateElementKey ทั้งหน้า
+            slug = f"{css_key(row['นักกีฬา'])}-{order}"
+            with st.container(key=f"teamcard-{slug}"):
+                st.markdown(render_team_card(row), unsafe_allow_html=True)
+                st.button(
+                    f"ดูรายละเอียดของ {row['นักกีฬา']}",
+                    key=f"open-athlete-{slug}",
+                    on_click=focus_athlete,
+                    args=(row["นักกีฬา"],),
+                    width="stretch",
+                )
 
         with st.expander("ดูตัวเลขทีมทั้งหมด", icon=":material/table_view:"):
             st.dataframe(
