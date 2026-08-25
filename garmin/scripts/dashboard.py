@@ -729,6 +729,17 @@ def efficiency_change_pct(easy_ef, today):
     return (recent["ef"].median() / baseline_median - 1) * 100.0
 
 
+def efficiency_recent_value(easy_ef, today):
+    """median EF ของ 3 รันล่าสุด — คืน NaN เมื่อสามรันนั้นไม่ผ่านเกณฑ์ "ตอนนี้"
+
+    ห้ามโชว์ตัวเลขที่ ``efficiency_change_pct`` ตัดสินไปแล้วว่าใช้แทนความสดปัจจุบัน
+    ไม่ได้ ไม่งั้นหน้าจอจะขึ้นค่า EF คู่กับป้าย "ข้อมูลไม่พอ" พร้อมกัน
+    """
+    if pd.isna(efficiency_change_pct(easy_ef, today)):
+        return float("nan")
+    return easy_ef["ef"].tail(EF_RECENT_RUNS).median()
+
+
 def efficiency_status(pct):
     """แปลง % การเปลี่ยนแปลงของ EF เป็น (อิโมจิ, คำอธิบาย)"""
     if pd.isna(pct):
@@ -1796,7 +1807,7 @@ with tab_team:
                 "ประสิทธิภาพการวิ่งเบา (EF)",
                 help="ความเร็ว (ม./นาที) ÷ HR เฉลี่ย ในรัน easy — median 3 รันล่าสุด "
                      "เทียบ median ฐาน 28 วันของตัวเอง วิ่งเร็วขึ้นที่หัวใจเท่าเดิม = สดขึ้น | "
-                     "'–' = ยังมีรัน easy ไม่พอ ไม่ใช่ระบบขัดข้อง"),
+                     "'–' = ยังมีรัน easy ไม่พอ ต้องมี 3 ครั้งภายใน 14 วัน · ไม่ใช่ระบบขัดข้อง"),
             "โหลด 7 วัน": st.column_config.TextColumn(
                 "โหลด 7 วัน",
                 help="ปริมาณที่ทำไปใน 7 วันและทิศทางเทียบฐาน 28 วัน — เป็นบริบท ไม่ใช่คำตัดสิน "
@@ -1851,7 +1862,8 @@ Body Battery high ของวันที่จบแล้ว เพื่อ�
 **ประสิทธิภาพการวิ่งเบา (EF)** = ความเร็ว (ม./นาที) ÷ HR เฉลี่ย นับเฉพาะรัน easy
 (HR ≤ 89% LTHR, ระยะ ≥ 3 กม.) เทียบ median ของ 3 รันล่าสุดกับ median ฐาน 28 วัน
 ของตัวเอง เกณฑ์ −3% / −7% มาจาก SD ของข้อมูลจริงในระบบ (4.4% และ 3.5%)
-ค่าว่างแปลว่ารัน easy ยังไม่พอ ไม่ใช่ระบบขัดข้อง
+จะสรุปได้ต้องมีรัน easy 3 ครั้งภายใน 14 วัน และมีฐานอย่างน้อย 5 ครั้งใน 28 วันก่อนหน้า
+ค่าว่างแปลว่ารัน easy ยังไม่พอตามเกณฑ์นี้ ไม่ใช่ระบบขัดข้อง และไม่ใช่สถานะถาวร
 
 _โหลด 7 วันเป็นบริบทว่าทำไปเท่าไหร่ ไม่ดันสถานะเป็นแดง — ใช้ Garmin training\_load
 รวม cross-training ถ้านาฬิกาให้ ไม่เช่นนั้นใช้ระยะวิ่ง เดิมช่องนี้เป็น ACWR ซึ่งถอดออก
@@ -2569,7 +2581,7 @@ with tab_train:
 
         if ef_view.empty:
             st.info(
-                "ยังไม่มีรัน easy ในช่วงนี้ที่คำนวณ EF ได้ "
+                "ยังมีรัน easy ไม่พอในช่วงนี้ที่จะคำนวณ EF "
                 f"(ต้องมี HR, ระยะ ≥ {EF_MIN_DISTANCE_M / 1000:.0f} กม. และ HR ≤ "
                 f"{EASY_MAX_PCT * 100:.0f}% ของ LTHR"
                 + (f" = {lthr_for_tab * EASY_MAX_PCT:.0f} bpm)" if lthr_for_tab else ")")
@@ -2582,8 +2594,9 @@ with tab_train:
                 ef_all["date"] < ef_all["date"].iloc[-1]
             ].tail(20)["ef"].median()
             with st.container(horizontal=True):
+                _ef_now = efficiency_recent_value(ef_all, end_date)
                 st.metric("EF ล่าสุด (median 3 รัน)",
-                          f"{ef_all['ef'].tail(EF_RECENT_RUNS).median():.3f}",
+                          f"{_ef_now:.3f}" if pd.notna(_ef_now) else "–",
                           delta=f"{emoji} {txt}", delta_color="off", border=True)
                 st.metric("เทียบฐาน 28 วัน", efficiency_display(ef_pct_tab), border=True)
                 st.metric("จำนวนรัน easy ในช่วง", f"{len(ef_view)} ครั้ง", border=True)
@@ -2612,7 +2625,10 @@ with tab_train:
             st.plotly_chart(fig_ef, width="stretch")
             st.caption(
                 "EF ไวต่ออากาศร้อน พื้นผิว และความชัน จึงต้องอ่านเป็นเทรนด์ ไม่ใช่ค่าวันเดียว · "
-                "เกณฑ์ −3% / −7% มาจาก SD ของข้อมูลจริงในระบบนี้ (4.4% และ 3.5%)"
+                "เกณฑ์ −3% / −7% มาจาก SD ของข้อมูลจริงในระบบนี้ (4.4% และ 3.5%) · "
+                f"จะสรุปได้ต้องมีรัน easy {EF_RECENT_RUNS} ครั้งภายใน {EF_STALE_DAYS} วัน "
+                f"และมีฐานอย่างน้อย {EF_BASELINE_MIN_RUNS} ครั้งใน {EF_BASELINE_DAYS} วันก่อนหน้า — "
+                "ไม่ครบแล้วขึ้น 'ข้อมูลไม่พอ' คือรัน easy ไม่พอ ไม่ใช่ระบบขัดข้อง"
             )
 
         # ---------------- โหลดสะสม (บริบท ไม่ใช่คำตัดสิน) ----------------
