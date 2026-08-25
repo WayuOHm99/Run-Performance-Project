@@ -2148,8 +2148,13 @@ def focus_athlete(name):
     st.session_state[MAIN_TABS_KEY] = TAB_TODAY_LABEL
 
 
+# `on_change` คือสิ่งที่ทำให้แท็บมี state จริง ไม่ใช่ `key` — ในซอร์สของ Streamlit 1.61
+# `is_stateful = on_change != "ignore"` ถ้าไม่ส่ง `on_change` มันจะไม่เรียก `register_widget`
+# เลย แท็บที่ `focus_athlete()` เขียนลง session_state จะไม่มีใครอ่านกลับ = ปุ่มเงียบ
+# (ห้ามใส่เงื่อนไข `.open` ครอบเนื้อในแท็บ — แท็บวันนี้อ่าน `team_df` ที่แท็บทีมสร้าง
+#  ถ้าแท็บทีมไม่รัน จะ NameError ทันที)
 tab_today, tab_team, tab_health, tab_train, tab_progress, tab_splits = st.tabs(
-    MAIN_TAB_LABELS, key=MAIN_TABS_KEY
+    MAIN_TAB_LABELS, key=MAIN_TABS_KEY, on_change="rerun"
 )
 
 

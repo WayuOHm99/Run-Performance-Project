@@ -267,11 +267,27 @@ class CardIsADoorTests(unittest.TestCase):
         namespace = self.helpers()
         self.assertIn(namespace["TAB_TODAY_LABEL"], namespace["MAIN_TAB_LABELS"])
 
-    def test_tabs_are_keyed_or_the_button_has_nothing_to_write_to(self):
-        self.assertTrue("st.tabs(" in DASHBOARD_SRC and "key=MAIN_TABS_KEY" in DASHBOARD_SRC,
+    def test_tabs_track_state_or_the_button_writes_into_a_void(self):
+        # `key` อย่างเดียว **ไม่พอ** — ในซอร์ส Streamlit 1.61 `is_stateful = on_change != "ignore"`
+        # ถ้าไม่ส่ง on_change มันไม่เรียก register_widget เลย ป้ายแท็บที่ focus_athlete()
+        # เขียนลง session_state จะไม่มีใครอ่านกลับ ปุ่มเงียบโดยไม่มี error
+        # (วัดมาแล้ว: key อย่างเดียว tab.open = None ทุกตัว · ใส่ on_change แล้วเป็น True/False)
+        self.assertTrue("key=MAIN_TABS_KEY" in DASHBOARD_SRC,
                         "st.tabs ไม่มี key แล้ว ปุ่มบนการ์ดจะสลับแท็บไม่ได้")
+        self.assertTrue('on_change="rerun"' in DASHBOARD_SRC,
+                        "st.tabs ไม่มี on_change แล้ว แท็บจะไม่ track state ปุ่มจะเงียบ")
         self.assertTrue("key=ATHLETE_STATE_KEY" in DASHBOARD_SRC,
                         "selectbox ไม่ได้ใช้คีย์เดียวกับที่ focus_athlete เขียนลงไป")
+
+    def test_tab_bodies_are_never_guarded_by_open_because_they_share_state(self):
+        # Streamlit เปิดทาง lazy execution ด้วยการเช็ค `tab.open` ก่อนรันเนื้อในแท็บ
+        # แต่ที่นี่ใช้ไม่ได้: แท็บวันนี้อ่าน `team_df` ที่แท็บทีมสร้าง ถ้าแท็บทีมไม่รัน = NameError
+        for name in ("tab_today", "tab_team", "tab_health", "tab_train",
+                     "tab_progress", "tab_splits"):
+            self.assertFalse(
+                f"{name}.open" in DASHBOARD_SRC,
+                f"{name}.open ถูกใช้เป็นเงื่อนไข — แท็บที่ไม่รันจะทำให้ state ข้ามแท็บพัง",
+            )
 
     def test_buttons_do_not_print(self):
         # โปรเจกต์ล็อกธีมสว่างไว้เพื่อให้พิมพ์ A4 ได้ — ปุ่มบนกระดาษกดไม่ได้
