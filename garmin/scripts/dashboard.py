@@ -176,7 +176,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("GARMIN_DATA_DIR", PROJECT_ROOT / "data"))
 DB_PATH = DATA_DIR / "garmin.db"
 
-# ประเภทกิจกรรมที่นับเป็น "วิ่ง" (ใช้คำนวณ ACWR / 80-20)
+# ประเภทกิจกรรมที่นับเป็น "วิ่ง" (ใช้คำนวณโหลด / EF / 80-20)
 RUN_TYPES = ("running", "track_running", "trail_running", "treadmill_running")
 
 # LTHR จากผลเทสเป็นทางการ — ตารางนักกีฬาใน docs/PROJECT.md คือที่เก็บผลเทส อัปเดตทั้งสองที่ให้ตรงกัน
@@ -194,12 +194,34 @@ LTHR_SOURCE_BY_SLUG = {
 EASY_MAX_PCT = 0.89
 GRAY_MAX_PCT = 0.94
 
+# --- ประสิทธิภาพการวิ่งเบา (EF) — ตัวตัดสินความสด แทน ACWR ที่ถอดออก 25 ส.ค. 69 ---
+# ACWR ถูกถอดเพราะหลักฐานตีตก: Garmin-RUNSAFE (Br J Sports Med 2025;59:1203-1210,
+# 5,205 นักวิ่ง / 588,071 เซสชัน) พบว่า ACWR สัมพันธ์กับการบาดเจ็บ "ในทิศตรงข้าม"
+# (HRR 0.75, 95% CI 0.59-0.96) ส่วน week-to-week ratio ไม่สัมพันธ์เลย และ
+# Impellizzeri 2020 (IJSPP 15(6):907) ชี้ปัญหา mathematical coupling ของอัตราส่วนนี้
+#
+# EF = ความเร็ว (เมตร/นาที) ÷ HR เฉลี่ย ในรัน easy — วิ่งเร็วขึ้นที่หัวใจเท่าเดิม = สดขึ้น
+# แนวคิดมาจากระบบ green/yellow/red light ของ Marius Bakken (Norwegian model) ที่ใช้
+# "HR ตอนวอร์มอัพที่เพซเดิม" เป็นตัวชี้ความสด ต่างจาก ACWR ตรงที่วัดการตอบสนองของร่างกาย
+# ไม่ใช่ปริมาณงานที่ทำไป
+EF_MIN_DISTANCE_M = 3000.0   # รันสั้นกว่านี้ EF แกว่งจนใช้ตัดสินไม่ได้
+EF_RECENT_RUNS = 3           # ค่าปัจจุบัน = median 3 รันล่าสุด (รันเดี่ยว SD 6.5-7.9%)
+EF_BASELINE_DAYS = 28
+EF_BASELINE_MIN_RUNS = 5
+EF_STALE_DAYS = 14           # ไม่มีรัน easy นานกว่านี้ = เลิกรายงานความสดของเมื่อวาน
+# เกณฑ์ % วัดจาก SD ของข้อมูลจริงใน garmin.db หลังปรับเรียบ 3 รัน
+# (ต้อง SD 4.4% n=22 · แดน SD 3.5% n=94) → เฝ้าระวัง ~1 SD, ต้องพัก ~2 SD
+EF_WATCH_PCT = -3.0
+EF_REST_PCT = -7.0
+EF_GAIN_PCT = 5.0
+
 # สีสถานะ (ผ่าน CVD validation) — ใช้คู่กับข้อความกำกับเสมอ ไม่สื่อด้วยสีอย่างเดียว
 C_GOOD = "#0ca30c"
 C_WARN = "#fab219"
 C_CRIT = "#d03b3b"
-C_NEUTRAL = "#c3c9d2"  # เทาอมฟ้าอ่อน — เห็นได้บนพื้นขาว (แถบ ACWR "ต่ำกว่าฐาน")
+C_NEUTRAL = "#c3c9d2"  # เทาอมฟ้าอ่อน — เห็นได้บนพื้นขาว
 C_BLUE = "#2a78d6"   # เส้นข้อมูลหลัก
+C_SECOND = "#eb6834" # เส้นที่สองในกราฟเดียวกัน (ตรวจ CVD แล้ว ΔE 24.7 จาก C_BLUE)
 C_RED = "#e34948"    # เส้น HR
 C_GREEN = "#008300"  # โดนัท: เบา
 C_AMBER = "#eda100"  # โดนัท: กลาง
@@ -621,12 +643,110 @@ def fmt_sec(sec):
     return f"{s // 60}:{s % 60:02d}"
 
 
-def acwr_display(acwr, metric):
-    """ACWR พร้อมฐานที่ใช้คำนวณ — คนที่นาฬิกาไม่ให้ training_load จะคิดจากระยะวิ่งแทน
-    ตัวเลขจากคนละฐานจึงเทียบกันตรง ๆ ไม่ได้ ต้องบอกฐานไว้ข้างตัวเลขเสมอ"""
-    if pd.isna(acwr):
+def load_trend_display(acute, chronic_wk, metric, unit):
+    """โหลด 7 วันแบบดิบ + ทิศทางเทียบฐาน 28 วัน — ไม่หารเป็นอัตราส่วนอีกแล้ว
+
+    เดิมช่องนี้เป็น ACWR (โหลด 7 วัน ÷ ฐาน 28 วัน) แต่หลักฐานหาเกณฑ์ตัดที่ทำนาย
+    การบาดเจ็บได้ไม่เจอ (ดูหมายเหตุที่ค่าคงที่ EF_* ด้านบน) ตัวเลขนี้จึงเป็น
+    "บริบท" ว่าสัปดาห์นี้ทำไปเท่าไหร่เทียบกับที่เคยทำ ไม่ใช่คำตัดสินว่าดีหรือแย่
+    """
+    if pd.isna(acute):
         return "–"
-    return f"{acwr:.2f} · {'โหลด Garmin' if metric == 'training_load' else 'ระยะวิ่ง'}"
+    digits = 0 if metric == "training_load" else 1
+    shown = f"{acute:.{digits}f} {unit}"
+    if pd.isna(chronic_wk) or chronic_wk <= 0:
+        return shown
+    return f"{shown} · {(acute / chronic_wk - 1) * 100:+.0f}% จากฐาน 28 วัน"
+
+
+def efficiency_factor(distance_m, duration_sec, avg_hr):
+    """EF = ความเร็ว (เมตร/นาที) ÷ HR เฉลี่ย — คืน NaN เมื่อขาดค่าใดค่าหนึ่ง"""
+    distance = pd.to_numeric(distance_m, errors="coerce")
+    duration = pd.to_numeric(duration_sec, errors="coerce")
+    heart_rate = pd.to_numeric(avg_hr, errors="coerce")
+    if pd.isna(distance) or pd.isna(duration) or pd.isna(heart_rate):
+        return float("nan")
+    if duration <= 0 or heart_rate <= 0:
+        return float("nan")
+    return (distance / (duration / 60.0)) / heart_rate
+
+
+def easy_run_efficiency(runs, lthr):
+    """EF รายเซสชันของ "รัน easy" เท่านั้น (HR <= 89% LTHR และระยะ >= 3 กม.)
+
+    ต้องคัดเฉพาะรัน easy เพราะ EF ของเซสชันหนักสะท้อนชนิดของงาน ไม่ใช่ความสด
+    ไม่มี LTHR = ไม่มีเส้นแบ่ง easy จึงคืนตารางว่างแทนการเดาเกณฑ์
+    """
+    columns = ["date", "ef"]
+    if runs is None or runs.empty or not lthr:
+        return pd.DataFrame(columns=columns)
+    easy_max_hr = lthr * EASY_MAX_PCT
+    rows = []
+    for _, run in runs.iterrows():
+        heart_rate = pd.to_numeric(run.get("avg_hr"), errors="coerce")
+        distance = pd.to_numeric(run.get("distance_m"), errors="coerce")
+        if pd.isna(heart_rate) or heart_rate > easy_max_hr:
+            continue
+        if pd.isna(distance) or distance < EF_MIN_DISTANCE_M:
+            continue
+        value = efficiency_factor(distance, run.get("duration_sec"), heart_rate)
+        if pd.isna(value):
+            continue
+        rows.append({"date": pd.Timestamp(run["date"]), "ef": value})
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
+
+
+def efficiency_change_pct(easy_ef, today):
+    """% ที่ median ของ 3 รัน easy ล่าสุด ต่างจาก median ของฐาน 28 วันก่อนหน้า
+
+    คืน NaN เมื่อหลักฐานไม่พอ — รัน easy ล่าสุดน้อยกว่า 3 ครั้ง, ฐานน้อยกว่า 5 ครั้ง,
+    หรือรัน easy ล่าสุดเก่ากว่า 14 วัน (ค่าเก่าต้องไม่ถูกรายงานเป็นความสดวันนี้)
+    """
+    if easy_ef is None or easy_ef.empty:
+        return float("nan")
+    frame = easy_ef.sort_values("date")
+    anchor = frame["date"].iloc[-1]
+    if (pd.Timestamp(today) - anchor).days > EF_STALE_DAYS:
+        return float("nan")
+    recent = frame.tail(EF_RECENT_RUNS)
+    if len(recent) < EF_RECENT_RUNS:
+        return float("nan")
+    # 3 รันล่าสุดต้องอยู่ใกล้กันพอจะเรียกว่า "ตอนนี้" — ไม่งั้นรันเดือนก่อนจะถูกดึงมา
+    # เฉลี่ยรวมกับรันเมื่อวานแล้วรายงานเป็นความสดปัจจุบัน
+    if (anchor - recent["date"].iloc[0]).days > EF_STALE_DAYS:
+        return float("nan")
+    baseline = frame[
+        (frame["date"] < anchor)
+        & (frame["date"] >= anchor - pd.Timedelta(days=EF_BASELINE_DAYS))
+    ]
+    if len(baseline) < EF_BASELINE_MIN_RUNS:
+        return float("nan")
+    baseline_median = baseline["ef"].median()
+    if pd.isna(baseline_median) or baseline_median <= 0:
+        return float("nan")
+    return (recent["ef"].median() / baseline_median - 1) * 100.0
+
+
+def efficiency_status(pct):
+    """แปลง % การเปลี่ยนแปลงของ EF เป็น (อิโมจิ, คำอธิบาย)"""
+    if pd.isna(pct):
+        return "⚪", "ข้อมูลไม่พอ"
+    if pct >= EF_GAIN_PCT:
+        return "🔵", "ดีขึ้นชัด"
+    if pct < EF_REST_PCT:
+        return "🔴", "ประสิทธิภาพตก"
+    if pct < EF_WATCH_PCT:
+        return "🟡", "ประสิทธิภาพลด"
+    return "🟢", "ปกติ"
+
+
+def efficiency_display(pct):
+    """ข้อความในตาราง — บอกทิศทางเทียบฐานเสมอ ไม่ใช่ตัวเลขลอย ๆ"""
+    if pd.isna(pct):
+        return "–"
+    return f"{pct:+.0f}% จากฐาน 28 วัน"
 
 
 def personal_record_label(record_type_id, record_label):
@@ -683,38 +803,35 @@ def classify_intensity(avg_hr, lthr):
     return INTENSITY_ORDER[2]
 
 
-def acwr_status(ratio):
-    """แปลงค่า ACWR เป็น (อิโมจิ, คำอธิบาย)"""
-    if pd.isna(ratio):
-        return "⚪", "ข้อมูลไม่พอ"
-    if ratio > 1.5:
-        return "🔴", "เสี่ยงบาดเจ็บ"
-    if ratio > 1.3:
-        return "🟡", "โหลดขาขึ้น"
-    if ratio < 0.8:
-        return "🔵", "ต่ำกว่าฐาน"
-    return "🟢", "ปลอดภัย"
+def team_status(efficiency_pct, flags, has_workload, wellness_core_count,
+                has_any_wellness=None):
+    """Classify team readiness without ever turning missing evidence green.
 
+    ตัวตัดสินหลักคือ EF (การตอบสนองของร่างกาย) ไม่ใช่ปริมาณโหลดที่ทำไป — โหลด 7 วัน
+    เป็นบริบทเท่านั้นและไม่ดันสถานะเป็นแดงอีกแล้ว
 
-def team_status(acwr, flags, has_workload, wellness_core_count, has_any_wellness=None):
-    """Classify team readiness without ever turning missing evidence green."""
+    ขาด EF ไม่บล็อกเขียว: นักกีฬาที่ซ้อม HIIT/indoor เป็นหลักแทบไม่มีรัน easy ให้
+    คำนวณ ถ้าเอา EF เป็นเงื่อนไขจะค้าง "ข้อมูลไม่พอ" ถาวรทั้งที่ข้อมูลซ้อมครบ
+    """
     flags = list(flags or [])
     if has_any_wellness is None:
         has_any_wellness = wellness_core_count > 0
     if not has_workload and not has_any_wellness:
         return "⚪ ไม่มีข้อมูล"
-    if (pd.notna(acwr) and acwr > 1.5) or len(flags) >= 2:
+    if (pd.notna(efficiency_pct) and efficiency_pct < EF_REST_PCT) or len(flags) >= 2:
         return "🔴 ต้องพัก/ลดโหลด"
     if len(flags) == 1:
         return "🟡 เฝ้าระวัง"
-    if pd.isna(acwr) or wellness_core_count < 3:
+    if not has_workload or wellness_core_count < 3:
         return "⚪ ข้อมูลไม่พอ"
     return "🟢 พร้อมซ้อม"
 
 
-def compute_acwr(daily, end_date, history_start=None):
-    """คำนวณ ACWR รายวันจากตาราง (date, value): acute = ผลรวม 7 วัน, chronic = ผลรวม 28 วัน / 4
-    value = training_load หรือ ระยะวิ่ง(กม.) — ACWR เป็นอัตราส่วน จึงเทียบได้ทั้งสองหน่วย
+def compute_load_windows(daily, end_date, history_start=None):
+    """โหลดสะสมรายวันจากตาราง (date, value): acute = ผลรวม 7 วัน, chronic = 28 วัน / 4
+
+    คืนค่าดิบทั้งสองหน้าต่างโดยไม่หารเป็นอัตราส่วน — เดิมฟังก์ชันนี้คืนคอลัมน์ ``acwr``
+    ด้วย แต่ถูกถอดออก 25 ส.ค. 69 (ดูหมายเหตุที่ค่าคงที่ EF_* ด้านบน)
 
     ``history_start`` is the first calendar day for which absence of a workload
     row is a known rest day.  Without it, a long run-free period disappears from
@@ -722,15 +839,13 @@ def compute_acwr(daily, end_date, history_start=None):
     unavailable even though the athlete has older records.
     """
     if daily.empty:
-        return pd.DataFrame(columns=["date", "acute", "chronic", "acwr"])
+        return pd.DataFrame(columns=["date", "acute", "chronic"])
     first_day = pd.Timestamp(history_start) if history_start is not None else daily["date"].min()
     idx = pd.date_range(first_day, pd.Timestamp(end_date), freq="D")
     s = daily.set_index("date")["value"].reindex(idx, fill_value=0.0)
     acute = s.rolling(7, min_periods=7).sum()
     chronic = s.rolling(28, min_periods=28).sum() / 4
-    out = pd.DataFrame({"date": idx, "acute": acute.values, "chronic": chronic.values})
-    out["acwr"] = out["acute"] / out["chronic"].where(out["chronic"] > 0)
-    return out
+    return pd.DataFrame({"date": idx, "acute": acute.values, "chronic": chronic.values})
 
 
 def aggregate_pace_min_per_km(activity_rows):
@@ -994,7 +1109,7 @@ def load_data_availability(athlete_id, start_date, end_date):
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_daily_run_km(athlete_id, start_date, end_date):
-    """ระยะวิ่งรวมรายวัน (เฉพาะประเภทวิ่ง) สำหรับ ACWR"""
+    """ระยะวิ่งรวมรายวัน (เฉพาะประเภทวิ่ง) สำหรับโหลดสะสม"""
     conn = connect_db()
     placeholders = ",".join("?" for _ in RUN_TYPES)
     query = f"""
@@ -1024,6 +1139,29 @@ def load_first_run_date(athlete_id):
         (athlete_id, *RUN_TYPES)).fetchone()
     conn.close()
     return datetime.date.fromisoformat(row[0]) if row and row[0] else None
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def load_easy_runs(athlete_id, start_date, end_date):
+    """รันที่มี HR + ระยะ + เวลา ครบพอคำนวณ EF (คัด easy ทีหลังด้วย LTHR ของแต่ละคน)"""
+    conn = connect_db()
+    placeholders = ",".join("?" for _ in RUN_TYPES)
+    query = f"""
+        SELECT SUBSTR(start_time_local, 1, 10) AS date, distance_m, duration_sec, avg_hr
+        FROM fact_activity
+        WHERE athlete_id = ? AND activity_type IN ({placeholders})
+          AND start_time_local >= ? AND start_time_local <= ?
+          AND deleted_at IS NULL
+          AND avg_hr IS NOT NULL AND distance_m IS NOT NULL AND duration_sec > 0
+        ORDER BY start_time_local ASC
+    """
+    df = pd.read_sql_query(
+        query, conn, params=(athlete_id, *RUN_TYPES, start_date, f"{end_date} 23:59:59")
+    )
+    conn.close()
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -1108,7 +1246,7 @@ def load_daily_load(athlete_id, start_date, end_date):
 
 
 def load_daily_workload(athlete_id, start_date, end_date):
-    """คืน (df[date,value,sessions], metric, unit) สำหรับ ACWR
+    """คืน (df[date,value,sessions], metric, unit) สำหรับโหลดสะสม
     ใช้ training_load ถ้านาฬิกาให้ (จับ cross-training ครบ) ไม่งั้น fallback ระยะวิ่ง (กม.)"""
     if athlete_has_load(athlete_id):
         return load_daily_load(athlete_id, start_date, end_date), "training_load", "TL"
@@ -1118,7 +1256,7 @@ def load_daily_workload(athlete_id, start_date, end_date):
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def load_first_activity_date(athlete_id):
-    """วันแรกที่มีกิจกรรม (ทุกประเภท) — ใช้ตัดสินความพอของประวัติเมื่อ ACWR อิง training_load"""
+    """วันแรกที่มีกิจกรรม (ทุกประเภท) — ใช้ตัดสินความพอของประวัติเมื่อโหลดอิง training_load"""
     conn = connect_db()
     row = conn.execute(
         "SELECT MIN(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
@@ -1484,8 +1622,9 @@ tab_today, tab_team, tab_health, tab_train, tab_progress, tab_splits = st.tabs([
 # =====================================================================
 with tab_team:
     st.header("สถานะทีมวันนี้")
-    st.caption(f"ข้อมูล ณ {today.isoformat()} — ACWR = โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ของ 28 วัน "
-               "(ใช้ Garmin training_load ถ้านาฬิกาให้ = รวม cross-training, ไม่งั้นใช้ระยะวิ่ง)")
+    st.caption(f"ข้อมูล ณ {today.isoformat()} — ตัวตัดสินคือ **ประสิทธิภาพการวิ่งเบา (EF)** "
+               "= ความเร็ว ÷ HR ในรัน easy เทียบฐาน 28 วันของตัวเอง · "
+               "โหลด 7 วันเป็นบริบทว่าทำไปเท่าไหร่ ไม่ใช่คำตัดสิน")
 
     team_rows = []
     for _, ath in athletes_df.iterrows():
@@ -1494,7 +1633,7 @@ with tab_team:
         # โหลดย้อน 42 วัน (training_load ถ้านาฬิกาให้ = จับ cross-training ครบ ไม่งั้นระยะวิ่ง)
         daily, metric, unit = load_daily_workload(
             aid, (today - datetime.timedelta(days=42)).isoformat(), today.isoformat())
-        acute = chronic_wk = acwr = float("nan")
+        acute = chronic_wk = float("nan")
         sessions_7d = 0
         if not daily.empty:
             win7 = daily[daily["date"] >= pd.Timestamp(today - datetime.timedelta(days=6))]
@@ -1505,7 +1644,15 @@ with tab_team:
             days_of_history = (today - first).days + 1 if first else 0
             if days_of_history >= 28 and win28["value"].sum() > 0:
                 chronic_wk = win28["value"].sum() / 4
-                acwr = acute / chronic_wk
+
+        # ประสิทธิภาพการวิ่งเบา — ต้องมองย้อนพอให้ได้ฐาน 28 วันก่อนรัน easy ล่าสุด
+        ath_lthr, _ = get_lthr(ath["slug"], aid)
+        easy_ef = easy_run_efficiency(
+            load_easy_runs(aid, (today - datetime.timedelta(days=70)).isoformat(),
+                           today.isoformat()),
+            ath_lthr,
+        )
+        ef_pct = efficiency_change_pct(easy_ef, today)
 
         # Wellness แต่ละ endpoint อาจมาคนละรอบ จึงเลือก "ล่าสุดแยกทีละ field"
         # แทนการใช้แถวเดียวแล้วทำให้ Sleep/HRV ที่ยังใช้ได้ถูกซ่อนโดย snapshot บางส่วนของวันนี้
@@ -1552,10 +1699,10 @@ with tab_team:
 
         # ธงเฝ้าระวัง
         flags = []
-        if pd.notna(acwr) and acwr > 1.5:
-            flags.append(f"โหลดพุ่ง ACWR {acwr:.2f}")
-        elif pd.notna(acwr) and acwr > 1.3:
-            flags.append(f"โหลดขาขึ้น ACWR {acwr:.2f}")
+        if pd.notna(ef_pct) and ef_pct < EF_REST_PCT:
+            flags.append(f"ประสิทธิภาพตก {ef_pct:.0f}% จากฐาน")
+        elif pd.notna(ef_pct) and ef_pct < EF_WATCH_PCT:
+            flags.append(f"ประสิทธิภาพลด {ef_pct:.0f}% จากฐาน")
         if (pd.notna(bb) and bb < 40 and bb_completed_snap
                 and field_age_days(bb_completed_snap, today) is not None
                 and 0 <= field_age_days(bb_completed_snap, today) <= 1):
@@ -1585,15 +1732,13 @@ with tab_team:
             flags.append(f"Readiness ต่ำ ({ready:.0f} {ready_level.title()})"
                          if pd.notna(ready) else f"Readiness {ready_level.title()}")
 
-        # ห้ามเขียวเมื่อ ACWR เป็น NaN หรือ wellness สดมีไม่พอให้ประเมิน
+        # ห้ามเขียวเมื่อไม่มีหลักฐานการซ้อม หรือ wellness สดมีไม่พอให้ประเมิน
         status = team_status(
-            acwr, flags, not daily.empty, fresh_core_count,
+            ef_pct, flags, not daily.empty, fresh_core_count,
             any(snapshot is not None for snapshot in core_snaps),
         )
 
         coverage_notes = []
-        if pd.isna(acwr):
-            coverage_notes.append("ACWR ยังไม่มี")
         if fresh_core_count < 3:
             coverage_notes.append(f"wellness สด {fresh_core_count}/4 ค่า")
         freshness_note = " · ".join(
@@ -1605,17 +1750,16 @@ with tab_team:
             if snapshot and snapshot.get("date")
         ) or "ไม่มี wellness"
 
-        emoji, acwr_txt = acwr_status(acwr)
+        emoji, ef_txt = efficiency_status(ef_pct)
         team_rows.append({
             "นักกีฬา": name,
             "สถานะ": status,
             # อยู่ต้นตาราง (ไม่ใช่ท้ายสุด) เพราะตารางนี้มี 13 คอลัมน์ กว้างเกินจอปกติ —
             # วางไว้ท้ายก่อนหน้านี้ทำให้มองข้ามว่า "ไม่ขึ้น" ทั้งที่จริงมีข้อมูล แค่ต้องเลื่อนดู
             "สถานะซ้อม (Garmin)": _ts_base.title() if _ts_base else "–",
-            "ACWR": acwr_display(acwr, metric),
-            "โซน ACWR": f"{emoji} {acwr_txt}",
-            "โหลด 7 วัน": (f"{acute:.0f} {unit}" if metric == "training_load"
-                          else f"{acute:.1f} {unit}") if pd.notna(acute) else "–",
+            "ประสิทธิภาพการวิ่งเบา (EF)": efficiency_display(ef_pct),
+            "โซน EF": f"{emoji} {ef_txt}",
+            "โหลด 7 วัน": load_trend_display(acute, chronic_wk, metric, unit),
             "เซสชัน 7 วัน": sessions_7d,
             "Body Battery ตอนนี้/ล่าสุด": bb_now if pd.notna(bb_now) else None,
             "Sleep": sleep if pd.notna(sleep) else None,
@@ -1635,7 +1779,8 @@ with tab_team:
         "นักกีฬา",
         "สถานะ",
         "ธงเฝ้าระวัง",
-        "ACWR",
+        "ประสิทธิภาพการวิ่งเบา (EF)",
+        "โซน EF",
         "โหลด 7 วัน",
         "Body Battery ตอนนี้/ล่าสุด",
         "Sleep",
@@ -1647,9 +1792,15 @@ with tab_team:
         hide_index=True,
         column_config={
             "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-            "ACWR": st.column_config.TextColumn("ACWR",
-                                                help="โหลด 7 วัน ÷ ค่าเฉลี่ยรายสัปดาห์ 28 วัน — ปลอดภัย 0.8–1.3 | "
-                                                     "ฐานต่างกันเทียบข้ามคนไม่ได้"),
+            "ประสิทธิภาพการวิ่งเบา (EF)": st.column_config.TextColumn(
+                "ประสิทธิภาพการวิ่งเบา (EF)",
+                help="ความเร็ว (ม./นาที) ÷ HR เฉลี่ย ในรัน easy — median 3 รันล่าสุด "
+                     "เทียบ median ฐาน 28 วันของตัวเอง วิ่งเร็วขึ้นที่หัวใจเท่าเดิม = สดขึ้น | "
+                     "'–' = ยังมีรัน easy ไม่พอ ไม่ใช่ระบบขัดข้อง"),
+            "โหลด 7 วัน": st.column_config.TextColumn(
+                "โหลด 7 วัน",
+                help="ปริมาณที่ทำไปใน 7 วันและทิศทางเทียบฐาน 28 วัน — เป็นบริบท ไม่ใช่คำตัดสิน "
+                     "ฐานต่างกันเทียบข้ามคนไม่ได้"),
             "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
                 "Body Battery ตอนนี้/ล่าสุด", format="%.0f",
                 help="วันนี้ = ระดับล่าสุดระหว่างวัน; ถ้าไม่มีของวันนี้ = high ของวันล่าสุด "
@@ -1664,7 +1815,8 @@ with tab_team:
             hide_index=True,
             column_config={
                 "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-                "ACWR": st.column_config.TextColumn("ACWR"),
+                "ประสิทธิภาพการวิ่งเบา (EF)": st.column_config.TextColumn(
+                    "ประสิทธิภาพการวิ่งเบา (EF)"),
                 "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
                     "Body Battery ตอนนี้/ล่าสุด", format="%.0f"),
                 "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
@@ -1683,21 +1835,28 @@ with tab_team:
 
     with st.expander("เกณฑ์ที่ใช้ประเมิน", icon=":material/info:"):
         st.markdown(r"""
-**สถานะ:** 🔴 ต้องพัก = ACWR>1.5 หรือมีธงอย่างน้อย 2 ข้อ ·
+**สถานะ:** 🔴 ต้องพัก = EF ตกเกิน 7% จากฐาน หรือมีธงอย่างน้อย 2 ข้อ ·
 🟡 เฝ้าระวัง = มีธง 1 ข้อ ·
-🟢 พร้อมซ้อม = ไม่มีธง พร้อมมี ACWR และ wellness สดอย่างน้อย 3/4 ค่า ·
-⚪ ข้อมูลไม่พอ = ACWR ยังเป็นค่าว่างหรือ wellness สดน้อยกว่า 3/4 ค่า ·
+🟢 พร้อมซ้อม = ไม่มีธง พร้อมมีข้อมูลซ้อมและ wellness สดอย่างน้อย 3/4 ค่า ·
+⚪ ข้อมูลไม่พอ = ยังไม่มีข้อมูลซ้อม หรือ wellness สดน้อยกว่า 3/4 ค่า ·
 ⚪ ไม่มีข้อมูล = ยังไม่มีทั้ง workload และ wellness
 
-**ธงเฝ้าระวัง:** ACWR>1.3 · Body Battery<40 · Sleep<60 ·
+**ธงเฝ้าระวัง:** EF ลดเกิน 3% จากฐาน · Body Battery<40 · Sleep<60 ·
 RHR สูงกว่าฐาน≥+5 · HRV LOW/UNBALANCED ·
 Training Readiness LOW/POOR · Garmin status Strained/Overreaching/Unproductive
 
 **Body Battery ตอนนี้:** แสดงเป็นบริบทแต่ไม่ใช้เป็นธงระหว่างวัน; ธง BB<40 ใช้กับ
 Body Battery high ของวันที่จบแล้ว เพื่อลดการเตือนจากการลดลงตามปกติระหว่างวัน
 
-_ACWR ใช้ Garmin training\_load รวม cross-training ถ้านาฬิกาให้
-ไม่เช่นนั้นใช้ระยะวิ่ง_
+**ประสิทธิภาพการวิ่งเบา (EF)** = ความเร็ว (ม./นาที) ÷ HR เฉลี่ย นับเฉพาะรัน easy
+(HR ≤ 89% LTHR, ระยะ ≥ 3 กม.) เทียบ median ของ 3 รันล่าสุดกับ median ฐาน 28 วัน
+ของตัวเอง เกณฑ์ −3% / −7% มาจาก SD ของข้อมูลจริงในระบบ (4.4% และ 3.5%)
+ค่าว่างแปลว่ารัน easy ยังไม่พอ ไม่ใช่ระบบขัดข้อง
+
+_โหลด 7 วันเป็นบริบทว่าทำไปเท่าไหร่ ไม่ดันสถานะเป็นแดง — ใช้ Garmin training\_load
+รวม cross-training ถ้านาฬิกาให้ ไม่เช่นนั้นใช้ระยะวิ่ง เดิมช่องนี้เป็น ACWR ซึ่งถอดออก
+25 ส.ค. 69 หลังหลักฐานพบว่าอัตราส่วนนี้ทำนายการบาดเจ็บไม่ได้
+(Br J Sports Med 2025;59:1203-1210 · IJSPP 2020;15(6):907)_
 """)
 
 
@@ -1843,7 +2002,7 @@ with tab_today:
     if not training_load_supported:
         st.caption(
             "ยังไม่เคยได้รับ Garmin Training Load จากกิจกรรมที่เก็บไว้; "
-            "ACWR ของระบบจึงคำนวณจากระยะวิ่งและระบุแหล่งที่มาชัดเจน"
+            "โหลดสะสมของระบบจึงคำนวณจากระยะวิ่งและระบุแหล่งที่มาชัดเจน"
         )
 
     st.subheader("กิจกรรมวันนี้")
@@ -1888,15 +2047,21 @@ with tab_today:
                     st.metric("Training load", fmt_num(activity.get("training_load")))
 
     if team_row is not None:
-        st.subheader("บริบทโหลดสะสม")
+        st.subheader("ความสดและบริบทโหลด")
         with st.container(horizontal=True):
+            # EF เป็นตัวตัดสิน จึงมาก่อนและมีคำอ่านสถานะกำกับ ส่วนโหลดเป็นบริบทตามหลัง
             st.metric(
-                "ACWR ของระบบ",
-                team_row["ACWR"],
-                help="อัตราส่วนโหลด 7 วัน ÷ ฐาน 28 วัน ไม่ใช่ acwrFactorPercent ของ Garmin Readiness",
+                "ประสิทธิภาพการวิ่งเบา (EF)",
+                team_row["ประสิทธิภาพการวิ่งเบา (EF)"],
+                delta=team_row["โซน EF"],
+                delta_color="off",
+                help="ความเร็ว ÷ HR ในรัน easy เทียบฐาน 28 วันของตัวเอง — "
+                     "วิ่งเร็วขึ้นที่หัวใจเท่าเดิม = สดขึ้น",
                 border=True,
             )
-            st.metric("โหลด 7 วัน", team_row["โหลด 7 วัน"], border=True)
+            st.metric("โหลด 7 วัน", team_row["โหลด 7 วัน"],
+                      help="ปริมาณที่ทำไปและทิศทางเทียบฐาน 28 วัน — เป็นบริบท ไม่ใช่คำตัดสิน",
+                      border=True)
             st.metric("จำนวนเซสชัน 7 วัน", str(team_row["เซสชัน 7 วัน"]), border=True)
 
 
@@ -2131,7 +2296,7 @@ with tab_health:
                     "ปัจจัย Acute Load ต่อ Readiness",
                     (f"{fmt_num(acwr_factor_snap['value'])}%" if acwr_factor_snap else "–"),
                     help=("คะแนนองค์ประกอบที่ Garmin ใช้คำนวณ Training Readiness; "
-                          "ไม่ใช่ ACWR ratio (โหลด 7 วัน ÷ ฐาน 28 วัน) ที่ Dashboard คำนวณในแท็บการซ้อม · "
+                          "เป็นคะแนนปัจจัยของ Garmin Readiness ไม่ใช่โหลดสะสมที่ Dashboard คำนวณในแท็บการซ้อม · "
                           + field_freshness(acwr_factor_snap, today)),
                     border=True,
                 )
@@ -2213,7 +2378,7 @@ with tab_health:
             if factor_rows:
                 with st.expander("ดูองค์ประกอบที่ Garmin ใช้คำนวณ Readiness", icon=":material/tune:"):
                     st.dataframe(pd.DataFrame(factor_rows), hide_index=True)
-                    st.caption("คะแนนเหล่านี้เป็น factor ของ Readiness ไม่ใช่ค่า ACWR ratio")
+                    st.caption("คะแนนเหล่านี้เป็น factor ของ Readiness ไม่ใช่โหลดสะสมของระบบ")
         else:
             st.subheader("ความพร้อมซ้อมและเวลาฟื้นตัวจาก Garmin")
             readiness_summary = availability_by_key["readiness"]
@@ -2370,7 +2535,7 @@ with tab_health:
 
 
 # =====================================================================
-# TAB 4: TRAINING (นักกีฬาที่เลือก) — ACWR + 80/20 + กราฟเดิม
+# TAB 4: TRAINING (นักกีฬาที่เลือก) — โหลดสะสม + EF + 80/20 + กราฟเดิม
 # =====================================================================
 with tab_train:
     st.header(f"การซ้อม — {selected_name}", anchor=f"training-{selected_anchor}")
@@ -2391,59 +2556,119 @@ with tab_train:
             st.metric("เพซเฉลี่ย", f"{fmt_pace(avg_pace_raw)} /km" if pd.notna(avg_pace_raw) else "–", border=True)
             st.metric("เวลาวิ่งรวม", f"{total_hours:.1f} ชม.", border=True)
 
-        # ---------------- ACWR ----------------
-        st.subheader("โหลดสะสมและความเสี่ยง (ACWR)")
-        acwr_start = start_date - datetime.timedelta(days=56)
-        daily_wl, wl_metric, wl_unit = load_daily_workload(athlete_id, acwr_start.isoformat(), end_date.isoformat())
+        # ---------------- ประสิทธิภาพการวิ่งเบา (EF) — ตัวตัดสิน ----------------
+        st.subheader("ประสิทธิภาพการวิ่งเบา (EF)")
+        ef_lookback = start_date - datetime.timedelta(days=EF_BASELINE_DAYS)
+        lthr_for_tab, _ = get_lthr(selected_slug, athlete_id)
+        ef_all = easy_run_efficiency(
+            load_easy_runs(athlete_id, ef_lookback.isoformat(), end_date.isoformat()),
+            lthr_for_tab,
+        )
+        ef_pct_tab = efficiency_change_pct(ef_all, end_date)
+        ef_view = ef_all[ef_all["date"] >= pd.Timestamp(start_date)]
+
+        if ef_view.empty:
+            st.info(
+                "ยังไม่มีรัน easy ในช่วงนี้ที่คำนวณ EF ได้ "
+                f"(ต้องมี HR, ระยะ ≥ {EF_MIN_DISTANCE_M / 1000:.0f} กม. และ HR ≤ "
+                f"{EASY_MAX_PCT * 100:.0f}% ของ LTHR"
+                + (f" = {lthr_for_tab * EASY_MAX_PCT:.0f} bpm)" if lthr_for_tab else ")")
+                + " — เป็นเรื่องปกติของคนที่ซ้อม cross-training เป็นหลัก ไม่ใช่ระบบขัดข้อง",
+                icon=":material/info:",
+            )
+        else:
+            emoji, txt = efficiency_status(ef_pct_tab)
+            baseline_median = ef_all[
+                ef_all["date"] < ef_all["date"].iloc[-1]
+            ].tail(20)["ef"].median()
+            with st.container(horizontal=True):
+                st.metric("EF ล่าสุด (median 3 รัน)",
+                          f"{ef_all['ef'].tail(EF_RECENT_RUNS).median():.3f}",
+                          delta=f"{emoji} {txt}", delta_color="off", border=True)
+                st.metric("เทียบฐาน 28 วัน", efficiency_display(ef_pct_tab), border=True)
+                st.metric("จำนวนรัน easy ในช่วง", f"{len(ef_view)} ครั้ง", border=True)
+
+            fig_ef = go.Figure()
+            fig_ef.add_trace(go.Scatter(
+                x=ef_view["date"], y=ef_view["ef"], mode="lines+markers",
+                line=dict(color=C_BLUE, width=2), marker=dict(size=6), name="EF ต่อรัน",
+                connectgaps=False,
+                hovertemplate="%{x|%d %b}<br>EF %{y:.3f}<extra></extra>",
+            ))
+            if pd.notna(baseline_median):
+                fig_ef.add_trace(go.Scatter(
+                    x=ef_view["date"],
+                    y=[baseline_median] * len(ef_view),
+                    mode="lines", line=dict(color=C_SECOND, width=2, dash="dash"),
+                    name="ฐานของตัวเอง",
+                    hovertemplate="ฐาน %{y:.3f}<extra></extra>",
+                ))
+            fig_ef.update_layout(
+                title="ความเร็ว ÷ HR ในรัน easy — สูงขึ้น = วิ่งเร็วขึ้นที่หัวใจเท่าเดิม",
+                yaxis=dict(title="EF (เมตร/นาที ต่อ 1 bpm)"),
+                xaxis=dict(title="วันที่"),
+                showlegend=True, hovermode="x unified",
+            )
+            st.plotly_chart(fig_ef, width="stretch")
+            st.caption(
+                "EF ไวต่ออากาศร้อน พื้นผิว และความชัน จึงต้องอ่านเป็นเทรนด์ ไม่ใช่ค่าวันเดียว · "
+                "เกณฑ์ −3% / −7% มาจาก SD ของข้อมูลจริงในระบบนี้ (4.4% และ 3.5%)"
+            )
+
+        # ---------------- โหลดสะสม (บริบท ไม่ใช่คำตัดสิน) ----------------
+        st.subheader("โหลดสะสม (บริบท)")
+        load_start = start_date - datetime.timedelta(days=56)
+        daily_wl, wl_metric, wl_unit = load_daily_workload(athlete_id, load_start.isoformat(), end_date.isoformat())
         first_workload_date = (
             load_first_activity_date(athlete_id)
             if wl_metric == "training_load"
             else load_first_run_date(athlete_id)
         )
-        history_start = max(acwr_start, first_workload_date) if first_workload_date else acwr_start
-        acwr_df = compute_acwr(daily_wl, end_date, history_start=history_start)
-        acwr_view = acwr_df[acwr_df["date"] >= pd.Timestamp(start_date)]
-        acwr_valid = acwr_view.dropna(subset=["acwr"])
+        history_start = max(load_start, first_workload_date) if first_workload_date else load_start
+        load_df = compute_load_windows(daily_wl, end_date, history_start=history_start)
+        load_view = load_df[load_df["date"] >= pd.Timestamp(start_date)]
+        load_valid = load_view.dropna(subset=["acute"])
         _src = "Garmin training_load (รวม cross-training)" if wl_metric == "training_load" else "ระยะทางวิ่ง"
-        _afmt = "%.0f" if wl_metric == "training_load" else "%.1f"
+        _afmt = ".0f" if wl_metric == "training_load" else ".1f"
 
-        if acwr_valid.empty:
-            st.info("ยังไม่มีฐานโหลด 28 วันที่มากกว่าศูนย์พอคำนวณ ACWR")
+        if load_valid.empty:
+            st.info("ยังไม่มีข้อมูลครบ 7 วันพอสรุปโหลดสะสม")
         else:
-            latest_acwr = acwr_valid.iloc[-1]
-            emoji, txt = acwr_status(latest_acwr["acwr"])
+            latest_load = load_valid.iloc[-1]
             with st.container(horizontal=True):
-                st.metric("ACWR ล่าสุด", f"{latest_acwr['acwr']:.2f}", delta=f"{emoji} {txt}",
-                          delta_color="off", border=True)
-                st.metric("โหลด 7 วัน (Acute)", f"{latest_acwr['acute']:{_afmt[1:]}} {wl_unit}", border=True)
-                st.metric("ฐาน 28 วัน (Chronic)", f"{latest_acwr['chronic']:{_afmt[1:]}} {wl_unit}/สัปดาห์", border=True)
+                st.metric("โหลด 7 วัน", f"{latest_load['acute']:{_afmt}} {wl_unit}", border=True)
+                st.metric("ฐาน 28 วัน",
+                          f"{latest_load['chronic']:{_afmt}} {wl_unit}/สัปดาห์"
+                          if pd.notna(latest_load["chronic"]) else "–", border=True)
+                st.metric("ทิศทาง",
+                          load_trend_display(latest_load["acute"], latest_load["chronic"],
+                                             wl_metric, wl_unit).split(" · ")[-1]
+                          if pd.notna(latest_load["chronic"]) else "–", border=True)
 
-            y_max = max(2.0, float(acwr_valid["acwr"].max()) * 1.15)
-            fig_acwr = go.Figure()
-            bands = [
-                (0.0, 0.8, C_NEUTRAL, 0.35, "ต่ำกว่าฐาน"),
-                (0.8, 1.3, C_GOOD, 0.12, "ปลอดภัย 0.8–1.3"),
-                (1.3, 1.5, C_WARN, 0.15, "เฝ้าระวัง"),
-                (1.5, y_max, C_CRIT, 0.12, "เสี่ยงบาดเจ็บ > 1.5"),
-            ]
-            for y0, y1, color, op, label in bands:
-                fig_acwr.add_hrect(y0=y0, y1=y1, fillcolor=color, opacity=op, line_width=0,
-                                   annotation_text=label, annotation_position="top left",
-                                   annotation_font_size=11, annotation_font_color="#52514e")
-            fig_acwr.add_trace(go.Scatter(
-                x=acwr_view["date"], y=acwr_view["acwr"], mode="lines+markers",
-                line=dict(color=C_BLUE, width=2), marker=dict(size=6), name="ACWR",
+            fig_load = go.Figure()
+            fig_load.add_trace(go.Scatter(
+                x=load_view["date"], y=load_view["acute"], mode="lines",
+                line=dict(color=C_BLUE, width=2), name=f"โหลด 7 วัน ({wl_unit})",
                 connectgaps=False,
-                hovertemplate="%{x|%d %b}<br>ACWR %{y:.2f}<extra></extra>",
+                hovertemplate="%{x|%d %b}<br>7 วัน %{y:,.1f}<extra></extra>",
             ))
-            fig_acwr.update_layout(
-                title=f"Acute:Chronic Workload Ratio (จาก {_src})",
-                yaxis=dict(title="ACWR", range=[0, y_max]),
-                xaxis=dict(title="วันที่"),
-                showlegend=False, hovermode="x unified",
+            fig_load.add_trace(go.Scatter(
+                x=load_view["date"], y=load_view["chronic"], mode="lines",
+                line=dict(color=C_SECOND, width=2, dash="dash"),
+                name=f"ฐาน 28 วัน ({wl_unit}/สัปดาห์)", connectgaps=False,
+                hovertemplate="%{x|%d %b}<br>ฐาน %{y:,.1f}<extra></extra>",
+            ))
+            fig_load.update_layout(
+                title=f"ปริมาณที่ทำไปเทียบฐานของตัวเอง (จาก {_src})",
+                yaxis=dict(title=wl_unit), xaxis=dict(title="วันที่"),
+                showlegend=True, hovermode="x unified",
             )
-            st.plotly_chart(fig_acwr, width="stretch")
-            st.caption(f"ตัวแทนโหลด: {_src} — แตะโซนแดงเมื่อไหร่ = สัญญาณสั่งพัก/ลดโหลดทันที")
+            st.plotly_chart(fig_load, width="stretch")
+            st.caption(
+                f"ตัวแทนโหลด: {_src} — ตัวเลขนี้บอกว่าทำไปเท่าไหร่เทียบกับที่เคยทำ "
+                "ไม่มีโซนปลอดภัย/เสี่ยง เพราะหลักฐานหาเกณฑ์ตัดที่ทำนายการบาดเจ็บได้ไม่เจอ "
+                "(Br J Sports Med 2025;59:1203-1210)"
+            )
 
         # ---------------- 80/20 (จากเวลาในโซน HR จริงของนาฬิกา) ----------------
         st.subheader("สัดส่วนความหนักการซ้อม (กฎ 80/20)")
