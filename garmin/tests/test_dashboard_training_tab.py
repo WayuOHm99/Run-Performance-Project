@@ -92,6 +92,31 @@ def seed_training(conn):
         )
 
 
+def seed_zone_setup_conflict(conn):
+    """นาฬิกาตั้งโซนต่ำกว่า LTHR จากผลเทส — เคสจริงของ Tong เมื่อ 26 ส.ค. 69
+
+    HR สูงสุด 190 ทำให้ระบบประมาณ LTHR = 169 → เพดาน easy 150 bpm
+    ทุกรันวิ่งที่ avg_hr 140 จึงเป็น "เบา" ตามกฎของโปรเจกต์ แต่วินาทีในโซนที่นาฬิกา
+    เก็บมากลับกองอยู่ Z3 เกือบทั้งหมด = สองเกณฑ์ให้คำตอบคนละอย่าง
+    (วัดจริง: Tong เบา 31% ตามโซนนาฬิกา แต่ 72% ตาม %LTHR = ต่าง 41 จุด)
+    """
+    conn.execute(
+        "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
+        "VALUES (1, 'tester', 'Tester')"
+    )
+    for offset in range(16):
+        day = LAST_DAY - datetime.timedelta(days=28 - offset)
+        conn.execute(
+            "INSERT INTO fact_activity ("
+            " activity_id, athlete_id, activity_type, start_time_local, distance_m,"
+            " duration_sec, avg_hr, max_hr, avg_pace_min_per_km, training_effect_aerobic,"
+            " hr_zone1_sec, hr_zone2_sec, hr_zone3_sec, hr_zone4_sec, hr_zone5_sec)"
+            " VALUES (?, 1, 'running', ?, 8000, 3000, 140, 190, 6.2, 2.5,"
+            " 120, 300, 2400, 120, 60)",
+            (3000 + offset, f"{day.isoformat()} 06:00:00"),
+        )
+
+
 class TrainingTabDesignTests(unittest.TestCase):
     """เรนเดอร์แท็บการซ้อมจริงแล้วอ่านสิ่งที่ออกไปหน้าเว็บ"""
 
@@ -249,6 +274,59 @@ class TrainingTabDesignTests(unittest.TestCase):
         self.assertIn(
             "วิ่ง", cards[0].label,
             f"การ์ดไม่ได้บอกว่านับเฉพาะการวิ่ง: {cards[0].label!r}",
+        )
+
+
+class ZoneSetupConflictTests(unittest.TestCase):
+    """สองเกณฑ์ความหนักที่ขัดกันต้องถูกพูดออกมา ไม่ใช่เลือกข้างเงียบ ๆ
+
+    ระบบมีเกณฑ์ความหนักสองชุดพร้อมกัน — วินาทีในโซนที่นาฬิกาเก็บ (ที่โดนัทใช้)
+    กับ %LTHR จากผลเทส (ที่ EF ใช้) วัดจริง 26 ส.ค. 69: Dan ตรงกัน 5 จุด
+    แต่ Tong ต่างกัน **41 จุด** และ P'kao 24 จุด — ตัวเลข 80/20 ของสองคนนั้น
+    จึงเชื่อไม่ได้จนกว่าจะรู้ว่าโซนบนนาฬิกาตั้งตรงหรือเปล่า
+    """
+
+    def test_a_disagreement_between_the_two_intensity_rules_is_reported(self):
+        tab, _ = render_tab(TRAINING_TAB_LABEL, seed_zone_setup_conflict)
+        page = " ".join(
+            [element.value for element in tab.get("caption") if element.value]
+            + [element.value for element in tab.get("markdown") if element.value]
+            + [element.value for element in tab.get("warning") if element.value]
+            + [element.proto.help for element in tab.get("metric") if element.proto.help]
+        )
+        self.assertIn(
+            "ตั้งโซน", page,
+            "หน้าจอไม่ได้บอกว่าโซนบนนาฬิกากับ LTHR จากผลเทสให้คำตอบต่างกัน",
+        )
+
+    def test_an_athlete_whose_zones_agree_is_not_nagged(self):
+        """Dan ตรงกัน 5 จุด — ถ้าเตือนทุกคนคำเตือนจะกลายเป็นสิ่งที่ถูกมองข้าม"""
+        tab, _ = render_tab(TRAINING_TAB_LABEL, seed_training)
+        # ต้องกวาด warning ด้วย — คำเตือนอยู่ในนั้น ไม่ใช่ caption
+        # รอบแรกลืมเก็บ แล้ว mutation "เตือนทุกคน" ก็ผ่านฉลุย
+        page = " ".join(
+            [element.value for element in tab.get("caption") if element.value]
+            + [element.value for element in tab.get("warning") if element.value]
+            + [element.proto.help for element in tab.get("metric") if element.proto.help]
+        )
+        self.assertNotIn("ตั้งโซน", page, "เตือนทั้งที่สองเกณฑ์ให้คำตอบตรงกัน")
+
+    def test_the_run_count_says_how_many_days_were_trained(self):
+        """"44 ครั้ง" คือจำนวนรายการ ไม่ใช่เซสชัน — Tong ซ้อมจริง 19 วัน
+
+        Tong/Dan บันทึก warm-up / งานหลัก / cool-down เป็นคนละรายการ (2.3 และ 2.1
+        รายการต่อวันที่ซ้อม) โค้ชที่อ่าน "44 ครั้ง" จะเข้าใจว่าซ้อม 44 เซสชัน
+        """
+        tab, _ = render_tab(TRAINING_TAB_LABEL, seed_zone_setup_conflict)
+        cards = [
+            element for element in tab.get("metric")
+            if "ครั้งที่วิ่ง" in element.label or "รายการวิ่ง" in element.label
+        ]
+        self.assertTrue(cards, "ไม่มีการ์ดนับจำนวนการวิ่ง")
+        note = (cards[0].proto.delta or "") + " " + (cards[0].proto.help or "")
+        self.assertIn(
+            "วัน", note,
+            f"การ์ดไม่ได้บอกว่าซ้อมจริงกี่วัน: {note!r}",
         )
 
 
