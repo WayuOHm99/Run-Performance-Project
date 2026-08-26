@@ -15,6 +15,7 @@
 
 import base64
 import datetime
+import importlib.util
 import math
 import os
 import sqlite3
@@ -49,7 +50,21 @@ def y_values(trace):
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
-REAL_DB = GARMIN_ROOT / "data" / "garmin.db"
+
+
+def load_script(name, filename):
+    spec = importlib.util.spec_from_file_location(
+        name, GARMIN_ROOT / "scripts" / filename
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# schema มาจากสคริปต์ที่สร้าง DB จริง ไม่ใช่จาก `data/garmin.db` — ไฟล์นั้นเป็นข้อมูล
+# ของเครื่องนี้ ไม่ได้อยู่ในรีโป เทสที่อ่านมันจึงพังทั้งชุดบน CI (เจอจริง PR #47)
+# และการอ่านจากที่นี่ยังทำให้เทสแดงเองเมื่อ schema ขยับ แทนที่จะเงียบไปเฉย ๆ
+schema = load_script("garmin_schema_for_recovery_tab", "02_init_schema.py")
 
 RECOVERY_TAB_LABEL = ":material/bedtime: การฟื้นตัว"
 MAIN_TABS_KEY = "main_tabs"
@@ -59,27 +74,16 @@ LAST_DAY = datetime.date.today()
 
 
 def build_test_db(directory, *, readiness):
-    """ปั้น garmin.db จาก schema จริง ใส่นักกีฬาคนเดียว 30 วัน
+    """ปั้น garmin.db ด้วย `02_init_schema.py` แล้วใส่นักกีฬาคนเดียว 30 วัน
 
     ``readiness=False`` จำลองนาฬิกาที่ไม่ส่ง Training Readiness/Recovery Time
     ซึ่งเป็นเคสของนักกีฬาสองในสามคนจริงในโปรเจกต์นี้
     """
     destination = Path(directory) / "garmin.db"
-    source = sqlite3.connect(f"file:{REAL_DB}?mode=ro", uri=True)
-    try:
-        statements = [
-            row[0] for row in source.execute(
-                "SELECT sql FROM sqlite_master "
-                "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'"
-            )
-        ]
-    finally:
-        source.close()
+    schema.init_schema(destination)
 
     conn = sqlite3.connect(destination)
     try:
-        for statement in statements:
-            conn.execute(statement)
         conn.execute(
             "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
             "VALUES (1, 'tester', 'Tester')"
