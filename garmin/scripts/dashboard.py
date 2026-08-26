@@ -1511,6 +1511,32 @@ def usable_hr_zone_rows(activity_rows, zone_columns):
     return activity_rows.loc[zones.gt(0).any(axis=1)].copy()
 
 
+def intensity_minutes(activity_rows, zone_columns):
+    """รวมเวลาในโซน HR เป็นสามถัง เบา/กลาง/หนัก (นาที)
+
+    คืน ``None`` เมื่อไม่มีวินาทีในโซนเลย — ผู้เรียกจะได้ไม่ต้องวาดวงเปล่า
+    """
+    rows = usable_hr_zone_rows(activity_rows, zone_columns)
+    if rows is None or rows.empty:
+        return None
+    zones = rows[list(zone_columns)].apply(pd.to_numeric, errors="coerce")
+    zones = zones.clip(lower=0).fillna(0).sum()
+    buckets = {
+        INTENSITY_ORDER[0]: (zones[zone_columns[0]] + zones[zone_columns[1]]) / 60,
+        INTENSITY_ORDER[1]: zones[zone_columns[2]] / 60,
+        INTENSITY_ORDER[2]: (zones[zone_columns[3]] + zones[zone_columns[4]]) / 60,
+    }
+    return buckets if sum(buckets.values()) > 0 else None
+
+
+def easy_share_pct(buckets):
+    """สัดส่วนเวลาเบาเป็น % — คืน NaN เมื่อไม่มีเวลาเลย แทนการคืน 0 ที่อ่านว่า "หนักหมด" """
+    if not buckets:
+        return float("nan")
+    total = sum(buckets.values())
+    return (buckets[INTENSITY_ORDER[0]] / total * 100) if total > 0 else float("nan")
+
+
 def analyze_distance_halves(splits):
     """Return pace/HR for equal-distance halves, fractionally splitting a lap.
 
@@ -3547,35 +3573,64 @@ if tab_train.open:
             zdf = usable_hr_zone_rows(activity_df, zone_cols) if have_zone_cols else activity_df.iloc[0:0]
 
             if not zdf.empty:
-                z = zdf[zone_cols].apply(pd.to_numeric, errors="coerce").clip(lower=0).fillna(0).sum()
-                buckets = {
-                    INTENSITY_ORDER[0]: (z["hr_zone1_sec"] + z["hr_zone2_sec"]) / 60,   # Z1-2 เบา
-                    INTENSITY_ORDER[1]: z["hr_zone3_sec"] / 60,                          # Z3 กลาง
-                    INTENSITY_ORDER[2]: (z["hr_zone4_sec"] + z["hr_zone5_sec"]) / 60,    # Z4-5 หนัก
-                }
-                dist = pd.DataFrame({"intensity": list(buckets), "minutes": list(buckets.values())})
-                total_min = dist["minutes"].sum()
-                easy_pct = (buckets[INTENSITY_ORDER[0]] / total_min * 100) if total_min > 0 else 0.0
+                # กฎ 80/20 เป็นเรื่องของโปรแกรม *วิ่ง* — เวลาในโซนจาก HIIT/มวย/indoor
+                # cardio เป็นงานคนละชนิดที่เจือจางตัวเลขจนอ่านผิด (วัดจริง 26 ส.ค. 69:
+                # P'kao เห็นเบา 33% ทั้งที่เฉพาะการวิ่งเบาแค่ 22% และหนักถึง 53%)
+                # จึงวาดสองวง และให้การ์ดอ่านจากวงการวิ่ง
+                run_zdf = zdf[zdf["activity_type"].isin(RUN_TYPES)]
+                run_buckets = intensity_minutes(run_zdf, zone_cols)
+                all_buckets = intensity_minutes(zdf, zone_cols)
+                headline = run_buckets or all_buckets
+                headline_is_run = run_buckets is not None
+                easy_pct = easy_share_pct(headline)
+
+                # วงที่สองมีความหมายต่อเมื่อ cross-training กินเวลาจริง — ไม่งั้นสองวง
+                # จะเหมือนกันเป๊ะ (เคสของ Tong/Dan ที่วิ่งเกือบ 100%) แล้วกลายเป็นสิ่งรบกวน
+                cross_share = 0.0
+                if run_buckets and all_buckets:
+                    cross_share = 1 - sum(run_buckets.values()) / sum(all_buckets.values())
+                rings = [("การวิ่ง", run_buckets)] if headline_is_run else []
+                if cross_share >= 0.10 and all_buckets:
+                    rings.append(("ทั้งหมด (รวม cross-training)", all_buckets))
+                if not rings:
+                    rings = [("ทั้งหมด", all_buckets)]
 
                 col_pie, col_info = st.columns([3, 2])
                 with col_pie:
-                    fig_pie = px.pie(dist, values="minutes", names="intensity", hole=0.55,
-                                     color="intensity", color_discrete_map=INTENSITY_COLORS,
-                                     category_orders={"intensity": INTENSITY_ORDER},
-                                     title="สัดส่วนเวลาซ้อมตามโซน HR จริง (Garmin zones)")
-                    fig_pie.update_traces(textinfo="percent+label", sort=False,
-                                          hovertemplate="%{label}<br>%{value:.0f} นาที (%{percent})<extra></extra>")
+                    fig_pie = go.Figure()
+                    for index, (ring_name, ring_buckets) in enumerate(rings):
+                        span = 1 / len(rings)
+                        fig_pie.add_trace(go.Pie(
+                            labels=INTENSITY_ORDER,
+                            values=[ring_buckets[name] for name in INTENSITY_ORDER],
+                            name=ring_name, hole=0.55, sort=False,
+                            marker=dict(colors=[INTENSITY_COLORS[n] for n in INTENSITY_ORDER]),
+                            domain=dict(x=[index * span, (index + 1) * span]),
+                            title=dict(text=ring_name),
+                            textinfo="percent",
+                            hovertemplate=(f"{ring_name}<br>%{{label}}<br>"
+                                           "%{value:.0f} นาที (%{percent})<extra></extra>"),
+                        ))
+                    fig_pie.update_layout(
+                        title="สัดส่วนเวลาซ้อมตามโซน HR จริง (Garmin zones)",
+                        legend=dict(orientation="h", yanchor="bottom", y=-0.12),
+                    )
                     st.plotly_chart(fig_pie, width="stretch")
                 with col_info:
-                    st.metric("สัดส่วนเบา (Z1-2 ตามเวลาจริง)", f"{easy_pct:.0f}%",
+                    label = ("สัดส่วนเบาของการวิ่ง (Z1-2 ตามเวลาจริง)" if headline_is_run
+                             else "สัดส่วนเบา (Z1-2 ตามเวลาจริง)")
+                    all_pct = easy_share_pct(all_buckets)
+                    st.metric(label, f"{easy_pct:.0f}%",
                               delta=f"{easy_pct - 80:+.0f}% เทียบเป้า 80%",
                               delta_color="normal" if easy_pct >= 80 else "inverse",
                               border=True,
-                              help=f"จากเวลาในโซน HR จริงของ {len(zdf)} กิจกรรม "
-                                   "(รวม cross-training) — แม่นกว่าเฉลี่ยทั้งเซสชัน "
-                                   "เพราะนาฬิกาเก็บวินาทีต่อโซนจริง")
+                              help=("นับจากเวลาในโซน HR จริงที่นาฬิกาเก็บวินาทีต่อโซน "
+                                    f"({len(run_zdf) if headline_is_run else len(zdf)} กิจกรรม) · "
+                                    + (f"รวม cross-training ทั้งหมดได้ {all_pct:.0f}%"
+                                       if headline_is_run and pd.notna(all_pct)
+                                       else "ยังไม่มีการวิ่งที่มีเวลาในโซนในช่วงนี้")))
                     for name in INTENSITY_ORDER:
-                        st.markdown(f"- **{name}** — {buckets[name]:.0f} นาที")
+                        st.markdown(f"- **{name}** — {headline[name]:.0f} นาที")
             else:
                 # fallback วิธีเดิม (avg HR ต่อเซสชัน) เมื่อไม่มี time-in-zone
                 lthr, lthr_source = get_lthr(selected_slug, athlete_id)
@@ -3707,9 +3762,19 @@ if tab_progress.open:
         if not vo2.empty or not _fit_age.empty:
             with st.container(horizontal=True):
                 if not vo2.empty:
+                    # Garmin คำนวณ VO2max ใหม่เฉพาะวันที่วิ่ง GPS นอกลู่ นักกีฬาที่วิ่งลู่
+                    # เป็นหลักจึงเห็นค่าเดิมค้างเป็นเดือน (P'kao ค้าง 26 วันเมื่อ 26 ส.ค. 69)
+                    # การ์ดต้องบอกวันที่ของค่านั้น และห้ามเทียบกับตัวเองแล้วขึ้น +0.0
                     first_v, last_v = vo2["vo2max_trend"].iloc[0], vo2["vo2max_trend"].iloc[-1]
+                    vo2_snap = latest_field(wellness_df, "vo2max_trend")
+                    vo2_delta = (f"{last_v - first_v:+.1f} เทียบต้นช่วง"
+                                 if len(vo2) > 1 else "มีค่าเดียวในช่วงนี้")
                     st.metric("VO2max ล่าสุด (Garmin)", f"{last_v:.1f}",
-                              delta=f"{last_v - first_v:+.1f} เทียบต้นช่วง", border=True)
+                              delta=vo2_delta,
+                              delta_color="normal" if len(vo2) > 1 else "off",
+                              border=True,
+                              help=("Garmin อัปเดตเฉพาะวันที่มีวิ่ง GPS นอกลู่ · "
+                                    + field_freshness(vo2_snap, today)))
                 if not _fit_age.empty:
                     st.metric("Fitness Age", fmt_num(_fit_age.iloc[-1]), border=True)
         if not vo2.empty:
