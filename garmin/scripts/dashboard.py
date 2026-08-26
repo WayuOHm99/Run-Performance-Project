@@ -1621,6 +1621,32 @@ def intensity_minutes(activity_rows, zone_columns):
     return buckets if sum(buckets.values()) > 0 else None
 
 
+# สองเกณฑ์ต่างกันเกินกี่จุดถึงเรียกว่า "ขัดกัน" — วัดจากของจริง 26 ส.ค. 69:
+# Dan ต่าง 5 จุด (โซนตั้งตรง) · P'kao 24 จุด · Tong 41 จุด ช่องว่างแยกสองกลุ่มชัด
+# จึงตั้งไว้กลาง ๆ ที่ 15 ไม่ใช่ค่าที่เดาจากความรู้สึก
+ZONE_SETUP_CONFLICT_PTS = 15.0
+
+
+def lthr_intensity_minutes(activity_rows, lthr):
+    """รวมเวลาเป็นสามถังโดยจำแนกจาก avg HR เทียบ LTHR ของผลเทส (โซน Friel)
+
+    เป็นเกณฑ์คนละชุดกับวินาทีในโซนที่นาฬิกาเก็บ — ใช้เทียบกันเพื่อจับว่าโซนบนนาฬิกา
+    ตั้งตรงกับผลเทสหรือเปล่า ไม่ได้ใช้แทนกัน
+    """
+    if activity_rows is None or activity_rows.empty or not lthr:
+        return None
+    buckets = {name: 0.0 for name in INTENSITY_ORDER}
+    for _, row in activity_rows.iterrows():
+        name = classify_intensity(
+            pd.to_numeric(row.get("avg_hr"), errors="coerce"), lthr
+        )
+        seconds = pd.to_numeric(row.get("duration_sec"), errors="coerce")
+        if name is None or pd.isna(seconds) or seconds <= 0:
+            continue
+        buckets[name] += seconds / 60
+    return buckets if sum(buckets.values()) > 0 else None
+
+
 def easy_share_pct(buckets):
     """สัดส่วนเวลาเบาเป็น % — คืน NaN เมื่อไม่มีเวลาเลย แทนการคืน 0 ที่อ่านว่า "หนักหมด" """
     if not buckets:
@@ -3536,7 +3562,14 @@ if tab_train.open:
 
             with st.container(horizontal=True):
                 st.metric("ระยะวิ่งรวม", f"{total_distance:.2f} km", border=True)
-                st.metric("จำนวนครั้งที่วิ่ง", f"{len(runs_df)}", border=True)
+                # Tong/Dan บันทึก warm-up / งานหลัก / cool-down เป็นคนละรายการ
+                # (2.3 และ 2.1 รายการต่อวันที่ซ้อม) "44 ครั้ง" จึงอ่านเป็น 44 เซสชันไม่ได้
+                run_days = (runs_df["start_time_local"].astype(str).str[:10].nunique()
+                            if not runs_df.empty else 0)
+                st.metric("รายการวิ่ง", f"{len(runs_df)}",
+                          delta=f"{run_days} วันที่ซ้อม", delta_color="off", border=True,
+                          help="นาฬิกาบันทึก warm-up / งานหลัก / cool-down เป็นคนละรายการ "
+                               "จำนวนรายการจึงมากกว่าจำนวนเซสชันจริง")
                 st.metric("เพซเฉลี่ย", f"{fmt_pace(avg_pace_raw)} /km" if pd.notna(avg_pace_raw) else "–", border=True)
                 st.metric("เวลาวิ่งรวม", f"{total_hours:.1f} ชม.", border=True)
 
@@ -3695,6 +3728,18 @@ if tab_train.open:
                 if not rings:
                     rings = [("ทั้งหมด", all_buckets)]
 
+                # ระบบมีเกณฑ์ความหนักสองชุด — วินาทีในโซนที่นาฬิกาเก็บ (โดนัทใช้) กับ
+                # %LTHR จากผลเทส (EF ใช้) ถ้าโซนบนนาฬิกาตั้งไม่ตรงกับผลเทส สองตัวจะ
+                # ให้คำตอบคนละอย่างโดยไม่มีใครบอก (วัดจริง 26 ส.ค. 69: Dan ต่าง 5 จุด
+                # แต่ Tong 41 จุด และ P'kao 24 จุด) จึงเทียบแล้วพูดออกมาเมื่อขัดกันจริง
+                lthr_for_zone_check, _ = get_lthr(selected_slug, athlete_id)
+                lthr_buckets = lthr_intensity_minutes(
+                    run_zdf if headline_is_run else zdf, lthr_for_zone_check
+                )
+                lthr_easy = easy_share_pct(lthr_buckets)
+                zone_gap = (abs(easy_pct - lthr_easy)
+                            if pd.notna(easy_pct) and pd.notna(lthr_easy) else float("nan"))
+
                 col_pie, col_info = st.columns([3, 2])
                 with col_pie:
                     fig_pie = go.Figure()
@@ -3731,6 +3776,14 @@ if tab_train.open:
                                        else "ยังไม่มีการวิ่งที่มีเวลาในโซนในช่วงนี้")))
                     for name in INTENSITY_ORDER:
                         st.markdown(f"- **{name}** — {headline[name]:.0f} นาที")
+                if pd.notna(zone_gap) and zone_gap >= ZONE_SETUP_CONFLICT_PTS:
+                    st.warning(
+                        f"โซนบนนาฬิกาบอกว่าเบา {easy_pct:.0f}% แต่ LTHR จากผลเทส "
+                        f"({lthr_for_zone_check} bpm) บอกว่าเบา {lthr_easy:.0f}% "
+                        f"— ต่างกัน {zone_gap:.0f} จุด **ตรวจการตั้งโซนบนนาฬิกา**"
+                        " หรือเทส LTHR ใหม่ ก่อนใช้ตัวเลขนี้ตัดสินโปรแกรม",
+                        icon=":material/rule:",
+                    )
             else:
                 # fallback วิธีเดิม (avg HR ต่อเซสชัน) เมื่อไม่มี time-in-zone
                 lthr, lthr_source = get_lthr(selected_slug, athlete_id)
