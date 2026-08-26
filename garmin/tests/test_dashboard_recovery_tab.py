@@ -13,110 +13,59 @@
 - **ห้ามกำแพงตัวหนังสือ** — caption ยาว ๆ ใต้ทุกกราฟทำให้หาค่าที่ต้องดูไม่เจอ
 """
 
-import base64
 import datetime
-import importlib.util
-import math
-import os
-import sqlite3
-import tempfile
+import sys
 import unittest
 from pathlib import Path
 
-import numpy as np
-import plotly.io as pio
+# harness เป็นไฟล์พี่น้องในโฟลเดอร์เดียวกัน — `unittest discover -s tests` ใส่ path นี้ให้เอง
+# แต่การเรียกแบบ `python -m unittest tests.<module>` ไม่ใส่ จึงต้องบอกเองเพื่อให้รันได้ทั้งสองท่า
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from dashboard_tab_harness import (
+    LAST_DAY,
+    RECOVERY_TAB_LABEL,
+    is_missing,
+    render_tab,
+    y_values,
+)
 
 
-def is_missing(value):
-    """ช่องว่างบนเส้นกราฟมาถึงเทสในรูป ``None`` หรือ ``NaN`` แล้วแต่ชนิดคอลัมน์"""
-    return value is None or (isinstance(value, float) and math.isnan(value))
-
-
-def y_values(trace):
-    """คืนค่าบนแกน y เป็นตัวเลขจริง
-
-    Streamlit ส่งกราฟเป็น JSON ที่ย่อ y เป็น typed array base64
-    (``{"dtype": "f8", "bdata": "..."}``) และ ``pio.from_json`` ก็ไม่ได้ถอดให้
-    เทสที่วนบน ``trace.y`` ตรง ๆ จึงวนบนชื่อคีย์สองตัวแล้วเขียวโดยไม่ได้ดูข้อมูลเลย
-    """
-    raw = trace.y
-    if raw is None:
-        return []
-    if isinstance(raw, dict):
-        return np.frombuffer(
-            base64.b64decode(raw["bdata"]), dtype=raw["dtype"]
-        ).tolist()
-    return list(raw)
-
-GARMIN_ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
-
-
-def load_script(name, filename):
-    spec = importlib.util.spec_from_file_location(
-        name, GARMIN_ROOT / "scripts" / filename
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-# schema มาจากสคริปต์ที่สร้าง DB จริง ไม่ใช่จาก `data/garmin.db` — ไฟล์นั้นเป็นข้อมูล
-# ของเครื่องนี้ ไม่ได้อยู่ในรีโป เทสที่อ่านมันจึงพังทั้งชุดบน CI (เจอจริง PR #47)
-# และการอ่านจากที่นี่ยังทำให้เทสแดงเองเมื่อ schema ขยับ แทนที่จะเงียบไปเฉย ๆ
-schema = load_script("garmin_schema_for_recovery_tab", "02_init_schema.py")
-
-RECOVERY_TAB_LABEL = ":material/bedtime: การฟื้นตัว"
-MAIN_TABS_KEY = "main_tabs"
-
-# วันสุดท้ายของข้อมูลที่ปั้น — ใช้วันจริงเพื่อให้ช่วงเวลาเริ่มต้นของหน้าครอบข้อมูลนี้
-LAST_DAY = datetime.date.today()
-
-
-def build_test_db(directory, *, readiness):
-    """ปั้น garmin.db ด้วย `02_init_schema.py` แล้วใส่นักกีฬาคนเดียว 30 วัน
+def seed_wellness(conn, *, readiness):
+    """ใส่นักกีฬาคนเดียวกับ wellness 30 วัน (เว้นวันจริงหนึ่งวัน)
 
     ``readiness=False`` จำลองนาฬิกาที่ไม่ส่ง Training Readiness/Recovery Time
     ซึ่งเป็นเคสของนักกีฬาสองในสามคนจริงในโปรเจกต์นี้
     """
-    destination = Path(directory) / "garmin.db"
-    schema.init_schema(destination)
-
-    conn = sqlite3.connect(destination)
-    try:
+    conn.execute(
+        "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
+        "VALUES (1, 'tester', 'Tester')"
+    )
+    for offset in range(30):
+        if offset == 10:
+            # เว้นวันจริงหนึ่งวัน — Garmin ไม่ส่งข้อมูลทุกวันเสมอไป และช่องว่างนี้
+            # คือของที่ทำให้เทส "ห้ามลากเส้นข้ามวันที่ไม่มีค่า" มีอะไรให้จับ
+            continue
+        day = (LAST_DAY - datetime.timedelta(days=29 - offset)).isoformat()
         conn.execute(
-            "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
-            "VALUES (1, 'tester', 'Tester')"
+            "INSERT INTO fact_daily_wellness ("
+            " athlete_id, calendar_date, resting_hr, hrv_last_night,"
+            " hrv_weekly_avg, sleep_score, body_battery_high, stress_avg,"
+            " training_readiness, recovery_time_min, fetched_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                day,
+                48 + offset % 4,
+                60 + offset % 9,
+                62,
+                70 + offset % 10,
+                85,
+                30 + offset % 12,
+                (55 + offset % 20) if readiness else None,
+                (600 + offset * 5) if readiness else None,
+                day + "T08:00:00Z",
+            ),
         )
-        for offset in range(30):
-            if offset == 10:
-                # เว้นวันจริงหนึ่งวัน — Garmin ไม่ส่งข้อมูลทุกวันเสมอไป และช่องว่างนี้
-                # คือของที่ทำให้เทส "ห้ามลากเส้นข้ามวันที่ไม่มีค่า" มีอะไรให้จับ
-                continue
-            day = (LAST_DAY - datetime.timedelta(days=29 - offset)).isoformat()
-            conn.execute(
-                "INSERT INTO fact_daily_wellness ("
-                " athlete_id, calendar_date, resting_hr, hrv_last_night,"
-                " hrv_weekly_avg, sleep_score, body_battery_high, stress_avg,"
-                " training_readiness, recovery_time_min, fetched_at)"
-                " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    day,
-                    48 + offset % 4,
-                    60 + offset % 9,
-                    62,
-                    70 + offset % 10,
-                    85,
-                    30 + offset % 12,
-                    (55 + offset % 20) if readiness else None,
-                    (600 + offset * 5) if readiness else None,
-                    day + "T08:00:00Z",
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-    return destination
 
 
 class RecoveryTabRenderTests(unittest.TestCase):
@@ -124,46 +73,9 @@ class RecoveryTabRenderTests(unittest.TestCase):
 
     @staticmethod
     def render(*, readiness):
-        """คืน ``(tab, charts)`` ของแท็บการฟื้นตัวที่เรนเดอร์แล้ว
-
-        ต้องล้าง cache ก่อนทุกครั้ง — ``st.cache_data`` อยู่ข้ามอินสแตนซ์ของ ``AppTest``
-        ในโปรเซสเดียวกัน ถ้าไม่ล้าง เทสตัวที่สองจะได้ข้อมูลของตัวแรกและเขียวหลอก
-        """
-        import streamlit as st
-        from streamlit.testing.v1 import AppTest
-
-        st.cache_data.clear()
-        st.cache_resource.clear()
-
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            build_test_db(tmp, readiness=readiness)
-            previous = os.environ.get("GARMIN_DATA_DIR")
-            os.environ["GARMIN_DATA_DIR"] = tmp
-            try:
-                app = AppTest.from_file(str(DASHBOARD_PATH))
-                app.session_state[MAIN_TABS_KEY] = RECOVERY_TAB_LABEL
-                app.run(timeout=90)
-            finally:
-                if previous is None:
-                    os.environ.pop("GARMIN_DATA_DIR", None)
-                else:
-                    os.environ["GARMIN_DATA_DIR"] = previous
-
-        if list(app.exception):
-            raise AssertionError(
-                "แท็บการฟื้นตัวโยน exception: "
-                + " | ".join(item.value for item in app.exception)
-            )
-        tab = next(
-            item for item in app.get("tab") if item.label == RECOVERY_TAB_LABEL
+        return render_tab(
+            RECOVERY_TAB_LABEL, lambda conn: seed_wellness(conn, readiness=readiness)
         )
-        # proto.spec ส่ง y เป็น typed array base64 (`{"dtype": ..., "bdata": ...}`)
-        # ไม่ใช่ลิสต์ตัวเลข — ต้องให้ plotly ถอดกลับเป็น Figure ก่อน ไม่งั้นเทสที่ไล่ค่า
-        # ใน y จะวนบน "ชื่อคีย์" แล้วเขียวหลอก
-        charts = [
-            pio.from_json(element.proto.spec) for element in tab.get("plotly_chart")
-        ]
-        return tab, charts
 
     def test_chart_titles_name_only_the_series_actually_drawn(self):
         """นาฬิกาที่ไม่ส่ง Readiness ต้องไม่เห็นหัวข้อที่พูดถึง Readiness

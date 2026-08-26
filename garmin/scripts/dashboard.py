@@ -271,6 +271,12 @@ _print_friendly.layout.font = dict(
     family="'IBM Plex Sans Thai', 'IBM Plex Sans', sans-serif",
 )
 _print_friendly.layout.colorway = [C_BLUE, C_SECOND, "#104281", "#86b6ef", C_CONTEXT]
+# `colorway` คุมเฉพาะเส้น/แท่งที่แยกกันเป็นชุด — กราฟที่ระบายสีตาม *ค่าต่อเนื่อง*
+# (เช่น จุดที่ระบายตาม HR) อ่านจาก `colorscale` คนละตัวกัน ไม่ตั้งไว้มันจะตกไปใช้
+# Plasma ของ plotly คือรุ้งม่วง→ส้ม→เหลือง ซึ่งขัดกฎ 02 (ค่ามีลำดับใช้สีเดียวไล่เฉด)
+# และหยิบสีที่กฎ 03 จองไว้ให้สถานะไปใช้กับข้อมูลธรรมดา
+_print_friendly.layout.colorscale.sequential = BLUE_RAMP_5
+_print_friendly.layout.colorscale.sequentialminus = BLUE_RAMP_5
 for _axis in (_print_friendly.layout.xaxis, _print_friendly.layout.yaxis):
     _axis.gridcolor = "#e4e1da"   # เท่ากับ borderColor ใน .streamlit/config.toml
     _axis.linecolor = "#e4e1da"
@@ -3410,13 +3416,24 @@ if tab_train.open:
                 ef_baseline_median = ef_all[
                     ef_all["date"] < ef_all["date"].iloc[-1]
                 ].tail(20)["ef"].median()
+                # ข้อจำกัดของ EF อยู่ใน help ของการ์ดที่มันอธิบาย ไม่ใช่ย่อหน้าใต้กราฟ —
+                # คนที่สงสัยตัวเลขไหนจะจิ้มตัวเลขนั้น ไม่ใช่อ่านทุกอย่างเพื่อหาบรรทัดเดียว
                 with st.container(horizontal=True):
                     _ef_now = efficiency_recent_value(ef_all, end_date)
                     st.metric("EF ล่าสุด (median 3 รัน)",
                               f"{_ef_now:.3f}" if pd.notna(_ef_now) else "–",
-                              delta=f"{emoji} {txt}", delta_color="off", border=True)
-                    st.metric("เทียบฐาน 28 วัน", efficiency_display(ef_pct_tab), border=True)
-                    st.metric("จำนวนรัน easy ในช่วง", f"{len(ef_view)} ครั้ง", border=True)
+                              delta=f"{emoji} {txt}", delta_color="off", border=True,
+                              help="EF ไวต่ออากาศร้อน พื้นผิว และความชัน "
+                                   "จึงต้องอ่านเป็นเทรนด์ ไม่ใช่ค่าวันเดียว")
+                    st.metric("เทียบฐาน 28 วัน", efficiency_display(ef_pct_tab), border=True,
+                              help="เกณฑ์ −3% / −7% มาจาก SD ของข้อมูลจริงในระบบนี้ "
+                                   "(4.4% และ 3.5%)")
+                    st.metric("จำนวนรัน easy ในช่วง", f"{len(ef_view)} ครั้ง", border=True,
+                              help=f"จะสรุป EF ได้ต้องมีรัน easy {EF_RECENT_RUNS} ครั้ง"
+                                   f"ภายใน {EF_STALE_DAYS} วัน และมีฐานอย่างน้อย "
+                                   f"{EF_BASELINE_MIN_RUNS} ครั้งใน {EF_BASELINE_DAYS} "
+                                   "วันก่อนหน้า — ไม่ครบแล้วขึ้น 'ข้อมูลไม่พอ' คือรัน easy "
+                                   "ไม่พอ ไม่ใช่ระบบขัดข้อง")
 
                 fig_ef = go.Figure()
                 fig_ef.add_trace(go.Scatter(
@@ -3440,13 +3457,6 @@ if tab_train.open:
                     showlegend=True, hovermode="x unified",
                 )
                 st.plotly_chart(fig_ef, width="stretch")
-                st.caption(
-                    "EF ไวต่ออากาศร้อน พื้นผิว และความชัน จึงต้องอ่านเป็นเทรนด์ ไม่ใช่ค่าวันเดียว · "
-                    "เกณฑ์ −3% / −7% มาจาก SD ของข้อมูลจริงในระบบนี้ (4.4% และ 3.5%) · "
-                    f"จะสรุปได้ต้องมีรัน easy {EF_RECENT_RUNS} ครั้งภายใน {EF_STALE_DAYS} วัน "
-                    f"และมีฐานอย่างน้อย {EF_BASELINE_MIN_RUNS} ครั้งใน {EF_BASELINE_DAYS} วันก่อนหน้า — "
-                    "ไม่ครบแล้วขึ้น 'ข้อมูลไม่พอ' คือรัน easy ไม่พอ ไม่ใช่ระบบขัดข้อง"
-                )
 
             # ---------------- โหลดสะสม (บริบท ไม่ใช่คำตัดสิน) ----------------
             st.subheader("โหลดสะสม (บริบท)")
@@ -3476,7 +3486,11 @@ if tab_train.open:
                     st.metric("ทิศทาง",
                               load_trend_display(latest_load["acute"], latest_load["chronic"],
                                                  wl_metric, wl_unit).split(" · ")[-1]
-                              if pd.notna(latest_load["chronic"]) else "–", border=True)
+                              if pd.notna(latest_load["chronic"]) else "–", border=True,
+                              help="บอกว่าทำไปเท่าไหร่เทียบกับที่เคยทำ "
+                                   "ไม่มีโซนปลอดภัย/เสี่ยง เพราะหลักฐานหาเกณฑ์ตัด"
+                                   "ที่ทำนายการบาดเจ็บได้ไม่เจอ "
+                                   "(Br J Sports Med 2025;59:1203-1210)")
 
                 fig_load = go.Figure()
                 fig_load.add_trace(go.Scatter(
@@ -3496,12 +3510,9 @@ if tab_train.open:
                     yaxis=dict(title=wl_unit), xaxis=dict(title="วันที่"),
                     showlegend=True, hovermode="x unified",
                 )
+                # ตัวแทนโหลด (`_src`) อยู่บนหัวข้อกราฟแล้ว ส่วนเหตุผลว่าทำไมไม่มีโซน
+                # ปลอดภัย/เสี่ยงอยู่ใน help ของการ์ด "ทิศทาง" ซึ่งเป็นค่าที่คนอยากตีความ
                 st.plotly_chart(fig_load, width="stretch")
-                st.caption(
-                    f"ตัวแทนโหลด: {_src} — ตัวเลขนี้บอกว่าทำไปเท่าไหร่เทียบกับที่เคยทำ "
-                    "ไม่มีโซนปลอดภัย/เสี่ยง เพราะหลักฐานหาเกณฑ์ตัดที่ทำนายการบาดเจ็บได้ไม่เจอ "
-                    "(Br J Sports Med 2025;59:1203-1210)"
-                )
 
             # ---------------- 80/20 (จากเวลาในโซน HR จริงของนาฬิกา) ----------------
             st.subheader("สัดส่วนความหนักการซ้อม (กฎ 80/20)")
@@ -3532,11 +3543,13 @@ if tab_train.open:
                 with col_info:
                     st.metric("สัดส่วนเบา (Z1-2 ตามเวลาจริง)", f"{easy_pct:.0f}%",
                               delta=f"{easy_pct - 80:+.0f}% เทียบเป้า 80%",
-                              delta_color="normal" if easy_pct >= 80 else "inverse", border=True)
+                              delta_color="normal" if easy_pct >= 80 else "inverse",
+                              border=True,
+                              help=f"จากเวลาในโซน HR จริงของ {len(zdf)} กิจกรรม "
+                                   "(รวม cross-training) — แม่นกว่าเฉลี่ยทั้งเซสชัน "
+                                   "เพราะนาฬิกาเก็บวินาทีต่อโซนจริง")
                     for name in INTENSITY_ORDER:
                         st.markdown(f"- **{name}** — {buckets[name]:.0f} นาที")
-                    st.caption(f"⭐ จาก **เวลาในโซน HR จริง** ของ {len(zdf)} กิจกรรม (รวม cross-training) — "
-                               "แม่นกว่าเฉลี่ยทั้งเซสชัน เพราะนาฬิกาเก็บวินาทีต่อโซนจริง")
             else:
                 # fallback วิธีเดิม (avg HR ต่อเซสชัน) เมื่อไม่มี time-in-zone
                 lthr, lthr_source = get_lthr(selected_slug, athlete_id)
@@ -3564,10 +3577,13 @@ if tab_train.open:
                     with col_info:
                         st.metric("สัดส่วนวิ่งเบา (ตามเวลา)", f"{easy_pct:.0f}%",
                                   delta=f"{easy_pct - 80:+.0f}% เทียบเป้า 80%",
-                                  delta_color="normal" if easy_pct >= 80 else "inverse", border=True)
+                                  delta_color="normal" if easy_pct >= 80 else "inverse",
+                                  border=True,
+                                  help="ไม่มีเวลาในโซน HR จริง จึงจำแนกจาก avg HR "
+                                       f"ต่อเซสชันเทียบ LTHR {lthr} bpm ({lthr_source}) "
+                                       "ซึ่งหยาบกว่า")
                         for _, r in dist.iterrows():
                             st.markdown(f"- **{r['intensity']}** — {r['minutes']:.0f} นาที · {int(r['sessions'])} เซสชัน")
-                        st.caption(f"จำแนกจาก avg HR ต่อเซสชันเทียบ LTHR {lthr} bpm ({lthr_source})")
 
             # ---------------- Running Dynamics (สรุปช่วงที่เลือก) ----------------
             dyn_cols = {
@@ -3579,12 +3595,18 @@ if tab_train.open:
             }
             run_dyn = runs_df[runs_df.get("avg_ground_contact_time_ms").notna()] if "avg_ground_contact_time_ms" in runs_df else runs_df.iloc[0:0]
             if not run_dyn.empty:
-                st.subheader("Running dynamics เฉลี่ย")
-                with st.container(horizontal=True):
+                # รายละเอียดฟอร์มเป็นของที่ดูตอนสงสัย ไม่ใช่ค่าที่ต้องเห็นทุกครั้งที่เปิดหน้า
+                # ห้าตัวนี้เคยดันแท็บนี้ให้เป็นแท็บที่มีตัวเลขพร้อมกันมากที่สุดในไฟล์ (16 ตัว)
+                dyn_drawer = st.expander(
+                    "ดู Running dynamics เฉลี่ย", icon=":material/podiatry:"
+                )
+                with dyn_drawer, st.container(horizontal=True):
                     for col, (label, unit, fmt) in dyn_cols.items():
                         val = pd.to_numeric(run_dyn[col], errors="coerce").mean() if col in run_dyn else float("nan")
-                        st.metric(label, (fmt % val + f" {unit}") if pd.notna(val) else "–", border=True)
-                st.caption("จากเซสชันวิ่งที่นาฬิกาเก็บ running dynamics — GCT ต่ำ/ratio ต่ำ = ฟอร์มประหยัดแรง")
+                        st.metric(label, (fmt % val + f" {unit}") if pd.notna(val) else "–",
+                                  border=True,
+                                  help="จากเซสชันวิ่งที่นาฬิกาเก็บ running dynamics — "
+                                       "GCT ต่ำ/ratio ต่ำ = ฟอร์มประหยัดแรง")
 
             # ---------------- กราฟเดิม ----------------
             fig_dist = px.bar(activity_df, x="start_time_local", y="distance_km",
