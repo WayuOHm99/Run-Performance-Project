@@ -4092,20 +4092,28 @@ if tab_splits.open:
                     if len(splits) >= 2:
                         p1, p2, hr1, hr2 = analyze_distance_halves(splits)
 
+                        # อีโมจิเรนเดอร์ไม่เหมือนกันข้ามเครื่องและหายตอนพิมพ์ขาวดำ
+                        # (เหตุผลเดียวกับที่ล็อกธีมสว่างไว้) — `st.metric` รับ SVG ไม่ได้
+                        # รูปทรงวาดแบบแท็บทีมจึงใช้ที่นี่ไม่ได้ คำบอกความหมายครบอยู่แล้ว
+                        # ส่วนทิศทางให้ Streamlit วาดลูกศรเองผ่าน `delta` ซึ่งพิมพ์ติด
                         split_pct = (p2 - p1) / p1 * 100 if pd.notna(p1) and pd.notna(p2) and p1 > 0 else float("nan")
                         if pd.isna(split_pct):
-                            verdict = "–"
+                            verdict, pacing_delta = "–", None
                         elif split_pct > 2:
-                            verdict = f"🔻 แผ่วปลาย (+{split_pct:.1f}%)"
+                            verdict = "แผ่วปลาย"
+                            pacing_delta = f"ช้าลง {split_pct:.1f}%"
                         elif split_pct < -2:
-                            verdict = f"🚀 Negative split ({split_pct:.1f}%)"
+                            verdict = "Negative split"
+                            pacing_delta = f"เร็วขึ้น {abs(split_pct):.1f}%"
                         else:
-                            verdict = f"✅ เพซนิ่ง ({split_pct:+.1f}%)"
+                            verdict = "เพซนิ่ง"
+                            pacing_delta = f"ต่างกัน {split_pct:+.1f}%"
 
                         with st.container(horizontal=True):
                             st.metric("ครึ่งแรก", f"{fmt_pace(p1)} /km", border=True)
                             st.metric("ครึ่งหลัง", f"{fmt_pace(p2)} /km", border=True)
-                            st.metric("Pacing", verdict, border=True)
+                            st.metric("Pacing", verdict, delta=pacing_delta,
+                                      delta_color="off", border=True)
                             if pd.notna(hr1) and pd.notna(hr2):
                                 st.metric("HR ครึ่งแรก → หลัง", f"{hr1:.0f} → {hr2:.0f} bpm",
                                           delta=f"{hr2 - hr1:+.0f} bpm", delta_color="off", border=True)
@@ -4170,7 +4178,7 @@ if tab_splits.open:
                         st.plotly_chart(fig_extra, width="stretch")
 
                     # --- ตาราง splits รายรอบ เต็ม (แสดงตรง ไม่ซ่อนใน expander) ---
-                    st.subheader("📊 ตาราง Splits (ผลต่อรอบ)")
+                    st.subheader("ตาราง Splits (ผลต่อรอบ)")
                     num0 = st.column_config.NumberColumn(format="%.0f")
                     table_data = {
                         "รอบที่": splits["split_num"].astype(int),
