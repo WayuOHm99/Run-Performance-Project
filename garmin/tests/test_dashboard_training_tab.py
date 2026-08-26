@@ -77,6 +77,19 @@ def seed_training(conn):
                 900, 1500, 240, 60, 0,
             ),
         )
+    # cross-training ที่หนักกว่าการวิ่งชัด ๆ — จำลองโปรไฟล์ผสมโหมดแบบ P'kao
+    # (19 indoor cardio + 16 HIIT + 5 มวย ใน 90 วัน) ถ้าไม่มีของพวกนี้ เทสสองวง
+    # จะเขียวเพราะไม่มีอะไรให้แยก ไม่ใช่เพราะแยกถูก
+    for offset in range(12):
+        day = LAST_DAY - datetime.timedelta(days=27 - offset * 2)
+        conn.execute(
+            "INSERT INTO fact_activity ("
+            " activity_id, athlete_id, activity_type, start_time_local,"
+            " duration_sec, avg_hr, max_hr, training_load, training_effect_aerobic,"
+            " hr_zone1_sec, hr_zone2_sec, hr_zone3_sec, hr_zone4_sec, hr_zone5_sec)"
+            " VALUES (?, 1, 'hiit', ?, 2400, 150, 180, 110, 3.2, 300, 600, 600, 600, 300)",
+            (2000 + offset, f"{day.isoformat()} 18:00:00"),
+        )
 
 
 class TrainingTabDesignTests(unittest.TestCase):
@@ -198,6 +211,44 @@ class TrainingTabDesignTests(unittest.TestCase):
         self.assertTrue(
             (ef_cards[0].proto.delta or "").strip(),
             "คำตัดสิน EF หายไปพร้อมอีโมจิ",
+        )
+
+    def test_intensity_split_separates_running_from_cross_training(self):
+        """โดนัทต้องแยกวงการวิ่งออกจากวงทั้งหมดเมื่อ cross-training มีน้ำหนักจริง
+
+        ที่มา: P'kao ทำ HIIT/มวย/indoor cardio 49 ครั้งใน 90 วัน วงเดียวที่รวมทุกอย่าง
+        แสดงสัดส่วนเบา 33% ขณะที่ **เฉพาะการวิ่งเบาแค่ 22% และหนักถึง 53%** —
+        ตัวเลขที่โค้ชใช้ตัดสินโปรแกรมวิ่งจึงถูกเจือจางด้วยงานคนละชนิด
+        """
+        pies = [
+            chart for chart in self.charts
+            if any(trace.type == "pie" for trace in chart.data)
+        ]
+        self.assertTrue(pies, "ไม่มีโดนัทความหนักเลย — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
+
+        rings = [trace for chart in pies for trace in chart.data if trace.type == "pie"]
+        self.assertGreaterEqual(
+            len(rings), 2,
+            "มีวงเดียว — การวิ่งกับ cross-training ยังถูกรวมเป็นตัวเลขเดียว",
+        )
+        names = " ".join((ring.name or "") + (ring.title.text or "" if ring.title else "")
+                         for ring in rings)
+        self.assertIn("วิ่ง", names, f"ไม่มีวงที่ระบุว่าเป็นการวิ่ง: {names!r}")
+
+    def test_the_headline_easy_share_is_the_running_one(self):
+        """การ์ดสัดส่วนเบาต้องอ่านจากการวิ่ง ไม่ใช่ตัวเลขที่เจือจางแล้ว
+
+        ข้อมูลทดสอบ: วิ่ง 20 ครั้ง เบา 2,400 วิ/ครั้ง · HIIT 12 ครั้ง หนักกว่ามาก
+        ถ้าการ์ดยังอ่านจากทุกกิจกรรม ตัวเลขจะต่ำกว่าความจริงของโปรแกรมวิ่ง
+        """
+        cards = [
+            element for element in self.tab.get("metric")
+            if "สัดส่วน" in element.label
+        ]
+        self.assertTrue(cards, "ไม่มีการ์ดสัดส่วนความหนัก")
+        self.assertIn(
+            "วิ่ง", cards[0].label,
+            f"การ์ดไม่ได้บอกว่านับเฉพาะการวิ่ง: {cards[0].label!r}",
         )
 
 

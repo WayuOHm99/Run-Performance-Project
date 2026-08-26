@@ -47,7 +47,10 @@ def seed_basic_watch(conn):
             "INSERT INTO fact_daily_wellness ("
             " athlete_id, calendar_date, resting_hr, sleep_score, vo2max_trend, fetched_at)"
             " VALUES (1, ?, ?, ?, ?, ?)",
-            (day, 50 + offset % 3, 80, 50.0 + (offset % 6) * 0.2, day + "T08:00:00Z"),
+            # VO2max มีค่าเดียวเมื่อ 26 วันก่อน — เคสจริงของ P'kao ที่วิ่งลู่เป็นหลัก
+            # Garmin คำนวณ VO2max ใหม่เฉพาะวันที่วิ่ง GPS นอกลู่ ค่าจึงค้างเงียบ ๆ
+            (day, 50 + offset % 3, 80,
+             52.8 if offset == 3 else None, day + "T08:00:00Z"),
         )
 
 
@@ -86,6 +89,37 @@ class ProgressTabGapReportingTests(unittest.TestCase):
                 name, joined,
                 f"กล่องไม่ได้บอกว่า {name!r} คือค่าที่ขาด — กล่องเดียวต้องระบุให้ครบ",
             )
+
+    def test_a_stale_vo2max_says_how_old_it_is(self):
+        """ค่าที่ค้างมา 26 วันห้ามอ่านว่าเป็นของวันนี้
+
+        Garmin คำนวณ VO2max ใหม่เฉพาะวันที่มีวิ่ง GPS นอกลู่ นักกีฬาที่วิ่งลู่เป็นหลัก
+        จึงเห็นค่าเดิมค้างเป็นเดือน (วัดจริง 26 ส.ค. 69: P'kao ค้างที่ 31 ก.ค. = 26 วัน)
+        การ์ดเดิมเขียนว่า "ล่าสุด" โดยไม่มีวันที่กำกับเลย
+        """
+        cards = [
+            element for element in self.tab.get("metric")
+            if "VO2max" in element.label
+        ]
+        self.assertTrue(cards, "ไม่มีการ์ด VO2max — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
+        note = (cards[0].proto.help or "") + " " + (cards[0].proto.delta or "")
+        self.assertRegex(
+            note, r"\d{2}/\d{2}/\d{4}",
+            "การ์ด VO2max ไม่ได้บอกวันที่ของค่านั้น: "
+            f"help={cards[0].proto.help!r} delta={cards[0].proto.delta!r}",
+        )
+
+    def test_a_single_reading_is_not_reported_as_no_change(self):
+        """มีจุดเดียวในช่วง = เทียบกับอะไรไม่ได้ ห้ามขึ้น +0.0 ซึ่งอ่านว่า "นิ่ง" """
+        cards = [
+            element for element in self.tab.get("metric")
+            if "VO2max" in element.label
+        ]
+        delta = cards[0].proto.delta or ""
+        self.assertNotIn(
+            "+0.0", delta,
+            f"มีค่าเดียวในช่วงแต่การ์ดขึ้น {delta!r} ซึ่งอ่านว่าไม่มีการเปลี่ยนแปลง",
+        )
 
 
 if __name__ == "__main__":
