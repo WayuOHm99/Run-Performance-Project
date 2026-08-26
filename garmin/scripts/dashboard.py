@@ -2208,173 +2208,6 @@ with st.sidebar:
             + " · ค่าว่างยังไม่ถูกใช้ฟันธงว่ารุ่นไม่รองรับ"
         )
 
-# --- TEAM SNAPSHOT (state ข้ามแท็บ) ---
-# ต้องคำนวณ *นอก* บล็อกแท็บ เพราะแท็บวันนี้อ่าน team_df ต่อจากแท็บทีม ถ้ายังอยู่ใน
-# `with tab_team:` การรันเฉพาะแท็บที่เปิดอยู่จะทำให้แท็บวันนี้ NameError ทันที
-# ย้ายออกมาแล้วจึงเปิด lazy ได้ ซึ่งเป็นตัวที่ทำให้กดแท็บไม่ต้องสร้างกราฟทั้ง 14 ใบใหม่
-team_rows = []
-for _, ath in athletes_df.iterrows():
-    aid, name = ath["athlete_id"], ath["display_name"]
-
-    # โหลดย้อน 42 วัน (training_load ถ้านาฬิกาให้ = จับ cross-training ครบ ไม่งั้นระยะวิ่ง)
-    daily, metric, unit = load_daily_workload(
-        aid, (today - datetime.timedelta(days=42)).isoformat(), today.isoformat())
-    acute = chronic_wk = float("nan")
-    sessions_7d = 0
-    if not daily.empty:
-        win7 = daily[daily["date"] >= pd.Timestamp(today - datetime.timedelta(days=6))]
-        win28 = daily[daily["date"] >= pd.Timestamp(today - datetime.timedelta(days=27))]
-        acute = win7["value"].sum()
-        sessions_7d = int(win7["sessions"].sum())
-        first = load_first_activity_date(aid) if metric == "training_load" else load_first_run_date(aid)
-        days_of_history = (today - first).days + 1 if first else 0
-        if days_of_history >= 28 and win28["value"].sum() > 0:
-            chronic_wk = win28["value"].sum() / 4
-
-    # ประสิทธิภาพการวิ่งเบา — ต้องมองย้อนพอให้ได้ฐาน 28 วันก่อนรัน easy ล่าสุด
-    ath_lthr, _ = get_lthr(ath["slug"], aid)
-    easy_ef = easy_run_efficiency(
-        load_easy_runs(aid, (today - datetime.timedelta(days=70)).isoformat(),
-                       today.isoformat()),
-        ath_lthr,
-    )
-    ef_pct = efficiency_change_pct(easy_ef, today)
-
-    # Wellness แต่ละ endpoint อาจมาคนละรอบ จึงเลือก "ล่าสุดแยกทีละ field"
-    # แทนการใช้แถวเดียวแล้วทำให้ Sleep/HRV ที่ยังใช้ได้ถูกซ่อนโดย snapshot บางส่วนของวันนี้
-    w = load_wellness_data(
-        aid, (today - datetime.timedelta(days=30)).isoformat(), today.isoformat()
-    )
-    sleep_snap = latest_field(w, "sleep_score")
-    rhr_snap = latest_field(w, "resting_hr")
-    hrv_snap = latest_field(w, "hrv_last_night")
-    bb_display_snap, bb_completed_snap = body_battery_snapshots(w, today)
-    ready_snap = latest_field(
-        w,
-        "training_readiness",
-        ("readiness_timestamp_local", "readiness_timestamp_utc"),
-    )
-    train_snap = latest_field(w, "training_status")
-
-    # วันนี้แสดงระดับล่าสุดระหว่างวัน; ธงใช้ high ล่าสุดของวันที่จบแล้วแยกกัน
-    bb = bb_completed_snap["value"] if bb_completed_snap else float("nan")
-    bb_now = bb_display_snap["value"] if bb_display_snap else float("nan")
-    sleep = sleep_snap["value"] if sleep_snap else float("nan")
-    rhr = rhr_snap["value"] if rhr_snap else float("nan")
-    hrv_ms = hrv_snap["value"] if hrv_snap else float("nan")
-    ready = ready_snap["value"] if ready_snap else float("nan")
-    hrv_stat = fmt_text(hrv_snap["row"].get("hrv_status")) if hrv_snap else ""
-    ready_level = fmt_text(ready_snap["row"].get("readiness_level")) if ready_snap else ""
-    train_stat = fmt_text(train_snap["value"]) if train_snap else ""
-
-    rhr_delta = float("nan")
-    if rhr_snap and "resting_hr" in w:
-        rhr_dates = pd.to_datetime(w["calendar_date"], errors="coerce").dt.date
-        baseline = pd.to_numeric(
-            w.loc[rhr_dates < rhr_snap["date"], "resting_hr"], errors="coerce"
-        ).dropna()
-        if pd.notna(rhr) and len(baseline) >= 7:
-            rhr_delta = rhr - baseline.mean()
-
-    core_snaps = [bb_display_snap, sleep_snap, rhr_snap, hrv_snap]
-    fresh_core_count = sum(
-        1 for snapshot in core_snaps
-        if field_age_days(snapshot, today) is not None
-        and 0 <= field_age_days(snapshot, today) <= 1
-    )
-
-    # ธงเฝ้าระวัง — เก็บคู่กับ "ค่าไหนเป็นคนจุดธง" เพราะแท็บวันนี้ต้องตีกรอบไทล์ให้ตรงกัน
-    # ถ้าแท็บนั้นคำนวณเกณฑ์เองซ้ำ สองหน้าจะขัดกันเงียบ ๆ ทันทีที่เกณฑ์ฝั่งใดฝั่งหนึ่งขยับ
-    flags = []
-    flag_fields = []
-    if pd.notna(ef_pct) and ef_pct < EF_REST_PCT:
-        flags.append(f"ประสิทธิภาพตก {ef_pct:.0f}% จากฐาน")
-        flag_fields.append("ef")
-    elif pd.notna(ef_pct) and ef_pct < EF_WATCH_PCT:
-        flags.append(f"ประสิทธิภาพลด {ef_pct:.0f}% จากฐาน")
-        flag_fields.append("ef")
-    if (pd.notna(bb) and bb < BB_LOW and bb_completed_snap
-            and field_age_days(bb_completed_snap, today) is not None
-            and 0 <= field_age_days(bb_completed_snap, today) <= 1):
-        flags.append(f"Body Battery ต่ำ ({bb:.0f})")
-        flag_fields.append("bb")
-    if pd.notna(sleep) and sleep < SLEEP_LOW and field_age_days(sleep_snap, today) <= 1:
-        flags.append(f"นอนแย่ ({sleep:.0f})")
-        flag_fields.append("sleep")
-    if (pd.notna(rhr_delta) and rhr_delta >= RHR_RISE
-            and field_age_days(rhr_snap, today) <= 1):
-        flags.append(f"RHR สูงกว่าฐาน +{rhr_delta:.0f}")
-        flag_fields.append("rhr")
-    if (hrv_stat in HRV_ALERT
-            and field_age_days(hrv_snap, today) <= 1):
-        flags.append(f"HRV {hrv_stat}")
-        flag_fields.append("hrv")
-    # Training Status ขึ้นกับอุปกรณ์/บัญชีและ endpoint; ใช้ค่าที่เคยได้รับจริงโดยไม่
-    # เหมารวมกับ respiration หรือสรุปจาก NULL ว่าอุปกรณ์ไม่รองรับ
-    # ค่าดิบมี suffix ตัวเลข เช่น STRAINED_1 / UNPRODUCTIVE_5 → ตัดเหลือคำหลักก่อนเทียบ
-    _ts_base = (train_stat or "").split("_")[0]
-    _ts_flag = {"STRAINED": "ล้าสะสม (Strained)",
-                "OVERREACHING": "โหลดเกินตัว (Overreaching)",
-                "UNPRODUCTIVE": "ซ้อมไม่ขึ้น (Unproductive)"}
-    if (_ts_base in _ts_flag and train_snap
-            and field_age_days(train_snap, today) <= 1):
-        flags.append(f"Garmin: {_ts_flag[_ts_base]}")
-    # Training Readiness: ประวัติปัจจุบันมีเฉพาะ P'kao ส่วน Tong/Dan ยังไม่เคยได้รับค่า;
-    # นี่คือสถานะข้อมูล ไม่ใช่ข้อสรุปความสามารถของรุ่นนาฬิกา และค่าอัปเดตได้ระหว่างวัน
-    if (ready_level in READINESS_ALERT and ready_snap
-            and field_age_days(ready_snap, today) <= 1):
-        flags.append(f"Readiness ต่ำ ({ready:.0f} {ready_level.title()})"
-                     if pd.notna(ready) else f"Readiness {ready_level.title()}")
-        flag_fields.append("readiness")
-
-    # ห้ามเขียวเมื่อไม่มีหลักฐานการซ้อม หรือ wellness สดมีไม่พอให้ประเมิน
-    status = team_status(
-        ef_pct, flags, not daily.empty, fresh_core_count,
-        any(snapshot is not None for snapshot in core_snaps),
-    )
-
-    coverage_notes = []
-    if fresh_core_count < 3:
-        coverage_notes.append(f"wellness สด {fresh_core_count}/4 ค่า")
-    freshness_note = " · ".join(
-        f"{label} {snapshot['date'].strftime('%d/%m')}"
-        for label, snapshot in (
-            ("BB", bb_display_snap), ("Sleep", sleep_snap),
-            ("RHR", rhr_snap), ("HRV", hrv_snap), ("Readiness", ready_snap),
-        )
-        if snapshot and snapshot.get("date")
-    ) or "ไม่มี wellness"
-
-    emoji, ef_txt = efficiency_status(ef_pct)
-    team_rows.append({
-        "นักกีฬา": name,
-        "สถานะ": status,
-        # อยู่ต้นตาราง (ไม่ใช่ท้ายสุด) เพราะตารางนี้มี 13 คอลัมน์ กว้างเกินจอปกติ —
-        # วางไว้ท้ายก่อนหน้านี้ทำให้มองข้ามว่า "ไม่ขึ้น" ทั้งที่จริงมีข้อมูล แค่ต้องเลื่อนดู
-        "สถานะซ้อม (Garmin)": _ts_base.title() if _ts_base else "–",
-        "ประสิทธิภาพการวิ่งเบา (EF)": efficiency_display(ef_pct),
-        "โซน EF": f"{emoji} {ef_txt}",
-        "โหลด 7 วัน": load_trend_display(acute, chronic_wk, metric, unit),
-        "เซสชัน 7 วัน": sessions_7d,
-        "Body Battery ตอนนี้/ล่าสุด": bb_now if pd.notna(bb_now) else None,
-        "Sleep": sleep if pd.notna(sleep) else None,
-        "RHR": rhr if pd.notna(rhr) else None,
-        "ΔRHR": f"{rhr_delta:+.0f}" if pd.notna(rhr_delta) else "–",
-        "HRV คืนล่าสุด": ((f"{hrv_ms:.0f} ms" + (f" · {hrv_stat}" if hrv_stat else ""))
-                          if pd.notna(hrv_ms) else "–"),
-        "Readiness": ready if pd.notna(ready) else None,
-        "ความสดรายค่า": freshness_note,
-        "ธงเฝ้าระวัง": (" | ".join(flags) if flags else "—")
-                       + ((" · ข้อมูลไม่พอ: " + ", ".join(coverage_notes))
-                          if status.startswith("⚪") and coverage_notes else ""),
-        # สองคีย์ล่างนี้ไม่ได้ไว้อ่านบนตาราง — แท็บวันนี้ใช้ต่อ จึงถูกซ่อนจาก
-        # "ดูตัวเลขทีมทั้งหมด" แต่ต้องอยู่ใน team_rows เพื่อให้สองแท็บใช้ค่าเดียวกัน
-        "ธงเฝ้าระวังรายค่า": flag_fields,
-        "EF จากฐาน (%)": ef_pct,
-    })
-
-team_df = pd.DataFrame(team_rows)
-TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "EF จากฐาน (%)"]
 
 
 # --- MAIN DASHBOARD TABS ---
@@ -2405,11 +2238,184 @@ def focus_athlete(name):
 # `on_change` คือสิ่งที่ทำให้แท็บมี state จริง ไม่ใช่ `key` — ในซอร์สของ Streamlit 1.61
 # `is_stateful = on_change != "ignore"` ถ้าไม่ส่ง `on_change` มันจะไม่เรียก `register_widget`
 # เลย แท็บที่ `focus_athlete()` เขียนลง session_state จะไม่มีใครอ่านกลับ = ปุ่มเงียบ
-# และ `on_change` ยังเปิดทางให้เช็ค `.open` เพื่อรันเฉพาะแท็บที่เปิดอยู่ — ทำได้หลังจาก
-# ย้ายการคำนวณ team_df ออกมานอกบล็อกแท็บแล้วเท่านั้น (ดู TEAM SNAPSHOT ด้านบน)
+# และ `on_change` ยังเปิดทางให้เช็ค `.open` เพื่อรันเฉพาะแท็บที่เปิดอยู่ — รวมถึงตัว
+# team snapshot เองที่อยู่ใต้บรรทัดนี้ เพราะมันต้องรู้ก่อนว่าแท็บไหนเปิดอยู่
 tab_today, tab_team, tab_health, tab_train, tab_progress, tab_splits = st.tabs(
     MAIN_TAB_LABELS, key=MAIN_TABS_KEY, on_change="rerun"
 )
+
+
+# --- TEAM SNAPSHOT (state ข้ามแท็บ) ---
+# สองแท็บใช้ค่าชุดนี้ร่วมกัน — แท็บทีมวาดการ์ดทุกคน แท็บวันนี้อ่านแถวของคนที่เลือก
+# จึงคำนวณที่เดียวตรงนี้แล้วครอบด้วยเงื่อนไข "แท็บใดแท็บหนึ่งในสองนั้นเปิดอยู่"
+#
+# ต้องอยู่ *นอก* `with tab_x:` แต่ *ใน* เงื่อนไข — ถ้าย้ายกลับเข้าไปใน `with tab_team:`
+# แท็บวันนี้จะ NameError ทันทีที่เปิดโดยไม่ผ่านแท็บทีมก่อน ส่วนถ้าปล่อยไว้นอกเงื่อนไข
+# อีกสี่แท็บจะจ่ายค่าคำนวณย้อนหลัง 42 วันของนักกีฬาทุกคนทุกครั้งที่กดแท็บ ทั้งที่ไม่ได้ใช้
+if tab_today.open or tab_team.open:
+    team_rows = []
+    for _, ath in athletes_df.iterrows():
+        aid, name = ath["athlete_id"], ath["display_name"]
+
+        # โหลดย้อน 42 วัน (training_load ถ้านาฬิกาให้ = จับ cross-training ครบ ไม่งั้นระยะวิ่ง)
+        daily, metric, unit = load_daily_workload(
+            aid, (today - datetime.timedelta(days=42)).isoformat(), today.isoformat())
+        acute = chronic_wk = float("nan")
+        sessions_7d = 0
+        if not daily.empty:
+            win7 = daily[daily["date"] >= pd.Timestamp(today - datetime.timedelta(days=6))]
+            win28 = daily[daily["date"] >= pd.Timestamp(today - datetime.timedelta(days=27))]
+            acute = win7["value"].sum()
+            sessions_7d = int(win7["sessions"].sum())
+            first = load_first_activity_date(aid) if metric == "training_load" else load_first_run_date(aid)
+            days_of_history = (today - first).days + 1 if first else 0
+            if days_of_history >= 28 and win28["value"].sum() > 0:
+                chronic_wk = win28["value"].sum() / 4
+
+        # ประสิทธิภาพการวิ่งเบา — ต้องมองย้อนพอให้ได้ฐาน 28 วันก่อนรัน easy ล่าสุด
+        ath_lthr, _ = get_lthr(ath["slug"], aid)
+        easy_ef = easy_run_efficiency(
+            load_easy_runs(aid, (today - datetime.timedelta(days=70)).isoformat(),
+                           today.isoformat()),
+            ath_lthr,
+        )
+        ef_pct = efficiency_change_pct(easy_ef, today)
+
+        # Wellness แต่ละ endpoint อาจมาคนละรอบ จึงเลือก "ล่าสุดแยกทีละ field"
+        # แทนการใช้แถวเดียวแล้วทำให้ Sleep/HRV ที่ยังใช้ได้ถูกซ่อนโดย snapshot บางส่วนของวันนี้
+        w = load_wellness_data(
+            aid, (today - datetime.timedelta(days=30)).isoformat(), today.isoformat()
+        )
+        sleep_snap = latest_field(w, "sleep_score")
+        rhr_snap = latest_field(w, "resting_hr")
+        hrv_snap = latest_field(w, "hrv_last_night")
+        bb_display_snap, bb_completed_snap = body_battery_snapshots(w, today)
+        ready_snap = latest_field(
+            w,
+            "training_readiness",
+            ("readiness_timestamp_local", "readiness_timestamp_utc"),
+        )
+        train_snap = latest_field(w, "training_status")
+
+        # วันนี้แสดงระดับล่าสุดระหว่างวัน; ธงใช้ high ล่าสุดของวันที่จบแล้วแยกกัน
+        bb = bb_completed_snap["value"] if bb_completed_snap else float("nan")
+        bb_now = bb_display_snap["value"] if bb_display_snap else float("nan")
+        sleep = sleep_snap["value"] if sleep_snap else float("nan")
+        rhr = rhr_snap["value"] if rhr_snap else float("nan")
+        hrv_ms = hrv_snap["value"] if hrv_snap else float("nan")
+        ready = ready_snap["value"] if ready_snap else float("nan")
+        hrv_stat = fmt_text(hrv_snap["row"].get("hrv_status")) if hrv_snap else ""
+        ready_level = fmt_text(ready_snap["row"].get("readiness_level")) if ready_snap else ""
+        train_stat = fmt_text(train_snap["value"]) if train_snap else ""
+
+        rhr_delta = float("nan")
+        if rhr_snap and "resting_hr" in w:
+            rhr_dates = pd.to_datetime(w["calendar_date"], errors="coerce").dt.date
+            baseline = pd.to_numeric(
+                w.loc[rhr_dates < rhr_snap["date"], "resting_hr"], errors="coerce"
+            ).dropna()
+            if pd.notna(rhr) and len(baseline) >= 7:
+                rhr_delta = rhr - baseline.mean()
+
+        core_snaps = [bb_display_snap, sleep_snap, rhr_snap, hrv_snap]
+        fresh_core_count = sum(
+            1 for snapshot in core_snaps
+            if field_age_days(snapshot, today) is not None
+            and 0 <= field_age_days(snapshot, today) <= 1
+        )
+
+        # ธงเฝ้าระวัง — เก็บคู่กับ "ค่าไหนเป็นคนจุดธง" เพราะแท็บวันนี้ต้องตีกรอบไทล์ให้ตรงกัน
+        # ถ้าแท็บนั้นคำนวณเกณฑ์เองซ้ำ สองหน้าจะขัดกันเงียบ ๆ ทันทีที่เกณฑ์ฝั่งใดฝั่งหนึ่งขยับ
+        flags = []
+        flag_fields = []
+        if pd.notna(ef_pct) and ef_pct < EF_REST_PCT:
+            flags.append(f"ประสิทธิภาพตก {ef_pct:.0f}% จากฐาน")
+            flag_fields.append("ef")
+        elif pd.notna(ef_pct) and ef_pct < EF_WATCH_PCT:
+            flags.append(f"ประสิทธิภาพลด {ef_pct:.0f}% จากฐาน")
+            flag_fields.append("ef")
+        if (pd.notna(bb) and bb < BB_LOW and bb_completed_snap
+                and field_age_days(bb_completed_snap, today) is not None
+                and 0 <= field_age_days(bb_completed_snap, today) <= 1):
+            flags.append(f"Body Battery ต่ำ ({bb:.0f})")
+            flag_fields.append("bb")
+        if pd.notna(sleep) and sleep < SLEEP_LOW and field_age_days(sleep_snap, today) <= 1:
+            flags.append(f"นอนแย่ ({sleep:.0f})")
+            flag_fields.append("sleep")
+        if (pd.notna(rhr_delta) and rhr_delta >= RHR_RISE
+                and field_age_days(rhr_snap, today) <= 1):
+            flags.append(f"RHR สูงกว่าฐาน +{rhr_delta:.0f}")
+            flag_fields.append("rhr")
+        if (hrv_stat in HRV_ALERT
+                and field_age_days(hrv_snap, today) <= 1):
+            flags.append(f"HRV {hrv_stat}")
+            flag_fields.append("hrv")
+        # Training Status ขึ้นกับอุปกรณ์/บัญชีและ endpoint; ใช้ค่าที่เคยได้รับจริงโดยไม่
+        # เหมารวมกับ respiration หรือสรุปจาก NULL ว่าอุปกรณ์ไม่รองรับ
+        # ค่าดิบมี suffix ตัวเลข เช่น STRAINED_1 / UNPRODUCTIVE_5 → ตัดเหลือคำหลักก่อนเทียบ
+        _ts_base = (train_stat or "").split("_")[0]
+        _ts_flag = {"STRAINED": "ล้าสะสม (Strained)",
+                    "OVERREACHING": "โหลดเกินตัว (Overreaching)",
+                    "UNPRODUCTIVE": "ซ้อมไม่ขึ้น (Unproductive)"}
+        if (_ts_base in _ts_flag and train_snap
+                and field_age_days(train_snap, today) <= 1):
+            flags.append(f"Garmin: {_ts_flag[_ts_base]}")
+        # Training Readiness: ประวัติปัจจุบันมีเฉพาะ P'kao ส่วน Tong/Dan ยังไม่เคยได้รับค่า;
+        # นี่คือสถานะข้อมูล ไม่ใช่ข้อสรุปความสามารถของรุ่นนาฬิกา และค่าอัปเดตได้ระหว่างวัน
+        if (ready_level in READINESS_ALERT and ready_snap
+                and field_age_days(ready_snap, today) <= 1):
+            flags.append(f"Readiness ต่ำ ({ready:.0f} {ready_level.title()})"
+                         if pd.notna(ready) else f"Readiness {ready_level.title()}")
+            flag_fields.append("readiness")
+
+        # ห้ามเขียวเมื่อไม่มีหลักฐานการซ้อม หรือ wellness สดมีไม่พอให้ประเมิน
+        status = team_status(
+            ef_pct, flags, not daily.empty, fresh_core_count,
+            any(snapshot is not None for snapshot in core_snaps),
+        )
+
+        coverage_notes = []
+        if fresh_core_count < 3:
+            coverage_notes.append(f"wellness สด {fresh_core_count}/4 ค่า")
+        freshness_note = " · ".join(
+            f"{label} {snapshot['date'].strftime('%d/%m')}"
+            for label, snapshot in (
+                ("BB", bb_display_snap), ("Sleep", sleep_snap),
+                ("RHR", rhr_snap), ("HRV", hrv_snap), ("Readiness", ready_snap),
+            )
+            if snapshot and snapshot.get("date")
+        ) or "ไม่มี wellness"
+
+        emoji, ef_txt = efficiency_status(ef_pct)
+        team_rows.append({
+            "นักกีฬา": name,
+            "สถานะ": status,
+            # อยู่ต้นตาราง (ไม่ใช่ท้ายสุด) เพราะตารางนี้มี 13 คอลัมน์ กว้างเกินจอปกติ —
+            # วางไว้ท้ายก่อนหน้านี้ทำให้มองข้ามว่า "ไม่ขึ้น" ทั้งที่จริงมีข้อมูล แค่ต้องเลื่อนดู
+            "สถานะซ้อม (Garmin)": _ts_base.title() if _ts_base else "–",
+            "ประสิทธิภาพการวิ่งเบา (EF)": efficiency_display(ef_pct),
+            "โซน EF": f"{emoji} {ef_txt}",
+            "โหลด 7 วัน": load_trend_display(acute, chronic_wk, metric, unit),
+            "เซสชัน 7 วัน": sessions_7d,
+            "Body Battery ตอนนี้/ล่าสุด": bb_now if pd.notna(bb_now) else None,
+            "Sleep": sleep if pd.notna(sleep) else None,
+            "RHR": rhr if pd.notna(rhr) else None,
+            "ΔRHR": f"{rhr_delta:+.0f}" if pd.notna(rhr_delta) else "–",
+            "HRV คืนล่าสุด": ((f"{hrv_ms:.0f} ms" + (f" · {hrv_stat}" if hrv_stat else ""))
+                              if pd.notna(hrv_ms) else "–"),
+            "Readiness": ready if pd.notna(ready) else None,
+            "ความสดรายค่า": freshness_note,
+            "ธงเฝ้าระวัง": (" | ".join(flags) if flags else "—")
+                           + ((" · ข้อมูลไม่พอ: " + ", ".join(coverage_notes))
+                              if status.startswith("⚪") and coverage_notes else ""),
+            # สองคีย์ล่างนี้ไม่ได้ไว้อ่านบนตาราง — แท็บวันนี้ใช้ต่อ จึงถูกซ่อนจาก
+            # "ดูตัวเลขทีมทั้งหมด" แต่ต้องอยู่ใน team_rows เพื่อให้สองแท็บใช้ค่าเดียวกัน
+            "ธงเฝ้าระวังรายค่า": flag_fields,
+            "EF จากฐาน (%)": ef_pct,
+        })
+
+    team_df = pd.DataFrame(team_rows)
+    TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "EF จากฐาน (%)"]
 
 
 # =====================================================================
