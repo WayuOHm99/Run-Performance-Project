@@ -313,6 +313,18 @@ def available_series(df, label_map):
     ]
 
 
+def chart_title(series, titles, fallback=""):
+    """หัวข้อกราฟต้องเอ่ยเฉพาะเส้นที่ถูกวาดจริง
+
+    ``series`` คือผลของ ``available_series()`` ซึ่งตัดคอลัมน์ที่ Garmin ไม่เคยส่งค่า
+    ออกไปแล้ว ``titles`` จึง map จาก **ชุดคอลัมน์ที่เหลือ** (frozenset) → หัวข้อ
+    ไม่ใช่หัวข้อคงที่ตามที่ตั้งใจจะวาด — นาฬิกาบางรุ่นไม่ส่ง Training Readiness เลย
+    หัวข้อที่เอ่ยถึงมันจึงกลายเป็นคำสัญญาที่กราฟไม่มีเส้นรองรับ
+    """
+    drawn = frozenset(column for column, _ in series)
+    return titles.get(drawn, fallback)
+
+
 def latest_field(df, column, timestamp_columns=()):
     """Return the newest non-null value of one field, independently of other fields.
 
@@ -2887,8 +2899,10 @@ if tab_health.open:
                 )
                 for _, column, _, exclude_today in average_specs
             }
+            # เหตุผลว่าทำไม denominator ของแต่ละการ์ดไม่เท่ากันอยู่ใน help ของการ์ดนั้นเอง
+            # ไม่ใช่ย่อหน้าใต้แถว — คนที่สงสัยการ์ดไหนจะจิ้มการ์ดนั้น
             with st.container(horizontal=True):
-                for label, column, unit, _ in average_specs:
+                for label, column, unit, exclude_today_metric in average_specs:
                     result = average_results[column]
                     sample_note = (
                         f"{result['count']}/{result['total_days']} วันมีข้อมูล"
@@ -2897,16 +2911,14 @@ if tab_health.open:
                     st.metric(
                         label, fmt_num(result["mean"], unit), delta=sample_note,
                         delta_color="off", border=True,
-                        help="mean() ใช้เฉพาะวันที่มีค่าจริง; วันที่ว่างไม่ถูกแทนด้วยศูนย์",
+                        help=(
+                            "mean() ใช้เฉพาะวันที่มีค่าจริง; วันที่ว่างไม่ถูกแทนด้วยศูนย์ · "
+                            + ("ไม่นับวันนี้ซึ่งค่ายังเปลี่ยนถึงเที่ยงคืน"
+                               if exclude_today_metric
+                               else "นับวันนี้ได้เพราะค่าสรุปหลังจบคืนแล้ว")
+                            + " · กราฟและตารางยังแสดงวันนี้พร้อมเส้นประ"
+                        ),
                     )
-
-            if any(result["excluded_today"] for result in average_results.values()):
-                st.caption(
-                    "Sleep, RHR และอัตราหายใจขณะนอนรวมค่าของวันนี้ซึ่งสรุปหลังจบคืนแล้ว; "
-                    "Body Battery สูงสุด, Stress, อัตราหายใจขณะตื่น, floors และ kcal "
-                    "ไม่นับวันนี้ซึ่งยังเปลี่ยนระหว่างวัน ส่วนกราฟ/ตารางยังแสดงวันนี้พร้อมเส้นประ "
-                    "และ denominator ใต้การ์ดจึงต่างกันตามชนิด metric"
-                )
 
             quality_flags = wellness_quality_flags(wellness_df)
             if quality_flags:
@@ -2927,9 +2939,13 @@ if tab_health.open:
             if health_series:
                 fig_health = go.Figure()
                 for column, label in health_series:
+                    # จำนวนจุดที่มีจริงอยู่ใน legend ข้าง ๆ เส้นนั้นเอง แทน caption ใต้กราฟ
+                    # ที่ไล่ทุกเส้นรวดเดียว — ช่องว่างบนเส้นคือวันที่ Garmin ไม่มีค่า
+                    filled = int(wellness_plot_df[column].notna().sum())
                     fig_health.add_trace(go.Scatter(
                         x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
-                        mode="lines+markers", name=label, connectgaps=False,
+                        mode="lines+markers", connectgaps=False,
+                        name=f"{label} ({filled}/{len(wellness_plot_df)} วัน)",
                         line=dict(color=SERIES_COLORS[column]),
                         hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
                     ))
@@ -2939,11 +2955,6 @@ if tab_health.open:
                 )
                 mark_partial_today(fig_health, today, start_date, end_date)
                 st.plotly_chart(fig_health, width="stretch")
-                plotted_counts = " · ".join(
-                    f"{label} {wellness_plot_df[column].notna().sum()}/{len(wellness_plot_df)} จุด"
-                    for column, label in health_series
-                )
-                st.caption(plotted_counts + " · ช่องว่างคือ Garmin ไม่มีค่า; กราฟไม่เชื่อมเส้นข้าม NULL")
 
             # --- Stress กับ Readiness มีทิศทางความหมายตรงข้าม จึงแยกแกนและบอกชัด ---
             stress_ready_series = available_series(wellness_df, {
@@ -2951,61 +2962,78 @@ if tab_health.open:
                 "training_readiness": "Training Readiness (สูง = ดี)",
             })
             if stress_ready_series:
-                fig_stress = make_subplots(specs=[[{"secondary_y": True}]])
+                # ทั้งคู่เป็นคะแนน 0–100 จึงอยู่แกนเดียวกันได้ตรง ๆ (กฎกราฟ 01)
+                # แกนขวาเดิมไม่ได้เพิ่มอะไรนอกจากทำให้จุดตัดของสองเส้นดูมีความหมาย
+                fig_stress = go.Figure()
                 for column, label in stress_ready_series:
-                    secondary = column == "training_readiness"
                     fig_stress.add_trace(go.Scatter(
                         x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                         mode="lines+markers", name=label, connectgaps=False,
                         line=dict(color=SERIES_COLORS[column]),
                         hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
-                    ), secondary_y=secondary)
+                    ))
                 fig_stress.update_layout(
-                    title="Stress เทียบ Training Readiness", xaxis_title="วันที่",
+                    title=chart_title(stress_ready_series, {
+                        frozenset({"stress_avg", "training_readiness"}):
+                            "Stress เทียบ Training Readiness",
+                        frozenset({"stress_avg"}): "แนวโน้ม Stress เฉลี่ย",
+                        frozenset({"training_readiness"}): "แนวโน้ม Training Readiness",
+                    }),
+                    xaxis_title="วันที่",
                     hovermode="x unified",
                 )
+                # ทิศทางการอ่านอยู่บนแกน ไม่ต้องมี caption ใต้กราฟมาอธิบายซ้ำ
                 fig_stress.update_yaxes(
-                    title_text="Stress (สูง = แย่)", range=[0, 100], secondary_y=False,
+                    title_text=(
+                        "คะแนน 0–100 · Stress สูง = แย่ · Readiness สูง = ดี"
+                        if len(stress_ready_series) > 1
+                        else "คะแนน 0–100 · " + (
+                            "สูง = แย่"
+                            if stress_ready_series[0][0] == "stress_avg" else "สูง = ดี"
+                        )
+                    ),
+                    range=[0, 100],
                 )
-                if any(column == "training_readiness" for column, _ in stress_ready_series):
-                    fig_stress.update_yaxes(
-                        title_text="Readiness (สูง = ดี)", range=[0, 100], secondary_y=True,
-                    )
                 mark_partial_today(fig_stress, today, start_date, end_date)
                 st.plotly_chart(fig_stress, width="stretch")
-                st.caption("สองคะแนนอยู่ช่วง 0–100 เหมือนกันแต่แปลผลคนละทิศ: Stress สูงแย่, Readiness สูงดี")
-            if not has_any_value(wellness_df, ["training_readiness"]):
-                models = ", ".join(load_athlete_devices(athlete_id)) or "ยังไม่มีทะเบียนอุปกรณ์ที่สดพอ"
-                st.caption(
-                    "ช่วงนี้ไม่มี Training Readiness (อุปกรณ์ที่เคยพบ: " + models
-                    + "; กรองรายการที่ยืนยันว่า last_seen เกิน 90 วัน) อาจเกิดจากอุปกรณ์ บัญชี "
-                      "ช่วงวันที่ หรือ endpoint ไม่ส่ง; ไม่วาด trace ว่างและไม่ฟันธงว่าไม่รองรับ"
-                )
+            # เดิมมี caption อธิบายว่าทำไมไม่มีเส้น Readiness ตรงนี้ — ตัดออกแล้วเพราะ
+            # หัวข้อกราฟไม่เอ่ยถึงค่าที่ไม่ได้วาดอีกต่อไป (`chart_title`) จึงไม่มีอะไรให้แก้ต่าง
+            # และหัวข้อ "ความพร้อมซ้อม" ด้านล่างบอกเรื่องอุปกรณ์ไว้ที่เดียวแล้ว
 
             # --- RHR / HRV recovery trends ---
-            rhr_hrv_series = available_series(wellness_df, {
-                "resting_hr": "Resting HR",
-                "hrv_last_night": "HRV คืนล่าสุด",
-                "hrv_weekly_avg": "HRV เฉลี่ย 7 วัน",
-            })
-            if rhr_hrv_series:
-                fig_hrv = make_subplots(specs=[[{"secondary_y": True}]])
-                for column, label in rhr_hrv_series:
-                    secondary = column != "resting_hr"
-                    fig_hrv.add_trace(go.Scatter(
+            # bpm กับ ms เป็นคนละหน่วยจริง จึงเป็นคนละกราฟ ไม่ใช่แกนขวา (กฎกราฟ 01)
+            recovery_trend_specs = [
+                (
+                    {"resting_hr": "Resting HR"},
+                    "แนวโน้ม Resting HR", "ครั้ง/นาที (bpm)",
+                ),
+                (
+                    {
+                        "hrv_last_night": "HRV คืนล่าสุด",
+                        "hrv_weekly_avg": "HRV เฉลี่ย 7 วัน",
+                    },
+                    "แนวโน้ม HRV", "มิลลิวินาที (ms)",
+                ),
+            ]
+            for label_map, figure_title, axis_title in recovery_trend_specs:
+                trend_series = available_series(wellness_df, label_map)
+                if not trend_series:
+                    continue
+                fig_trend = go.Figure()
+                for column, label in trend_series:
+                    fig_trend.add_trace(go.Scatter(
                         x=wellness_plot_df["calendar_date"], y=wellness_plot_df[column],
                         mode="lines+markers", name=label, connectgaps=False,
                         line=dict(color=SERIES_COLORS[column],
                                   dash="dot" if column == "hrv_weekly_avg" else "solid"),
                         hovertemplate=f"%{{x|%d %b}}<br>{label}: %{{y:.0f}}<extra></extra>",
-                    ), secondary_y=secondary)
-                fig_hrv.update_layout(
-                    title="แนวโน้ม Resting HR และ HRV", xaxis_title="วันที่", hovermode="x unified",
+                    ))
+                fig_trend.update_layout(
+                    title=figure_title, xaxis_title="วันที่", yaxis_title=axis_title,
+                    hovermode="x unified", showlegend=len(trend_series) > 1,
                 )
-                fig_hrv.update_yaxes(title_text="Resting HR (bpm)", secondary_y=False)
-                fig_hrv.update_yaxes(title_text="HRV (ms)", secondary_y=True)
-                mark_partial_today(fig_hrv, today, start_date, end_date)
-                st.plotly_chart(fig_hrv, width="stretch")
+                mark_partial_today(fig_trend, today, start_date, end_date)
+                st.plotly_chart(fig_trend, width="stretch")
 
             # --- ค่าเฉลี่ยเสริม พร้อม sample count เหมือนการ์ดหลัก ---
             extra_specs = [
@@ -3098,25 +3126,23 @@ if tab_health.open:
                         border=True,
                     )
 
-                st.caption(
-                    "วันที่ล่าสุดแยกตามค่า — Readiness: " + readiness_when(ready_snap, today)
-                    + " · Recovery Time: " + field_freshness(recovery_snap, today)
-                    + " · Acute Load: " + field_freshness(acute_snap, today)
-                    + " · ปัจจัย Acute Load: " + field_freshness(acwr_factor_snap, today)
-                )
+                # ความสดของแต่ละค่าอยู่ใน help ของการ์ดนั้นแล้ว จึงไม่ต้องมี caption
+                # ไล่ทั้งสี่ค่าซ้ำอีกรอบ · ส่วนคำบรรยายของ Garmin เป็นคำของ Garmin
+                # ไม่ใช่ตัวเลขที่ต้องตัดสินใจ จึงลงไปอยู่ในกล่องพับด้านล่างที่เดียว
+                garmin_notes = []
                 if ready_snap:
                     ready_row = ready_snap["row"]
                     feedback = (fmt_text(ready_row.get("readiness_feedback_long"))
                                 or fmt_text(ready_row.get("readiness_feedback")))
                     if feedback:
-                        st.caption(f"Garmin feedback ล่าสุด: **{feedback.replace('_', ' ')}**")
+                        garmin_notes.append(("Garmin feedback ล่าสุด", feedback))
                     input_context = fmt_text(ready_row.get("readiness_input_context"))
                     if input_context:
-                        st.caption(f"Readiness input context: **{input_context.replace('_', ' ')}**")
+                        garmin_notes.append(("Readiness input context", input_context))
                 if recovery_snap:
                     change_phrase = fmt_text(recovery_snap["row"].get("recovery_time_change_phrase"))
                     if change_phrase:
-                        st.caption(f"สถานะ Recovery Time: **{change_phrase.replace('_', ' ')}**")
+                        garmin_notes.append(("สถานะ Recovery Time", change_phrase))
 
                 if has_any_value(wellness_df, ["training_readiness"]):
                     fig_ready = go.Figure(go.Scatter(
@@ -3172,10 +3198,17 @@ if tab_health.open:
                             "Garmin feedback": fmt_text(snapshot["row"].get(feedback_column), "–").replace("_", " "),
                             "วันที่/ความสด": field_freshness(snapshot, today),
                         })
+                for note_label, note_value in garmin_notes:
+                    factor_rows.append({
+                        "องค์ประกอบ Readiness": note_label,
+                        "คะแนนองค์ประกอบ": "–",
+                        "Garmin feedback": note_value.replace("_", " "),
+                        "วันที่/ความสด": "–",
+                    })
                 if factor_rows:
                     with st.expander("ดูองค์ประกอบที่ Garmin ใช้คำนวณ Readiness", icon=":material/tune:"):
                         st.dataframe(pd.DataFrame(factor_rows), hide_index=True)
-                        st.caption("คะแนนเหล่านี้เป็น factor ของ Readiness ไม่ใช่โหลดสะสมของระบบ")
+                        st.caption("เป็น factor ของ Readiness ไม่ใช่โหลดสะสมของระบบ")
             else:
                 st.subheader("ความพร้อมซ้อมและเวลาฟื้นตัวจาก Garmin")
                 readiness_summary = availability_by_key["readiness"]
@@ -3185,15 +3218,14 @@ if tab_health.open:
                         "ลองเลือก ‘ทั้งหมด’ หรือช่วงที่ยาวขึ้น"
                     )
                 else:
+                    models = ", ".join(load_athlete_devices(athlete_id))
                     readiness_missing_message = (
                         "Garmin Connect ยังไม่เคยส่ง Training Readiness, Recovery Time, Acute Load "
-                        "หรือ Training Status ให้บัญชีนี้ ระบบ Sync จึงไม่มีค่าจริงให้แสดง"
+                        "หรือ Training Status ให้บัญชีนี้ — นาฬิกาบางรุ่นแสดง Recovery Time "
+                        "บนหน้าปัดแต่ไม่ส่งขึ้น Connect Dashboard จะไม่เดาหรือคำนวณค่าทดแทน"
+                        + (f" (อุปกรณ์ที่พบใน 90 วัน: {models})" if models else "")
                     )
                 st.info(readiness_missing_message, icon=":material/watch:")
-                st.caption(
-                    "Garmin อาจแสดง Recovery Time เฉพาะบนนาฬิกาในอุปกรณ์ที่ไม่มี "
-                    "Training Readiness บน Garmin Connect · Dashboard จะไม่เดาหรือคำนวณค่าทดแทน"
-                )
 
             # --- รายละเอียดที่เก็บแล้ว: collapsed เพื่อให้ตรวจเทียบนาฬิกาได้โดยไม่ทำหน้าหลักแน่น ---
             detail_specs = [
@@ -3239,9 +3271,7 @@ if tab_health.open:
                 with st.expander("ดูข้อมูลสุขภาพเพิ่มเติมล่าสุด", icon=":material/monitor_heart:"):
                     st.dataframe(pd.DataFrame(detail_rows), hide_index=True)
                     st.caption(
-                        "ค่าหลักอยู่ในการ์ดและกราฟด้านบน; ตารางนี้เลือกค่าเพิ่มเติมล่าสุดแยกทีละ field; "
-                        "fetched_at เป็นเวลาระดับแถว ไม่ได้ยืนยันว่า "
-                        "ทุก endpoint ในแถวนั้นสดพร้อมกัน"
+                        "แต่ละแถวเลือกค่าล่าสุดของ field นั้นเอง — fetched_at เป็นเวลาระดับแถว"
                     )
 
             history_labels = {
