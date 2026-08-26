@@ -10,6 +10,7 @@
 """
 
 import datetime
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -29,6 +30,11 @@ from dashboard_tab_harness import (  # noqa: E402
 # บวกเทาบริบท ตัวเดียวกับที่ `test_dashboard_chart_tokens.py` บังคับกับเส้นกราฟ
 DESIGN_BLUES = {"#cde2fb", "#86b6ef", "#2a78d6", "#1a5aa8", "#104281"}
 DESIGN_CONTEXT_GREY = "#8a8d94"
+
+# ช่วงอีโมจิที่หายตอนพิมพ์ขาวดำ — ไม่รวมลูกศร/สัญลักษณ์ที่เป็น glyph ปกติ
+EMOJI = re.compile(
+    "[🌀-🫿☀-➿⬀-⯿️]"
+)
 
 
 def seed_training(conn):
@@ -167,6 +173,32 @@ class TrainingTabDesignTests(unittest.TestCase):
                 label, every_label,
                 f"ตัวเลข {label!r} หายไปจากแท็บ ไม่ใช่แค่ถูกพับเก็บ",
             )
+
+    def test_no_meaning_is_carried_by_an_emoji(self):
+        """ทิศทาง A — อีโมจิหายตอนพิมพ์ขาวดำ ความหมายจึงห้ามฝากไว้กับมัน
+
+        การ์ด EF ส่งคำตัดสินผ่าน ``delta`` ซึ่งเป็นข้อความที่โค้ชอ่าน ไม่ใช่คีย์ภายใน
+        """
+        texts = []
+        for element in self.tab.get("metric"):
+            texts += [element.label, element.value, element.proto.delta]
+        offenders = [text for text in texts if text and EMOJI.search(text)]
+        self.assertEqual(
+            [], offenders,
+            "ยังมีอีโมจิบนหน้าจอ:\n" + "\n".join(f"- {t}" for t in offenders),
+        )
+
+    def test_the_ef_verdict_still_says_what_happened(self):
+        """ยามคู่กับข้อบน — ตัดอีโมจิได้ แต่คำตัดสินของ EF ต้องยังอ่านออก"""
+        ef_cards = [
+            element for element in self.tab.get("metric")
+            if element.label.startswith("EF ล่าสุด")
+        ]
+        self.assertTrue(ef_cards, "ไม่มีการ์ด EF เลย — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
+        self.assertTrue(
+            (ef_cards[0].proto.delta or "").strip(),
+            "คำตัดสิน EF หายไปพร้อมอีโมจิ",
+        )
 
 
 if __name__ == "__main__":
