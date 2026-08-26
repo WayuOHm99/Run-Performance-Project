@@ -88,6 +88,21 @@ def extract_helper(name):
     return ns[name]
 
 
+def extract_pace_axis_ticks():
+    """แกนเพซตัวจริงพร้อมค่าคงที่ของมัน — เทสจึงวัดเพดานที่ deploy อยู่จริง ไม่ใช่ค่าที่เขียนซ้ำ"""
+    tree = ast.parse(DASHBOARD_SRC)
+    functions = {"fmt_pace", "_pace_ticks_at", "pace_axis_ticks"}
+    constants = {"PACE_TICK_MAX", "PACE_TICK_STEPS_MIN"}
+    picked = [node for node in tree.body
+              if (isinstance(node, ast.FunctionDef) and node.name in functions)
+              or (isinstance(node, ast.Assign)
+                  and any(getattr(target, "id", "") in constants for target in node.targets))]
+    ns = {"pd": pd, "math": math}
+    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
+    assert "pace_axis_ticks" in ns, "ไม่พบ pace_axis_ticks ใน dashboard.py"
+    return ns
+
+
 class _FakeColumnConfig:
     """column_config ปลอม — บล็อกตารางเรียกแค่เพื่อประกอบ cfg ไม่ได้ render จริง"""
 
@@ -341,6 +356,61 @@ class SessionCandidateTests(unittest.TestCase):
 
         self.assertEqual(list(candidates["activity_id"]), [5, 4, 3, 2, 1])
         self.assertEqual(len(candidates), 5)
+
+
+class PaceAxisTests(unittest.TestCase):
+    """แกนเพซต้องอ่านได้และวาดทัน ไม่ว่าจะเจอ lap แบบไหน
+
+    ที่มา (26 ส.ค. 69): เซสชัน 25 ส.ค. ของ P'kao มี lap ท้าย 16.97 ม. / 791.96 วิ
+    = เพซ 777.81 นาที/กม. เกณฑ์เดิมใส่ tick ทุก 1 นาทีจึงได้แกนละ 774 จุด
+    วัดจากเบราว์เซอร์จริง: หัวข้อขึ้นใน 0.37 วิ แต่กราฟเสร็จที่ 11.96 วิ (settle 12.26 วิ)
+    ตัวเลขดิบของ lap นั้นยังต้องอยู่ครบในตาราง Splits — เทสเรื่องนั้นอยู่ใน
+    SplitLapTimeTests เทสชุดนี้ถามแค่ว่าแกนวาดกี่จุด และคลุมข้อมูลครบไหม
+    """
+
+    # เพดานเขียนเป็นตัวเลขตรงนี้ ไม่อ่าน PACE_TICK_MAX จาก dashboard.py — ยามที่อ่าน
+    # ค่าที่มันเฝ้าอยู่ จะเขียวตามทุกครั้งที่ค่านั้นถูกดันขึ้น (ลองแล้ว 26 ส.ค. 69:
+    # ตั้ง PACE_TICK_MAX = 100000 คืนบั๊กเดิมเป๊ะ ๆ แล้วเทสยังเขียวทั้งชุด)
+    READABLE_TICK_LIMIT = 12
+
+    # เพซจริงทั้ง 16 lap ของเซสชันนั้น (อ่านจาก fact_activity_split 26 ส.ค. 69)
+    STANDING_LAP_SESSION = [11.73, 5.59, 10.65, 5.35, 10.93, 5.28, 10.91, 5.14,
+                            11.11, 5.08, 11.57, 5.03, 37.65, 17.74, 11.49, 777.81]
+
+    def setUp(self):
+        self.ns = extract_pace_axis_ticks()
+        self.ticks = self.ns["pace_axis_ticks"]
+
+    def test_a_standing_lap_cannot_explode_the_axis(self):
+        values, labels = self.ticks(pd.Series(self.STANDING_LAP_SESSION))
+        self.assertEqual(len(values), len(labels))
+        self.assertLessEqual(
+            len(values), self.READABLE_TICK_LIMIT,
+            f"lap ที่ยืนนิ่งดันแกนไปถึง {len(values)} จุด — กราฟจะวาดนานเป็นสิบวินาที",
+        )
+
+    def test_the_axis_still_reaches_every_pace_it_is_asked_to_show(self):
+        cases = {
+            "easy run": [5.05, 5.2, 5.4, 5.33, 5.61],
+            "interval": [4.1, 6.8, 4.05, 7.2, 4.2],
+            "long slow": [6.4, 6.9, 7.8, 9.2, 12.6],
+            "standing lap": self.STANDING_LAP_SESSION,
+        }
+        for name, paces in cases.items():
+            with self.subTest(session=name):
+                series = pd.Series(paces)
+                values, _ = self.ticks(series)
+                self.assertLessEqual(values[0], series.min(),
+                                     "tick แรกอยู่ใต้เพซที่เร็วที่สุด — จุดข้อมูลจะหลุดแกน")
+                self.assertGreaterEqual(values[-1], series.max(),
+                                        "tick สุดท้ายไม่ถึงเพซที่ช้าที่สุด — จุดข้อมูลจะหลุดแกน")
+                self.assertLessEqual(len(values), self.READABLE_TICK_LIMIT)
+
+    def test_an_ordinary_session_keeps_its_quarter_minute_marks(self):
+        """เพดาน tick ต้องไม่ทำให้กราฟปกติหยาบลง — 45 วินาทีของช่วงยังต้องละเอียด 15 วิ"""
+        values, labels = self.ticks(pd.Series([5.05, 5.2, 5.4, 5.33, 5.61, 5.75]))
+        self.assertIn("5:15", labels)
+        self.assertAlmostEqual(values[1] - values[0], 0.25, places=4)
 
 
 if __name__ == "__main__":

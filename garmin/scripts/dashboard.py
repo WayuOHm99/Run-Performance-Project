@@ -948,7 +948,7 @@ TEAM_CARD_CSS = """
 <style>
 .team-card { display: grid; grid-template-columns: 232px minmax(0, 1fr) 500px;
   border: 1px solid #e4e1da; border-left-width: 4px; border-radius: 2px;
-  background: #ffffff; margin-bottom: 10px; }
+  background: #ffffff; }
 .team-card > div { padding: 14px 18px; }
 .team-card__flags, .team-card__nums { border-left: 1px solid #f4f2ee; }
 .team-card__who { display: flex; flex-direction: column; gap: 5px; }
@@ -976,29 +976,41 @@ TEAM_CARD_CSS = """
    ให้ทุก container/widget ที่มี key
    ถ้าเบราว์เซอร์ไม่รับ CSS ชุดนี้ ปุ่มจะกลับไปเป็นปุ่มธรรมดาใต้การ์ด — หน้าตาเสีย
    แต่ยังกดได้ ไม่ใช่ฟีเจอร์ที่หายไปเงียบ ๆ */
-[class*="st-key-teamcard-"] { position: relative; }
+[class*="st-key-teamcard-"] { position: relative; margin-bottom: 10px; }
+/* Streamlit ใส่ margin-bottom: -1rem ให้กล่องเนื้อหาของ st.markdown เพื่อหักลบ margin
+   ของ <p> ตัวสุดท้าย การ์ดของเราไม่มี <p> ท้าย ค่าลบนั้นจึงหดกล่องลงเฉย ๆ แล้วปุ่มที่
+   ทาบไว้เตี้ยกว่าการ์ด เหลือแถบล่างที่กดไม่โดน (วัดจริง 26 ส.ค. 69: การ์ด 501.34px
+   ปุ่ม 495.34px = 10px margin ของการ์ด ลบ 16px ของ Streamlit) → ล้างค่าลบตรงกล่องที่
+   ห่อการ์ดอยู่ แล้วย้ายระยะห่างระหว่างการ์ดไปไว้ที่ container ซึ่งอยู่นอกกล่องนั้น */
+[class*="st-key-teamcard-"] .stMarkdown div:has(> .team-card) { margin-bottom: 0; }
 [class*="st-key-teamcard-"] > div:last-child:has(.stButton) {
   position: absolute; inset: 0; margin: 0; padding: 0; }
 [class*="st-key-teamcard-"] .stButton,
 [class*="st-key-teamcard-"] .stButton > button { height: 100%; width: 100%; }
 [class*="st-key-teamcard-"] .stButton > button {
   opacity: 0; border: none; background: transparent; cursor: pointer; }
-/* เส้นโฟกัสวาดเอง ห้ามใช้ของเบราว์เซอร์ซึ่งหายไปบนพื้นขาว (กฎในระบบดีไซน์) */
-[class*="st-key-teamcard-"] .stButton > button:focus-visible {
-  opacity: 1; outline: 2px solid #184f95; outline-offset: 2px; }
+/* เส้นโฟกัสวาดเอง ห้ามใช้ของเบราว์เซอร์ซึ่งหายไปบนพื้นขาว (กฎในระบบดีไซน์)
+   และต้องวาดที่ "การ์ด" ไม่ใช่ที่ปุ่ม — ของเดิมใช้ opacity: 1 ปลุกปุ่มทั้งใบขึ้นมา
+   ข้อความ "ดูรายละเอียดของ ..." จึงลอยทับกลางการ์ดทุกครั้งที่กด Tab (เจอ 26 ส.ค. 69)
+   ปุ่มยังโปร่งใสตลอดเวลา ข้อความยังอยู่ใน DOM ให้ screen reader อ่านเหมือนเดิม */
+[class*="st-key-teamcard-"]:has(.stButton > button:focus-visible) .team-card {
+  outline: 2px solid #184f95; outline-offset: 2px; }
 [class*="st-key-teamcard-"]:hover .team-card {
   border-color: #184f95; transition: border-color 140ms ease-out; }
 [class*="st-key-teamcard-"]:active .team-card { background: #f4f2ee; }
 
-/* ---- จอแคบ ----
+/* ---- ที่แคบ ----
    สามคอลัมน์ของการ์ดเรียกร้องความกว้างตายตัว 232 + 500 = 732px ก่อนนับ padding
-   บนจอมือถือ 390px ตัวการ์ดกว้างได้แค่ 353px ตัวเลข BB/Sleep/RHR/HRV ฝั่งขวา
-   จึงถูกบีบจนอ่านไม่ออกหรือตัดหายไปเลย (วัดจากเบราว์เซอร์จริงในรีวิว 26 ส.ค. 69)
+   ได้น้อยกว่านั้นตัวเลข BB/Sleep/RHR/HRV ฝั่งขวาจะถูกบีบจนอ่านไม่ออกหรือตัดหายไปเลย
+   แคบกว่าเกณฑ์ให้ยุบเป็นแถวซ้อนกัน เส้นคั่นซ้ายกลายเป็นเส้นคั่นบน
 
-   ตัดที่ 900px ไม่ใช่ 768px เพราะ sidebar ของ Streamlit กินไปราว 340px —
-   หน้าต่าง 1280px เหลือพื้นที่เนื้อหาราว 900px ซึ่งพอดีกับที่การ์ดต้องการ
-   แคบกว่านั้นให้ยุบเป็นแถวซ้อนกัน เส้นคั่นซ้ายกลายเป็นเส้นคั่นบน */
-@media (max-width: 900px) {
+   เกณฑ์ต้องวัดจากพื้นที่ของการ์ดเอง ไม่ใช่ความกว้างหน้าต่าง — @media (max-width: 900px)
+   ของเดิมพลาดเคสหน้าต่าง 1000px ที่ sidebar กิน 300px ไป: การ์ดเหลือ 535px แต่ยังวาด
+   สามคอลัมน์แล้วล้น (scrollWidth 732 vs clientWidth 535 วัดจริง 26 ส.ค. 69)
+   container query อ่านความกว้างของ container ตรง ๆ จึงตัดถูกทั้งตอน sidebar เปิดและปิด */
+[class*="st-key-teamcard-"] { container-type: inline-size; }
+
+@container (max-width: 800px) {
   .team-card { grid-template-columns: minmax(0, 1fr); }
   .team-card > div { padding: 12px 14px; }
   .team-card__flags, .team-card__nums {
@@ -1542,14 +1554,33 @@ def analyze_distance_halves(splits):
     return paces[0], paces[1], hrs[0], hrs[1]
 
 
-def pace_axis_ticks(pace_series):
-    """สร้าง tick แกนเพซเป็น M:SS ทุก 15/30/60 วิ ตามช่วงข้อมูล"""
-    pmin, pmax = float(pace_series.min()), float(pace_series.max())
-    rng = max(pmax - pmin, 0.01)
-    step = 0.25 if rng <= 2 else (0.5 if rng <= 4 else 1.0)
+# แกนเพซถูกคุมด้วย "จำนวน tick" ไม่ใช่ความละเอียดของ step — lap ที่ยืนนิ่ง 17 เมตร/792 วิ
+# ให้เพซ 777.81 นาที/กม. ซึ่งด้วยเกณฑ์เดิม (step 1 นาที) แปลว่าแกนเดียวมี 774 ticks:
+# หัวข้อและตัวเลขขึ้นครบตั้งแต่ 0.35 วิ แต่กราฟใบนั้นเสร็จที่ 10.86 วิ (cold 23.54 วิ)
+# วัดจากเบราว์เซอร์จริง 26 ส.ค. 69 — ตัวเลขดิบของทุก split ยังอยู่ครบในตาราง Splits
+PACE_TICK_MAX = 12
+PACE_TICK_STEPS_MIN = (2, 5, 10, 15, 30, 60)
+
+
+def _pace_ticks_at(pmin, pmax, step):
     start = math.floor(pmin / step) * step
     end = math.ceil(pmax / step) * step
-    vals = [round(start + i * step, 4) for i in range(int(round((end - start) / step)) + 1)]
+    return [round(start + i * step, 4) for i in range(int(round((end - start) / step)) + 1)]
+
+
+def pace_axis_ticks(pace_series):
+    """สร้าง tick แกนเพซเป็น M:SS ทุก 15/30/60 วิ ตามช่วงข้อมูล แต่ไม่เกิน PACE_TICK_MAX จุด"""
+    pmin, pmax = float(pace_series.min()), float(pace_series.max())
+    rng = max(pmax - pmin, 0.01)
+    fine = 0.25 if rng <= 2 else (0.5 if rng <= 4 else 1.0)
+    for step in (fine, *PACE_TICK_STEPS_MIN):
+        vals = _pace_ticks_at(pmin, pmax, step)
+        if len(vals) <= PACE_TICK_MAX:
+            break
+    else:
+        # กว้างเกินกว่าที่ step 60 นาที/กม. เอาอยู่ — ปัดขึ้นเป็นชั่วโมงเต็มให้ป้ายยังกลม
+        # หารด้วย PACE_TICK_MAX - 2 เพราะการปัด start ลงและ end ขึ้นเพิ่มจุดได้อีกไม่เกินสอง
+        vals = _pace_ticks_at(pmin, pmax, math.ceil(rng / (PACE_TICK_MAX - 2) / 60) * 60)
     return vals, [fmt_pace(v) for v in vals]
 
 
