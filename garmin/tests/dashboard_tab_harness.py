@@ -28,6 +28,7 @@ GARMIN_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
 
 MAIN_TABS_KEY = "main_tabs"
+TEAM_TAB_LABEL = ":material/groups: ทีม"
 RECOVERY_TAB_LABEL = ":material/bedtime: การฟื้นตัว"
 TRAINING_TAB_LABEL = ":material/directions_run: การซ้อม"
 PROGRESS_TAB_LABEL = ":material/trending_up: ความก้าวหน้า"
