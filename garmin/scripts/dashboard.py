@@ -210,6 +210,22 @@ EF_BASELINE_MIN_RUNS = 5
 EF_STALE_DAYS = 14           # ไม่มีรัน easy นานกว่านี้ = เลิกรายงานความสดของเมื่อวาน
 # เกณฑ์ % วัดจาก SD ของข้อมูลจริงใน garmin.db หลังปรับเรียบ 3 รัน
 # (ต้อง SD 4.4% n=22 · แดน SD 3.5% n=94) → เฝ้าระวัง ~1 SD, ต้องพัก ~2 SD
+# --- ความสดสำหรับนักกีฬาที่วิ่งน้อยเกินคำนวณ EF ---
+# EF ต้องการรัน easy >= 5 ครั้งใน 28 วัน วัดจริง 26 ส.ค. 69: Tong 13 · Dan 28 · P'kao 2
+# เพราะ P'kao ซ้อม HIIT/มวย/indoor cardio 49 ครั้งเทียบกับวิ่ง 19 ครั้งใน 90 วัน
+# การ์ดของคนที่ใช้นาฬิกาดีที่สุดจึงขึ้น "ข้อมูลไม่พอ" ถาวร
+#
+# HRV เฉลี่ย 7 วันชนะผู้สมัครทุกตัวที่วัด: หนาแน่น 90/90 วัน และ CV 6.4%
+# (RHR 4.6% แต่ตอบคนละคำถาม · HRV คืนเดียว 11.7% · Readiness รายวัน 50% แกว่งเกินใช้)
+# เกณฑ์มาจากการกระจายจริงของทั้งทีม 216 จุด SD 9.1% → 1 SD และ 2 SD
+# ข้อจำกัด: hrv_weekly_avg เป็นค่าเฉลี่ยเคลื่อนที่อยู่แล้ว SD นี้จึงไม่ใช่ของตัวอย่างอิสระ
+HRV_TREND_BASELINE_DAYS = 28
+HRV_TREND_MIN_BASELINE_DAYS = 14   # ฐานสั้นกว่าครึ่งเดือนตอบไม่ได้
+HRV_TREND_STALE_DAYS = 3           # นาฬิกาเงียบเกินนี้ = เลิกรายงานเป็นความสดวันนี้
+HRV_TREND_WATCH_PCT = -9.0
+HRV_TREND_REST_PCT = -18.0
+HRV_TREND_GAIN_PCT = 9.0
+
 EF_WATCH_PCT = -3.0
 EF_REST_PCT = -7.0
 EF_GAIN_PCT = 5.0
@@ -317,6 +333,64 @@ def available_series(df, label_map):
         for column, label in label_map.items()
         if column in df.columns and df[column].notna().any()
     ]
+
+
+def hrv_trend_pct(wellness_rows, today_date):
+    """% ที่ HRV เฉลี่ย 7 วันล่าสุด ต่างจาก median ของฐาน 28 วันก่อนหน้า
+
+    ใช้แทน EF สำหรับนักกีฬาที่รัน easy ไม่พอ — HRV ไม่ขึ้นกับปริมาณหรือพื้นผิวการวิ่ง
+    จึงเทียบกับตัวเองได้ทุกวันแม้ซ้อม HIIT/มวย/indoor cardio เป็นหลัก
+
+    คืน NaN เมื่อหลักฐานไม่พอ: ไม่มีค่า, ฐานน้อยกว่าครึ่งเดือน, หรือค่าล่าสุดเก่าเกิน
+    ``HRV_TREND_STALE_DAYS`` — ค่าเก่าต้องไม่ถูกรายงานเป็นความสดวันนี้
+    """
+    if wellness_rows is None or len(wellness_rows) == 0:
+        return float("nan")
+    if "hrv_weekly_avg" not in wellness_rows or "calendar_date" not in wellness_rows:
+        return float("nan")
+    frame = wellness_rows[["calendar_date", "hrv_weekly_avg"]].copy()
+    frame["hrv_weekly_avg"] = pd.to_numeric(frame["hrv_weekly_avg"], errors="coerce")
+    frame["calendar_date"] = pd.to_datetime(frame["calendar_date"], errors="coerce")
+    frame = frame.dropna().sort_values("calendar_date")
+    if frame.empty:
+        return float("nan")
+
+    anchor = frame["calendar_date"].iloc[-1]
+    if (pd.Timestamp(today_date) - anchor).days > HRV_TREND_STALE_DAYS:
+        return float("nan")
+    current = frame["hrv_weekly_avg"].iloc[-1]
+    baseline = frame[
+        (frame["calendar_date"] < anchor)
+        & (frame["calendar_date"] >= anchor - pd.Timedelta(days=HRV_TREND_BASELINE_DAYS))
+    ]["hrv_weekly_avg"]
+    if len(baseline) < HRV_TREND_MIN_BASELINE_DAYS:
+        return float("nan")
+    baseline_median = baseline.median()
+    if pd.isna(baseline_median) or baseline_median <= 0:
+        return float("nan")
+    return (current / baseline_median - 1) * 100.0
+
+
+TREND_KEY_BY_LABEL = {
+    "ฟื้นตัวช้าลงมาก": "rest",
+    "ฟื้นตัวช้าลง": "watch",
+    "ฟื้นตัวดีขึ้นชัด": "gain",
+    "ปกติ": "ready",
+    "ข้อมูลไม่พอ": "unknown",
+}
+
+
+def hrv_trend_status(pct):
+    """คืน (คีย์รูปทรง, ข้อความ) ชุดเดียวกับการ์ด — ไม่สร้างคำศัพท์ชุดที่สอง"""
+    if pd.isna(pct):
+        return "unknown", "ข้อมูลไม่พอ"
+    if pct <= HRV_TREND_REST_PCT:
+        return "rest", "ฟื้นตัวช้าลงมาก"
+    if pct <= HRV_TREND_WATCH_PCT:
+        return "watch", "ฟื้นตัวช้าลง"
+    if pct >= HRV_TREND_GAIN_PCT:
+        return "gain", "ฟื้นตัวดีขึ้นชัด"
+    return "ready", "ปกติ"
 
 
 def chart_title(series, titles, fallback=""):
@@ -1094,13 +1168,31 @@ def render_team_card(row):
     # ค่าว่างของ EF ต้องบอกเหตุผลตรงจุดที่มันว่าง ไม่งั้นโค้ชอ่านว่า sync พังแล้วไปไล่
     # แก้ระบบที่ไม่ได้เสีย — ข้อความนี้โผล่เฉพาะตอนสรุปไม่ได้ ไม่ใช่คำอธิบายที่เห็นตลอด
     ef_value = str(row.get("ประสิทธิภาพการวิ่งเบา (EF)") or "–")
-    ef_note = (' <span style="color:#8a8d94">— ต้องมีรัน easy 3 ครั้งภายใน 14 วัน '
-               'ไม่ใช่ระบบขัดข้อง</span>') if ef_value.strip() in ("–", "-", "") else ""
+    ef_missing = ef_value.strip() in ("–", "-", "")
+    hrv_trend_value = str(row.get("ความสด HRV (%)") or "–")
+    hrv_trend_label = str(row.get("โซนความสด HRV") or "")
+
+    # EF เงียบเพราะรัน easy ไม่พอ ไม่ใช่เพราะระบบพัง — ถ้ามีเทรนด์ HRV ให้ใช้ ช่องนี้
+    # เปลี่ยนเป็นความสดจาก HRV แทนการค้างขีดกลางถาวร (เคสจริง: P'kao มีรัน easy 2 ครั้ง
+    # ใน 28 วัน ขณะที่เกณฑ์ต้องการ 5)
+    if ef_missing and hrv_trend_label:
+        trend_key = TREND_KEY_BY_LABEL.get(hrv_trend_label, "unknown")
+        first_cell = (
+            "ความสด (HRV 7 วัน)", esc(hrv_trend_value),
+            f'{status_shape_svg(trend_key, 10)}'
+            f'<span style="color:{STATUS_TEXT_COLORS.get(trend_key, "#55585f")}">'
+            f'{esc(hrv_trend_label)}</span>'
+            ' <span style="color:#8a8d94">— ใช้แทน EF เมื่อรัน easy ไม่พอ</span>')
+    else:
+        ef_note = (' <span style="color:#8a8d94">— ต้องมีรัน easy 3 ครั้งภายใน 14 วัน '
+                   'ไม่ใช่ระบบขัดข้อง</span>') if ef_missing else ""
+        first_cell = (
+            "ประสิทธิภาพวิ่งเบา", esc(ef_value),
+            f'{status_shape_svg(ef_key, 10)}'
+            f'<span style="color:{ef_color}">{esc(ef_label)}</span>{ef_note}')
 
     cells = [
-        ("ประสิทธิภาพวิ่งเบา", esc(ef_value),
-         f'{status_shape_svg(ef_key, 10)}'
-         f'<span style="color:{ef_color}">{esc(ef_label)}</span>{ef_note}'),
+        first_cell,
         # BB อยู่ในชุดเดียวกับอีก 3 ค่าที่ตัดสินว่าเขียวได้ไหม และเป็นเงื่อนไขธง BB<40
         # ด้วย — โชว์วันที่ในบรรทัดความสดแต่ไม่โชว์ค่า ทำให้อ่านเหมือนลืม ไม่เหมือนเลือก
         ("BODY BAT.", _num_text(row.get("Body Battery ตอนนี้/ล่าสุด")), ""),
@@ -2478,6 +2570,12 @@ if tab_today.open or tab_team.open:
         ) or "ไม่มี wellness"
 
         emoji, ef_txt = efficiency_status(ef_pct)
+        # นักกีฬาที่รัน easy ไม่พอคำนวณ EF ยังต้องมีตัวเลขความสดให้ติดตาม —
+        # HRV ไม่ขึ้นกับปริมาณหรือพื้นผิวการวิ่ง จึงเทียบกับตัวเองได้ทุกวัน
+        # **ตั้งใจให้เป็นตัวเลขที่อ่าน ไม่ใช่ธงใบใหม่** — hrv_status ของ Garmin เป็นธง
+        # อยู่แล้ว ถ้าให้เทรนด์จุดธงอีกใบ สัญญาณตัวเดียวจะถูกนับสองครั้งแล้วดันสถานะเป็นแดง
+        hrv_pct = hrv_trend_pct(w, today) if pd.isna(ef_pct) else float("nan")
+        hrv_trend_key, hrv_trend_txt = hrv_trend_status(hrv_pct)
         team_rows.append({
             "นักกีฬา": name,
             "สถานะ": status,
@@ -2486,6 +2584,8 @@ if tab_today.open or tab_team.open:
             "สถานะซ้อม (Garmin)": _ts_base.title() if _ts_base else "–",
             "ประสิทธิภาพการวิ่งเบา (EF)": efficiency_display(ef_pct),
             "โซน EF": f"{emoji} {ef_txt}",
+            "ความสด HRV (%)": (f"{hrv_pct:+.1f}%" if pd.notna(hrv_pct) else "–"),
+            "โซนความสด HRV": hrv_trend_txt if pd.notna(hrv_pct) else "",
             "โหลด 7 วัน": load_trend_display(acute, chronic_wk, metric, unit),
             "เซสชัน 7 วัน": sessions_7d,
             "Body Battery ตอนนี้/ล่าสุด": bb_now if pd.notna(bb_now) else None,
@@ -2506,7 +2606,7 @@ if tab_today.open or tab_team.open:
         })
 
     team_df = pd.DataFrame(team_rows)
-    TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "EF จากฐาน (%)"]
+    TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "EF จากฐาน (%)", "โซนความสด HRV"]
 
 
 # =====================================================================
