@@ -990,6 +990,22 @@ TEAM_CARD_CSS = """
   border-color: #184f95; transition: border-color 140ms ease-out; }
 [class*="st-key-teamcard-"]:active .team-card { background: #f4f2ee; }
 
+/* ---- จอแคบ ----
+   สามคอลัมน์ของการ์ดเรียกร้องความกว้างตายตัว 232 + 500 = 732px ก่อนนับ padding
+   บนจอมือถือ 390px ตัวการ์ดกว้างได้แค่ 353px ตัวเลข BB/Sleep/RHR/HRV ฝั่งขวา
+   จึงถูกบีบจนอ่านไม่ออกหรือตัดหายไปเลย (วัดจากเบราว์เซอร์จริงในรีวิว 26 ส.ค. 69)
+
+   ตัดที่ 900px ไม่ใช่ 768px เพราะ sidebar ของ Streamlit กินไปราว 340px —
+   หน้าต่าง 1280px เหลือพื้นที่เนื้อหาราว 900px ซึ่งพอดีกับที่การ์ดต้องการ
+   แคบกว่านั้นให้ยุบเป็นแถวซ้อนกัน เส้นคั่นซ้ายกลายเป็นเส้นคั่นบน */
+@media (max-width: 900px) {
+  .team-card { grid-template-columns: minmax(0, 1fr); }
+  .team-card > div { padding: 12px 14px; }
+  .team-card__flags, .team-card__nums {
+    border-left: none; border-top: 1px solid #f4f2ee; }
+  .team-card__nums { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* การ์ดต้องไม่ถูกหั่นกลางใบตอนพิมพ์ A4 — ครึ่งใบอ่านไม่ได้ความ */
 @media print { .team-card { break-inside: avoid; page-break-inside: avoid; } }
 </style>
