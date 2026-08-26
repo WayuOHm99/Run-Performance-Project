@@ -1539,8 +1539,13 @@ def pace_axis_ticks(pace_series):
 
 # --- DB LOADERS ---
 # แคชสั้นกว่ารอบ sync ที่ถี่ที่สุด (fast activity 15 นาที / fast wellness 30 นาที) ไม่งั้น
-# ข้อมูลลง DB แล้วแต่หน้าจอยังค้างของเก่าโดยไม่มีเหตุผล — 2 นาทีพอให้ query ไม่ถี่เกิน
-CACHE_TTL_SEC = 120
+# ข้อมูลลง DB แล้วแต่หน้าจอยังค้างของเก่าโดยไม่มีเหตุผล
+#
+# ต้อง **สั้นกว่า `AUTO_REFRESH_SEC`** ไม่งั้นรอบรีเฟรชอัตโนมัติจะหยิบค่าเดิมจาก cache
+# มาแสดงซ้ำ = หน้าจอดูเหมือนรีเฟรชแล้วแต่ตัวเลขไม่ขยับ ซึ่งหลอกตากว่าไม่รีเฟรชเลย
+# วัดแล้ว 26 ส.ค. 69: cache miss หนึ่งครั้งราคา 0.23 วิ (cold 1.175 vs warm 0.945)
+# ถูกพอที่จะเลือกความสดมากกว่าประหยัด query
+CACHE_TTL_SEC = 30
 AUTO_REFRESH_SEC = 60
 # เพดานสายงาน sync ใช้ตรวจความสอดคล้องกับ watchdog/health report หลังบ้านเท่านั้น
 # ไม่แสดง operational diagnostics บน Dashboard สำหรับพัฒนานักกีฬา
@@ -2011,7 +2016,13 @@ def get_lthr(slug, athlete_id):
 
 @st.fragment(run_every=AUTO_REFRESH_SEC)
 def auto_refresh_dashboard():
-    """Clear cached data and rerun the full dashboard once per interval."""
+    """Rerun the full dashboard once per interval so the numbers stay current.
+
+    ไม่ล้าง cache เอง — loader ทุกตัวมี ``ttl=CACHE_TTL_SEC`` ที่สั้นกว่ารอบนี้อยู่แล้ว
+    จึงหมดอายุทันเสมอ ส่วน ``st.cache_data.clear()`` ล้าง loader ทั้ง 21 ตัวและทุก
+    session พร้อมกัน = cold rerun ทุกนาที ราคา 0.23 วิ โดยไม่ได้ความสดเพิ่มเลย
+    (ปุ่มรีเฟรชที่ผู้ใช้กดเองยังล้างทั้งกระดาน — ตรงนั้นตั้งใจ)
+    """
     now = time.monotonic()
     last_refresh = st.session_state.get("_dashboard_auto_refresh_at")
     if last_refresh is None:
@@ -2019,7 +2030,6 @@ def auto_refresh_dashboard():
         return
     if now - last_refresh >= AUTO_REFRESH_SEC:
         st.session_state["_dashboard_auto_refresh_at"] = now
-        st.cache_data.clear()
         st.rerun(scope="app")
 
 
@@ -2042,7 +2052,7 @@ if athletes_df.empty:
 with st.sidebar:
     st.subheader("ตัวควบคุม")
 
-    # ปุ่มรีเฟรช: ล้าง cache (loaders ใช้ @st.cache_data ttl 2 นาที) + rerun → ดึงข้อมูลสดจาก DB ทันที
+    # ปุ่มรีเฟรช: ล้าง cache (loaders ใช้ @st.cache_data ttl CACHE_TTL_SEC) + rerun → ดึงข้อมูลสดจาก DB ทันที
     # จำเป็นเพราะหลังรัน garmin-sync-auto ข้อมูลใหม่จะไม่ขึ้นจนกว่า cache หมดอายุ/ล้าง (reload หน้าไม่ช่วย)
     if st.button(
         "รีเฟรชข้อมูลล่าสุด",
@@ -4090,4 +4100,9 @@ if tab_splits.open:
                     st.dataframe(pd.DataFrame(table_data), hide_index=True, column_config=cfg)
 
 
-    auto_refresh_dashboard()
+# --- AUTO REFRESH ---
+# **ต้องอยู่ระดับบนสุด ห้ามเยื้องเข้าไปในบล็อกแท็บใด ๆ** — มันเป็น
+# `@st.fragment(run_every=...)` การเรียกคือการ *ลงทะเบียน* ถ้าอยู่ใต้ `if tab_x.open:`
+# แท็บอื่นจะไม่ลงทะเบียนเลย = ค้างข้อมูลเดิมเงียบ ๆ โดยไม่มี error (เกิดจริงใน c9f4b07
+# ตอนใส่ lazy tabs แล้วบรรทัดนี้ถูกเยื้องตามไปด้วย ผู้ใช้เจอก่อนเทส)
+auto_refresh_dashboard()
