@@ -140,8 +140,10 @@ class DataAvailabilitySourceIntegrationTests(unittest.TestCase):
         self.assertIn("AND deleted_at IS NULL", DASHBOARD_SRC)
 
     def test_recovery_and_progress_do_not_hide_unsupported_sections(self):
+        # เดิมข้อนี้เฝ้าด้วยประโยคดิบ "Garmin อาจแสดง Recovery Time เฉพาะบนนาฬิกา"
+        # ซึ่งแดงทุกครั้งที่ขัดคำใหม่ ทั้งที่หัวข้อยังไม่ถูกซ่อน — ข้อความที่โค้ชเห็นจริง
+        # ถูกเฝ้าจากกล่องที่เรนเดอร์แล้วใน `test_dashboard_recovery_tab.py`
         self.assertIn("readiness_missing_message", DASHBOARD_SRC)
-        self.assertIn("Garmin อาจแสดง Recovery Time เฉพาะบนนาฬิกา", DASHBOARD_SRC)
         self.assertIn("advanced_performance_missing_message", DASHBOARD_SRC)
 
 
@@ -581,10 +583,13 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
         )
 
     def test_charts_use_filtered_human_named_series_and_do_not_bridge_nulls(self):
+        # `rhr_hrv_series` เคยอยู่ในลิสต์นี้ด้วย แต่ RHR กับ HRV ถูกแยกเป็นคนละกราฟ
+        # (กฎกราฟ 01 หน่วย bpm กับ ms) ชื่อตัวแปรจึงหายไปทั้งที่เจตนายังถูก
+        # พฤติกรรมจริง — ไม่วาดเส้นที่ไม่มีค่า และไม่ลากข้ามวันที่ขาด — ถูกเฝ้าจากกราฟที่
+        # เรนเดอร์จริงใน `test_dashboard_recovery_tab.py` แทน
         for assignment in (
             "health_series = available_series",
             "stress_ready_series = available_series",
-            "rhr_hrv_series = available_series",
             "respiration_series = available_series",
         ):
             self.assertIn(assignment, DASHBOARD_SRC)
