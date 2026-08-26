@@ -30,6 +30,7 @@ DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
 MAIN_TABS_KEY = "main_tabs"
 RECOVERY_TAB_LABEL = ":material/bedtime: การฟื้นตัว"
 TRAINING_TAB_LABEL = ":material/directions_run: การซ้อม"
+PROGRESS_TAB_LABEL = ":material/trending_up: ความก้าวหน้า"
 
 # วันสุดท้ายของข้อมูลที่ปั้น — ใช้วันจริงเพื่อให้ช่วงเวลาเริ่มต้นของหน้าครอบข้อมูลนี้
 LAST_DAY = datetime.date.today()

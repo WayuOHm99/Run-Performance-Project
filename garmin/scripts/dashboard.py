@@ -3664,8 +3664,11 @@ if tab_progress.open:
                 f"{advanced_summary['history_available']}/{advanced_summary['total_fields']} ชนิด; "
                 "ส่วนที่ไม่แสดงคือค่าที่บัญชีนี้ยังไม่เคยได้รับ"
             )
-        if advanced_performance_missing_message:
-            st.info(advanced_performance_missing_message, icon=":material/insights:")
+        # หนึ่งหน้า หนึ่งกล่อง "ของที่ยังไม่มี" — จองที่ไว้บนสุดแล้วเติมตอนจบ
+        # เดิมทุกหัวข้อที่ว่างขึ้นกล่องของตัวเอง นาฬิกาที่ไม่ส่งเมตริกขั้นสูงจึงเจอ
+        # กล่องสีหกใบพูดเรื่องเดียวกัน ทั้งที่กล่องบนสุดสรุปไว้หมดแล้ว
+        data_gap_slot = st.empty()
+        missing_here = []
 
         # ---------------- VO2max trend ----------------
         vo2 = (wellness_df.dropna(subset=["vo2max_trend"])
@@ -3699,12 +3702,11 @@ if tab_progress.open:
             )
             st.plotly_chart(fig_vo2, width="stretch")
         else:
-            st.info("ไม่มีข้อมูล VO2max ในช่วงที่เลือก (นาฬิกาอัปเดตเฉพาะวันที่มีวิ่ง GPS)")
+            missing_here.append("VO2max (Garmin อัปเดตเฉพาะวันที่มีวิ่ง GPS)")
 
         # ---------------- Body composition ----------------
         # endpoint นี้มักมีข้อมูลห่าง ๆ และอาจอยู่นอกช่วง 30 วันที่เลือก จึงแสดงค่าล่าสุด
         # จากประวัติทั้งหมด พร้อมวันที่จริงของแต่ละ field แทนการทำให้ค่าหายจาก dashboard.
-        st.subheader("องค์ประกอบร่างกายจาก Garmin")
         body_composition = load_body_composition(athlete_id)
         body_fields = [
             ("weight_kg", "น้ำหนัก", " kg", "{:.1f}"),
@@ -3723,8 +3725,9 @@ if tab_progress.open:
                         row["calendar_date"],
                     ))
         if not body_latest:
-            st.info("Garmin ยังไม่ส่งข้อมูลน้ำหนัก, BMI หรือเปอร์เซ็นต์ไขมันสำหรับนักกีฬาคนนี้")
+            missing_here.append("น้ำหนัก, BMI และเปอร์เซ็นต์ไขมัน")
         else:
+            st.subheader("องค์ประกอบร่างกายจาก Garmin")
             with st.container(horizontal=True):
                 for label, value, measured_at in body_latest:
                     st.metric(
@@ -3754,11 +3757,11 @@ if tab_progress.open:
                 )
 
         # ---------------- Race predictions ----------------
-        st.subheader("เวลาการแข่งขันที่ Garmin คาดการณ์")
         preds = load_race_predictions(athlete_id, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
         if preds.empty:
-            st.info("ไม่มีข้อมูลคาดการณ์ในช่วงที่เลือก")
+            missing_here.append("เวลาการแข่งขันที่ Garmin คาดการณ์")
         else:
+            st.subheader("เวลาการแข่งขันที่ Garmin คาดการณ์")
             race_cols = [("time_5k_sec", "5K"), ("time_10k_sec", "10K"),
                          ("time_half_sec", "Half"), ("time_full_sec", "Marathon")]
             with st.container(horizontal=True):
@@ -3809,10 +3812,8 @@ if tab_progress.open:
                 st.metric("วันที่วัด", lt_date, border=True)
             st.caption("ค่าประเมินจากการวิ่งจริงด้วยสาย HR — เทียบกับผลเทสแลบ (ถ้ามี) ก่อนใช้ปรับโซน")
         else:
-            st.info(
-                "Garmin Connect ยังไม่เคยส่ง Lactate Threshold สำหรับนักกีฬาคนนี้ "
-                "ค่านี้ต้องอาศัยอุปกรณ์/กิจกรรมที่เข้าเงื่อนไขของ Garmin",
-                icon=":material/speed:",
+            missing_here.append(
+                "Lactate Threshold (ต้องใช้อุปกรณ์/กิจกรรมที่เข้าเงื่อนไขของ Garmin)"
             )
         # ---------------- Endurance / Hill score (device-dependent) ----------------
         eh_cols = [c for c in ("endurance_score", "hill_score_overall") if c in wellness_df]
@@ -3840,19 +3841,26 @@ if tab_progress.open:
                 )
                 st.plotly_chart(fig_end, width="stretch")
         else:
-            st.info(
-                "ไม่มี Endurance Score หรือ Hill Score ในช่วงนี้; Garmin ให้เมตริกเหล่านี้ "
-                "ตามความสามารถของอุปกรณ์ บัญชี และประวัติกิจกรรม",
-                icon=":material/landscape:",
-            )
+            missing_here.append("Endurance Score และ Hill Score (ขึ้นกับรุ่นอุปกรณ์)")
         # ---------------- Personal records ----------------
-        st.subheader("สถิติส่วนตัวจาก Garmin")
         prs = load_personal_records(athlete_id)
         if prs.empty:
-            st.info("ไม่มีข้อมูล PR")
+            missing_here.append("สถิติส่วนตัว (PR)")
         else:
+            st.subheader("สถิติส่วนตัวจาก Garmin")
             st.dataframe(pd.DataFrame(personal_record_rows(prs)), hide_index=True)
             st.caption("PR นับตามที่นาฬิกาบันทึกอัตโนมัติ — ระยะที่ GPS วัดไม่ถึงเกณฑ์ (เช่น 4.98 กม.) จะไม่ถูกนับเป็น 5K")
+
+        # เติมกล่องเดียวที่จองไว้บนสุด — ตอนนี้รู้ครบแล้วว่าหัวข้อไหนไม่มีของ
+        if missing_here or advanced_performance_missing_message:
+            lines = []
+            if advanced_performance_missing_message:
+                lines.append(advanced_performance_missing_message)
+            if missing_here:
+                lines.append(
+                    "ยังไม่มีข้อมูลให้แสดงในช่วงนี้: " + " · ".join(missing_here)
+                )
+            data_gap_slot.info("\n\n".join(lines), icon=":material/insights:")
 
 
     # =====================================================================
