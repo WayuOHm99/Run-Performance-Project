@@ -113,43 +113,52 @@ HELPERS = extract_helpers(
 )
 
 def css_rules(stylesheet):
-    """``(เงื่อนไข @media หรือ None, selector, ประกาศ)`` ทีละกฎ ตามลำดับในไฟล์
+    """``(หัว at-rule หรือ None, selector, ประกาศ)`` ทีละกฎ ตามลำดับในไฟล์
 
-    รองรับ ``@media`` ซ้อนชั้นเดียวซึ่งพอสำหรับสไตล์ชีตนี้ และตัดคอมเมนต์ทิ้งก่อน
-    เพราะคอมเมนต์อธิบายยาว ๆ จะถูกนับเป็นส่วนหนึ่งของ selector ถ้าไม่ตัด
+    รองรับ at-rule ซ้อนชั้นเดียว (``@media``, ``@container``) ซึ่งพอสำหรับสไตล์ชีตนี้
+    และตัดคอมเมนต์ทิ้งก่อน เพราะคอมเมนต์อธิบายยาว ๆ จะถูกนับเป็นส่วนหนึ่งของ selector
+    หัว at-rule คืนมาทั้งก้อน (เช่น ``@container (max-width: 800px)``) เพราะผู้เรียก
+    ต้องแยกให้ออกว่าเงื่อนไขวัดจากอะไร — หน้าต่าง หรือพื้นที่ของตัว container เอง
     """
     body = stylesheet.split("<style>")[1].split("</style>")[0]
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
-    rules, position, media = [], 0, None
+    rules, position, at_rule = [], 0, None
     while (opening := body.find("{", position)) != -1:
         head = body[position:opening].strip()
-        if head.startswith("@media"):
-            media = head[len("@media"):].strip()
+        if head.startswith("@"):
+            at_rule = head
             position = opening + 1
             continue
         closing = body.find("}", opening)
         for selector in body[position:opening].split(","):
-            rules.append((media, selector.strip().splitlines()[-1].strip(),
+            rules.append((at_rule, selector.strip().splitlines()[-1].strip(),
                           body[opening + 1:closing]))
         position = closing + 1
-        if media and body[position:].lstrip().startswith("}"):
-            media, position = None, body.find("}", position) + 1
+        if at_rule and body[position:].lstrip().startswith("}"):
+            at_rule, position = None, body.find("}", position) + 1
     return rules
 
 
-def columns_at(selector, viewport_px):
-    """``grid-template-columns`` ที่มีผลจริงกับ selector นี้ ณ จอกว้าง ``viewport_px``
+def columns_at(selector, card_px):
+    """``grid-template-columns`` ที่มีผลจริง เมื่อ *ตัวการ์ด* ได้พื้นที่ ``card_px``
 
-    จำลอง cascade แบบง่าย: กฎนอก ``@media`` ใช้เสมอ กฎใน ``@media (max-width: N)``
-    ใช้เมื่อ ``viewport_px <= N`` และกฎหลังทับกฎก่อน
+    จำลอง cascade แบบง่าย: กฎนอก at-rule ใช้เสมอ · ``@container (max-width: N)``
+    ใช้เมื่อ ``card_px <= N`` · กฎหลังทับกฎก่อน
+
+    ``@media (max-width: N)`` ถือว่า **ตอบคำถามนี้ไม่ได้** จึงไม่ถูกนับ — การ์ดกว้าง
+    ``card_px`` เกิดได้ที่หน้าต่างกว้างเท่าไหร่ก็ได้ที่ ≥ ``card_px`` (sidebar 300px
+    ของ Streamlit กินไปเท่าไหร่ก็ขยับตัวเลขนั้น) ซึ่งคือบั๊กที่เจอ 26 ส.ค. 69 เป๊ะ ๆ:
+    หน้าต่าง 1000px ผ่าน @media (max-width: 900px) ไปได้ แต่การ์ดเหลือ 535px แล้วล้น
     """
     tracks = None
-    for media, rule_selector, declarations in css_rules(HELPERS["TEAM_CARD_CSS"]):
+    for at_rule, rule_selector, declarations in css_rules(HELPERS["TEAM_CARD_CSS"]):
         if rule_selector != selector:
             continue
-        if media is not None:
-            limit = re.search(r"max-width:\s*(\d+)px", media)
-            if not limit or viewport_px > int(limit.group(1)):
+        if at_rule is not None:
+            if not at_rule.startswith("@container"):
+                continue
+            limit = re.search(r"max-width:\s*(\d+)px", at_rule)
+            if not limit or card_px > int(limit.group(1)):
                 continue
         match = re.search(r"grid-template-columns:\s*([^;}]+)", declarations)
         if match:
@@ -158,9 +167,9 @@ def columns_at(selector, viewport_px):
     return tracks
 
 
-def fixed_width_at(selector, viewport_px):
-    """ความกว้างที่ selector นี้ "เรียกร้อง" ตายตัว — มากกว่าจอ = เนื้อหาถูกบีบหรือล้น"""
-    return sum(int(value) for value in re.findall(r"(\d+)px", columns_at(selector, viewport_px)))
+def fixed_width_at(selector, card_px):
+    """ความกว้างที่ selector นี้ "เรียกร้อง" ตายตัว — มากกว่าที่ได้ = เนื้อหาถูกบีบหรือล้น"""
+    return sum(int(value) for value in re.findall(r"(\d+)px", columns_at(selector, card_px)))
 
 
 def split_tracks(tracks):
@@ -177,14 +186,14 @@ def split_tracks(tracks):
     return parts + ([current] if current else [])
 
 
-def column_count_at(selector, viewport_px):
+def column_count_at(selector, card_px):
     """จำนวนคอลัมน์ที่ประกาศ โดยกาง ``repeat(N, ...)`` ออกเป็น N ช่อง
 
     คืน ``None`` เมื่อใช้ ``auto-fit``/``auto-fill`` ซึ่งเบราว์เซอร์คำนวณจำนวนช่อง
     ให้เองตามที่ว่าง = ไหลตามจอโดยไม่ต้องมี breakpoint
     """
     total = 0
-    for track in split_tracks(columns_at(selector, viewport_px)):
+    for track in split_tracks(columns_at(selector, card_px)):
         repeat = re.match(r"repeat\(\s*([^,]+),", track)
         if not repeat:
             total += 1
@@ -460,31 +469,94 @@ class NarrowScreenTests(unittest.TestCase):
     ตัวเลขไม่เกินความกว้างจอ
     """
 
-    # 390 = iPhone แนวตั้ง · 768 = แท็บเล็ต · 1280 = โน้ตบุ๊กที่ใช้อยู่ทุกวัน
-    VIEWPORTS = (390, 768, 1280)
+    # ความกว้างที่ *ตัวการ์ด* ได้จริง วัดจาก headless Chrome 26 ส.ค. 69
+    #   353px = หน้าต่าง 390px ไม่มี sidebar (มือถือแนวตั้ง)
+    #   535px = หน้าต่าง 1000px + sidebar 300px ← เคสที่ breakpoint ตามหน้าต่างพลาด
+    #   815px = หน้าต่าง 1280px + sidebar 300px (โน้ตบุ๊กที่ใช้อยู่ทุกวัน)
+    CARD_WIDTHS = (353, 535, 815)
 
     # ตัวเลขอย่าง "78" กับป้าย "Sleep" ต้องอยู่บรรทัดเดียวกันได้โดยไม่ตัดคำ
     MIN_COLUMN_PX = 110
 
-    def test_the_card_never_demands_more_width_than_the_screen_has(self):
-        for viewport in self.VIEWPORTS:
-            with self.subTest(viewport=viewport):
-                demanded = fixed_width_at(".team-card", viewport)
+    def test_the_card_never_demands_more_width_than_it_is_given(self):
+        for card_px in self.CARD_WIDTHS:
+            with self.subTest(card_px=card_px):
+                demanded = fixed_width_at(".team-card", card_px)
                 self.assertLessEqual(
-                    demanded, viewport,
-                    f"ที่จอกว้าง {viewport}px การ์ดยังเรียกร้องคอลัมน์ตายตัวรวม "
+                    demanded, card_px,
+                    f"เมื่อการ์ดได้พื้นที่ {card_px}px มันยังเรียกร้องคอลัมน์ตายตัวรวม "
                     f"{demanded}px — ตัวเลขฝั่งขวาจะถูกบีบหรือตัดหาย",
                 )
 
     def test_each_number_keeps_enough_room_to_read_on_a_phone(self):
         # แถวตัวเลขเป็น grid ซ้อนใน grid ต่อให้การ์ดยุบเป็นคอลัมน์เดียวแล้ว
         # ถ้าแถวนี้ยังยืนกราน 5 คอลัมน์ ตัวเลขจะเหลือความกว้างละไม่ถึง 80px
-        phone = 390
+        phone = self.CARD_WIDTHS[0]
         columns = column_count_at(".team-card__nums", phone)
         if columns is None:
             return  # auto-fit: เบราว์เซอร์จัดจำนวนช่องให้เองตามที่ว่าง
         self.assertGreaterEqual(
             phone / columns, self.MIN_COLUMN_PX,
-            f"บนจอ {phone}px แถวตัวเลขยังแบ่ง {columns} คอลัมน์ = "
+            f"บนการ์ดกว้าง {phone}px แถวตัวเลขยังแบ่ง {columns} คอลัมน์ = "
             f"{phone / columns:.0f}px ต่อค่า อ่านไม่ออก",
         )
+
+
+class OverlayButtonTests(unittest.TestCase):
+    """ปุ่มโปร่งใสที่ทาบทั้งใบต้องมองไม่เห็น และต้องสูงเท่าการ์ดเป๊ะ ๆ
+
+    ที่มา (26 ส.ค. 69) วัดจาก headless Chrome ทั้งสองข้อ:
+    · กด Tab แล้ว ``opacity: 1`` ปลุกปุ่มขึ้นมา ข้อความ "ดูรายละเอียดของ P'kao"
+      จึงลอยทับกลางการ์ด
+    · การ์ดสูง 501.34px แต่ปุ่มสูง 495.34px เหลือแถบล่างที่กดไม่โดน เพราะ Streamlit
+      ใส่ ``margin-bottom: -1rem`` ให้กล่องเนื้อหาของ st.markdown แล้วกลืน
+      ``margin-bottom: 10px`` ของการ์ดไปพร้อมกัน (10 - 16 = -6)
+    """
+
+    def card_declarations(self, selector):
+        return [declarations for _, rule_selector, declarations
+                in css_rules(HELPERS["TEAM_CARD_CSS"]) if rule_selector == selector]
+
+    def test_the_overlay_button_never_becomes_visible(self):
+        for at_rule, selector, declarations in css_rules(HELPERS["TEAM_CARD_CSS"]):
+            if "st-key-teamcard-" not in selector or "button" not in selector:
+                continue
+            opacity = re.search(r"opacity:\s*([\d.]+)", declarations)
+            if opacity is None:
+                continue
+            with self.subTest(selector=selector, at_rule=at_rule):
+                self.assertEqual(
+                    opacity.group(1), "0",
+                    f"{selector} ตั้ง opacity เป็น {opacity.group(1)} — ข้อความบนปุ่ม "
+                    "จะโผล่ทับการ์ด ต้องบอกสถานะด้วยเส้นรอบการ์ดแทน",
+                )
+
+    def test_keyboard_focus_still_leaves_a_visible_mark_on_the_card(self):
+        marked = [selector for _, selector, declarations
+                  in css_rules(HELPERS["TEAM_CARD_CSS"])
+                  if "focus-visible" in selector and "outline:" in declarations]
+        self.assertTrue(
+            marked, "ไม่มีกฎไหนวาดเส้นตอนโฟกัสด้วยคีย์บอร์ด — คนใช้คีย์บอร์ดจะไม่รู้ว่าอยู่ใบไหน")
+        self.assertTrue(
+            all(".team-card" in selector for selector in marked),
+            f"เส้นโฟกัสถูกวาดที่ {marked} ไม่ใช่ที่ตัวการ์ด")
+
+    def test_the_card_declares_no_vertical_margin_of_its_own(self):
+        """ระยะห่างระหว่างการ์ดต้องอยู่ที่ container ไม่ใช่ที่ตัวการ์ด
+
+        ทุก px ที่การ์ดกาง margin แนวตั้งออกมา จะถูก ``margin-bottom: -1rem``
+        ของ Streamlit หักกลับ = กล่องเตี้ยกว่าการ์ด = ปุ่มที่ทาบไว้เตี้ยตาม
+        """
+        for declarations in self.card_declarations(".team-card"):
+            offenders = re.findall(r"(margin(?:-top|-bottom)?):\s*([^;}]+)", declarations)
+            self.assertEqual(
+                offenders, [],
+                f".team-card ยังประกาศ {offenders} — ปุ่มที่ทาบทั้งใบจะเตี้ยกว่าการ์ด "
+                "เท่าที่ margin นั้นโดนหักกลับ ให้ย้ายไปไว้ที่ [class*=\"st-key-teamcard-\"]",
+            )
+        spacing = []
+        for _, selector, declarations in css_rules(HELPERS["TEAM_CARD_CSS"]):
+            gap = re.search(r"margin-bottom:\s*([^;}]+)", declarations)
+            if "st-key-teamcard-" in selector and gap and gap.group(1).strip() not in ("0", "0px"):
+                spacing.append(selector)
+        self.assertTrue(spacing, "ย้าย margin ออกจากการ์ดแล้วแต่ไม่มีใครเว้นระยะระหว่างการ์ดแทน")
