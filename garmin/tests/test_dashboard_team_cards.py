@@ -109,7 +109,90 @@ HELPERS = extract_helpers(
     "TEAM_URGENCY_ORDER",
     "team_urgency_rank",
     "team_status",
+    "TEAM_CARD_CSS",
 )
+
+def css_rules(stylesheet):
+    """``(เงื่อนไข @media หรือ None, selector, ประกาศ)`` ทีละกฎ ตามลำดับในไฟล์
+
+    รองรับ ``@media`` ซ้อนชั้นเดียวซึ่งพอสำหรับสไตล์ชีตนี้ และตัดคอมเมนต์ทิ้งก่อน
+    เพราะคอมเมนต์อธิบายยาว ๆ จะถูกนับเป็นส่วนหนึ่งของ selector ถ้าไม่ตัด
+    """
+    body = stylesheet.split("<style>")[1].split("</style>")[0]
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
+    rules, position, media = [], 0, None
+    while (opening := body.find("{", position)) != -1:
+        head = body[position:opening].strip()
+        if head.startswith("@media"):
+            media = head[len("@media"):].strip()
+            position = opening + 1
+            continue
+        closing = body.find("}", opening)
+        for selector in body[position:opening].split(","):
+            rules.append((media, selector.strip().splitlines()[-1].strip(),
+                          body[opening + 1:closing]))
+        position = closing + 1
+        if media and body[position:].lstrip().startswith("}"):
+            media, position = None, body.find("}", position) + 1
+    return rules
+
+
+def columns_at(selector, viewport_px):
+    """``grid-template-columns`` ที่มีผลจริงกับ selector นี้ ณ จอกว้าง ``viewport_px``
+
+    จำลอง cascade แบบง่าย: กฎนอก ``@media`` ใช้เสมอ กฎใน ``@media (max-width: N)``
+    ใช้เมื่อ ``viewport_px <= N`` และกฎหลังทับกฎก่อน
+    """
+    tracks = None
+    for media, rule_selector, declarations in css_rules(HELPERS["TEAM_CARD_CSS"]):
+        if rule_selector != selector:
+            continue
+        if media is not None:
+            limit = re.search(r"max-width:\s*(\d+)px", media)
+            if not limit or viewport_px > int(limit.group(1)):
+                continue
+        match = re.search(r"grid-template-columns:\s*([^;}]+)", declarations)
+        if match:
+            tracks = match.group(1)
+    assert tracks is not None, f"ไม่พบ grid-template-columns ของ {selector} แล้ว"
+    return tracks
+
+
+def fixed_width_at(selector, viewport_px):
+    """ความกว้างที่ selector นี้ "เรียกร้อง" ตายตัว — มากกว่าจอ = เนื้อหาถูกบีบหรือล้น"""
+    return sum(int(value) for value in re.findall(r"(\d+)px", columns_at(selector, viewport_px)))
+
+
+def split_tracks(tracks):
+    """แยก track ตามช่องว่างระดับบนสุด — ``minmax(0, 1fr)`` ต้องนับเป็นหนึ่งช่อง"""
+    parts, depth, current = [], 0, ""
+    for character in tracks:
+        depth += (character == "(") - (character == ")")
+        if character.isspace() and depth == 0:
+            if current:
+                parts.append(current)
+            current = ""
+        else:
+            current += character
+    return parts + ([current] if current else [])
+
+
+def column_count_at(selector, viewport_px):
+    """จำนวนคอลัมน์ที่ประกาศ โดยกาง ``repeat(N, ...)`` ออกเป็น N ช่อง
+
+    คืน ``None`` เมื่อใช้ ``auto-fit``/``auto-fill`` ซึ่งเบราว์เซอร์คำนวณจำนวนช่อง
+    ให้เองตามที่ว่าง = ไหลตามจอโดยไม่ต้องมี breakpoint
+    """
+    total = 0
+    for track in split_tracks(columns_at(selector, viewport_px)):
+        repeat = re.match(r"repeat\(\s*([^,]+),", track)
+        if not repeat:
+            total += 1
+        elif repeat.group(1).strip() in ("auto-fit", "auto-fill"):
+            return None
+        else:
+            total += int(repeat.group(1))
+    return total
 
 
 class StatusPartsTests(unittest.TestCase):
@@ -362,3 +445,46 @@ class CardIsADoorTests(unittest.TestCase):
                         "การ์ดยังไม่มีปุ่มพาไปหน้ารายคน")
         self.assertTrue('key=f"open-athlete-' in team_tab,
                         "ปุ่มต้องมี key แยกต่อคน ไม่งั้น Streamlit ทับกันเอง")
+
+
+class NarrowScreenTests(unittest.TestCase):
+    """การ์ดต้องอ่านได้บนจอแคบ ไม่ใช่แค่บนจอโน้ตบุ๊กของคนเขียน
+
+    ที่มา (26 ส.ค. 69): รีวิวเปิดที่ viewport 390px แล้ววัดได้ว่าตัวการ์ดกว้าง 353px
+    แต่เนื้อหาข้างในเรียกร้อง 732px — EF กับตัวเลข BB/Sleep/RHR/HRV ฝั่งขวาถูกบีบ
+    หรือตัดหายไปเลย เพราะ `.team-card` ประกาศคอลัมน์ตายตัว `232px ... 500px`
+    โดยไม่มี breakpoint ใด ๆ (ในไฟล์มี @media แค่ของ print)
+
+    เทสนี้จำลอง cascade แล้วถามคำถามเดียว: **ที่จอกว้างเท่านี้ การ์ดเรียกร้องกี่ px**
+    ไม่ผูกกับวิธีแก้ — จะใช้ media query, repeat(auto-fit) หรืออะไรก็ได้ที่ทำให้
+    ตัวเลขไม่เกินความกว้างจอ
+    """
+
+    # 390 = iPhone แนวตั้ง · 768 = แท็บเล็ต · 1280 = โน้ตบุ๊กที่ใช้อยู่ทุกวัน
+    VIEWPORTS = (390, 768, 1280)
+
+    # ตัวเลขอย่าง "78" กับป้าย "Sleep" ต้องอยู่บรรทัดเดียวกันได้โดยไม่ตัดคำ
+    MIN_COLUMN_PX = 110
+
+    def test_the_card_never_demands_more_width_than_the_screen_has(self):
+        for viewport in self.VIEWPORTS:
+            with self.subTest(viewport=viewport):
+                demanded = fixed_width_at(".team-card", viewport)
+                self.assertLessEqual(
+                    demanded, viewport,
+                    f"ที่จอกว้าง {viewport}px การ์ดยังเรียกร้องคอลัมน์ตายตัวรวม "
+                    f"{demanded}px — ตัวเลขฝั่งขวาจะถูกบีบหรือตัดหาย",
+                )
+
+    def test_each_number_keeps_enough_room_to_read_on_a_phone(self):
+        # แถวตัวเลขเป็น grid ซ้อนใน grid ต่อให้การ์ดยุบเป็นคอลัมน์เดียวแล้ว
+        # ถ้าแถวนี้ยังยืนกราน 5 คอลัมน์ ตัวเลขจะเหลือความกว้างละไม่ถึง 80px
+        phone = 390
+        columns = column_count_at(".team-card__nums", phone)
+        if columns is None:
+            return  # auto-fit: เบราว์เซอร์จัดจำนวนช่องให้เองตามที่ว่าง
+        self.assertGreaterEqual(
+            phone / columns, self.MIN_COLUMN_PX,
+            f"บนจอ {phone}px แถวตัวเลขยังแบ่ง {columns} คอลัมน์ = "
+            f"{phone / columns:.0f}px ต่อค่า อ่านไม่ออก",
+        )
