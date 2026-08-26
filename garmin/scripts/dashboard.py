@@ -2519,7 +2519,16 @@ if tab_team.open:
 
         with st.expander("ดูตัวเลขทีมทั้งหมด", icon=":material/table_view:"):
             st.dataframe(
-                team_df.drop(columns=TEAM_INTERNAL_COLUMNS),
+                # "สถานะ" กับ "โซน EF" เก็บอีโมจิไว้เป็น *คีย์* ให้การ์ดแปลงเป็นรูปทรง
+                # (การ์ดอ่านจาก `team_df` ก่อนบรรทัดนี้ จึงยังได้คีย์ครบ) — ตารางนี้เป็น
+                # ข้อความล้วนที่คนอ่าน จึงต้องถอดคีย์ออกก่อน ไม่งั้นอีโมจิถึงตาโค้ชตรง ๆ
+                team_df.drop(columns=TEAM_INTERNAL_COLUMNS).assign(
+                    **{
+                        column: (lambda frame, name=column: frame[name].map(
+                            lambda value: status_parts(value)[1]))
+                        for column in ("สถานะ", "โซน EF")
+                    }
+                ),
                 hide_index=True,
                 column_config={
                     "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
@@ -3426,7 +3435,10 @@ if tab_train.open:
                     icon=":material/info:",
                 )
             else:
-                emoji, txt = efficiency_status(ef_pct_tab)
+                # `efficiency_status()` คืนอีโมจิเป็น *คีย์ภายใน* ให้ `status_parts()`
+                # แปลงเป็นรูปทรงบนการ์ดทีม — `st.metric` วาดรูปทรงไม่ได้ และอีโมจิดิบ
+                # หายตอนพิมพ์ขาวดำ จึงใช้เฉพาะคำ
+                _, txt = efficiency_status(ef_pct_tab)
                 ef_baseline_median = ef_all[
                     ef_all["date"] < ef_all["date"].iloc[-1]
                 ].tail(20)["ef"].median()
@@ -3436,7 +3448,7 @@ if tab_train.open:
                     _ef_now = efficiency_recent_value(ef_all, end_date)
                     st.metric("EF ล่าสุด (median 3 รัน)",
                               f"{_ef_now:.3f}" if pd.notna(_ef_now) else "–",
-                              delta=f"{emoji} {txt}", delta_color="off", border=True,
+                              delta=txt, delta_color="off", border=True,
                               help="EF ไวต่ออากาศร้อน พื้นผิว และความชัน "
                                    "จึงต้องอ่านเป็นเทรนด์ ไม่ใช่ค่าวันเดียว")
                     st.metric("เทียบฐาน 28 วัน", efficiency_display(ef_pct_tab), border=True,

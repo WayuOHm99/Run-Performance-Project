@@ -87,6 +87,28 @@ class TeamLegendMatchesTheCardsTests(unittest.TestCase):
                 f"คำอธิบายไม่ได้พูดถึงสถานะ {status!r} แล้ว",
             )
 
+    def test_the_team_table_shows_words_not_emoji_keys(self):
+        """ตารางทีมเป็นข้อความล้วนที่คนอ่าน — คีย์ภายในต้องถูกถอดออกก่อนถึงตา
+
+        เทสนี้ต้องใช้ ``AppTest`` เท่านั้น: ``st.dataframe`` วาดบน canvas
+        การกวาด ``textContent`` ในเบราว์เซอร์จึงมองไม่เห็นเนื้อในตารางเลย
+        และจะรายงานว่า "ไม่มีอีโมจิ" ทั้งที่โค้ชเห็นอยู่
+        """
+        frames = self.tab.get("dataframe")
+        self.assertTrue(frames, "ไม่เจอตารางทีม — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
+
+        offenders = []
+        for frame in frames:
+            data = frame.value
+            for column in data.columns:
+                for cell in data[column]:
+                    if isinstance(cell, str) and EMOJI.search(cell):
+                        offenders.append(f"{column}: {cell}")
+        self.assertEqual(
+            [], offenders,
+            "ตารางทีมยังโชว์อีโมจิ:\n" + "\n".join(f"- {o}" for o in offenders),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
