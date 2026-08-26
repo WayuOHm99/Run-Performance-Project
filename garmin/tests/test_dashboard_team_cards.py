@@ -13,6 +13,7 @@
 
 import ast
 import html
+import re
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,46 @@ def team_tab_source():
     end = DASHBOARD_SRC.index("with tab_today:")
     assert start < end
     return DASHBOARD_SRC[start:end]
+
+
+def tabs_around(*names, when):
+    """ชื่อแท็บที่ครอบการ *อ่าน* (``when="read"``) หรือการ *กำหนดค่า* (``when="assign"``)
+    ของชื่อตัวแปรที่ระบุ อยู่ในเส้นทางที่สคริปต์รันจริง
+
+    ใช้ตอบคำถามเดียว: "ค่าที่แท็บหนึ่งต้องใช้ ถูกคำนวณในเงื่อนไขที่ครอบถึงมันไหม"
+    ถ้าคำนวณแคบกว่าที่ใช้ = NameError · ถ้ากว้างกว่า = คำนวณทิ้งให้แท็บที่ไม่ได้ใช้
+    """
+    wanted, found = set(names), set()
+
+    def scan(body, tabs):
+        for node in body:
+            if isinstance(node, ast.If):
+                inner = tabs | set(re.findall(r"tab_(\w+)\.open", ast.unparse(node.test)))
+                scan(node.body, inner)
+                scan(node.orelse, tabs)
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue  # นิยาม ไม่ใช่การรัน
+            if isinstance(node, (ast.With, ast.For, ast.While, ast.Try)):
+                for field in ("body", "orelse", "finalbody"):
+                    scan(getattr(node, field, None) or [], tabs)
+                for handler in getattr(node, "handlers", []):
+                    scan(handler.body, tabs)
+                if isinstance(node, ast.For):
+                    scan([ast.Expr(value=node.iter)], tabs)
+                continue
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            for sub in ast.walk(node):
+                if not (isinstance(sub, ast.Name) and sub.id in wanted):
+                    continue
+                assigning = any(sub is t for t in targets)
+                if (when == "assign") == assigning:
+                    found.update(tabs)
+
+    scan(ast.parse(DASHBOARD_SRC).body, set())
+    return found
 
 
 def extract_helpers(*names):
@@ -279,16 +320,24 @@ class CardIsADoorTests(unittest.TestCase):
         self.assertTrue("key=ATHLETE_STATE_KEY" in DASHBOARD_SRC,
                         "selectbox ไม่ได้ใช้คีย์เดียวกับที่ focus_athlete เขียนลงไป")
 
-    def test_cross_tab_state_is_computed_outside_the_tab_blocks(self):
-        # แท็บวันนี้อ่าน `team_df` ที่มาจากลูปของแท็บทีม ตราบใดที่ลูปนั้นยังอยู่ใน
-        # `with tab_team:` การรันเฉพาะแท็บที่เปิดอยู่จะทำให้แท็บวันนี้ NameError ทันที
-        # ย้ายออกมานอกบล็อกแท็บแล้ว `.open` จึงปลอดภัย — เทสนี้กันไม่ให้ย้ายกลับเข้าไป
-        tabs_at = DASHBOARD_SRC.index("st.tabs(")
-        self.assertLess(
-            DASHBOARD_SRC.index("team_rows = []"), tabs_at,
-            "การคำนวณ team_rows ย้ายกลับเข้าไปในบล็อกแท็บแล้ว — lazy จะพังเงียบ ๆ",
+    def test_the_team_snapshot_is_built_for_exactly_the_tabs_that_read_it(self):
+        # `team_df` ถูกสร้างที่เดียวแต่มีสองแท็บใช้ — แท็บทีมวาดการ์ด แท็บวันนี้อ่านแถว
+        # ของนักกีฬาที่เลือก การคำนวณจึงต้องครอบ "พอดี" กับแท็บที่ใช้:
+        #   แคบไป -> เปิดแท็บที่ใช้แล้ว NameError ทันที (ผู้ใช้เห็นจอแดง)
+        #   กว้างไป -> อีกสี่แท็บจ่ายค่าคำนวณย้อนหลัง 42 วันของนักกีฬาทุกคนฟรี ๆ
+        # เดิมเทสนี้ยืนยันด้วย "ตำแหน่งในซอร์สต้องอยู่ก่อน st.tabs(" ซึ่งผูกกับรูปร่างโค้ด
+        # และแดงทันทีที่จัดโครงใหม่ทั้งที่เจตนายังถูก — เปลี่ยนมาถามเงื่อนไขจริงแทน
+        readers = tabs_around("team_df", "team_rows", when="read")
+        builders = tabs_around("team_df", "team_rows", when="assign")
+        self.assertEqual(
+            readers, builders,
+            f"แท็บที่อ่าน team_df คือ {sorted(readers)} แต่คำนวณให้ {sorted(builders)} — "
+            "ส่วนต่างคือแท็บที่จะ NameError หรือแท็บที่จ่ายค่าคำนวณโดยไม่ได้ใช้",
         )
-        self.assertLess(DASHBOARD_SRC.index("team_df = pd.DataFrame(team_rows)"), tabs_at)
+        self.assertEqual(
+            readers, {"today", "team"},
+            f"คาดว่ามีแท็บวันนี้กับแท็บทีมเท่านั้นที่ใช้ team_df แต่เจอ {sorted(readers)}",
+        )
 
     def test_every_tab_body_only_runs_when_that_tab_is_open(self):
         # กราฟ plotly คือตัวกินเวลาหลักของหนึ่งรอบรัน (วัดแล้ว ~0.7 จาก 1.1 วินาที)
