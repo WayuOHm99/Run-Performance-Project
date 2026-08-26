@@ -7,7 +7,10 @@ primaryColor = "#2a78d6"
 textColor = "#31333F"
 
 # --- ระบบดีไซน์ของใบงาน #18 (25 ส.ค. 69) ---
-# ฟอนต์ตัวเดียวรองรับทั้งไทยและอังกฤษ ตัวเลขใช้ mono เพื่อให้เรียงตรงคอลัมน์ในตาราง
+# ฟอนต์ตัวเดียวรองรับทั้งไทยและอังกฤษ ตัวเลขใช้ mono เพื่อให้เรียงตรงคอลัมน์
+# **`codeFont` ลงถึงแค่ st.code / st.dataframe** ไม่ถึง st.metric หรือการ์ด HTML ของเรา
+# ตัวเลขที่เหลือจึงถูกชี้ด้วย CSS ใน dashboard.py (NUMBER_FONT_CSS + กฎในบล็อกการ์ด)
+# ยามเฝ้ากฎอยู่ที่ tests/test_dashboard_number_font.py
 font = "IBM Plex Sans Thai"
 headingFont = "IBM Plex Sans Thai"
 codeFont = "IBM Plex Mono"

@@ -163,6 +163,23 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- ตัวเลขของ st.metric = IBM Plex Mono (อาร์ตบอร์ด "ระบบดีไซน์" คลาส .num) ---
+# ``codeFont`` ใน .streamlit/config.toml ไปไม่ถึง st.metric — Streamlit เอาไปลงเฉพาะ
+# st.code / st.dataframe (ตรวจในเบราว์เซอร์ 26 ส.ค. 69: 0 element เป็น Plex Mono
+# และ FontFace ของมันยัง unloaded) จึงต้องชี้เอง
+# บล็อกนี้ต้องอยู่ระดับบนสุดของสคริปต์ ไม่ใช่ในบล็อกแท็บ เพราะ st.metric กระจายอยู่ทุกแท็บ
+# และแท็บที่ไม่ได้เปิดไม่ถูกรัน (lazy `tab.open`) — ฉีดในแท็บเดียวแท็บอื่นจะไม่ได้ฟอนต์เลย
+NUMBER_FONT_CSS = """
+<style>
+[data-testid="stMetricValue"],
+[data-testid="stMetricDelta"] {
+  font-family: "IBM Plex Mono", "IBM Plex Sans Thai", monospace;
+  font-variant-numeric: tabular-nums;
+}
+</style>
+"""
+st.markdown(NUMBER_FONT_CSS, unsafe_allow_html=True)
+
 # --- LAYOUT TWEAK (จอปกติ): ดันเนื้อหา sidebar ขึ้นให้ชิดบนเหมาะสม + ลดช่องว่างบนหน้าหลัก ---
 st.markdown("""
 <style>
@@ -1059,6 +1076,11 @@ TEAM_CARD_CSS = """
 .team-card__sub { flex-wrap: wrap; }
 .team-card__val { font-size: 21px; font-weight: 600; line-height: 1.2;
   font-variant-numeric: tabular-nums; }
+/* ตัวเลข = IBM Plex Mono ตามอาร์ตบอร์ด "ระบบดีไซน์" (คลาส .num) — ทุกหลักกว้างเท่ากัน
+   ตัวเลขคนละแถวจึงเรียงตรงคอลัมน์  ``codeFont`` ใน config.toml ทำแทนไม่ได้
+   Streamlit เอาไปลงเฉพาะ st.code / st.dataframe เท่านั้น
+   Plex Mono ไม่มีตัวไทย ป้ายที่ปนไทยจึงต้องตกไปที่ Plex Sans Thai ก่อนถึง monospace ของระบบ */
+.team-card__val { font-family: "IBM Plex Mono", "IBM Plex Sans Thai", monospace; }
 .team-card__sub { display: flex; align-items: center; gap: 5px; font-size: 12px;
   margin-top: 2px; }
 /* ---- การ์ดทั้งใบคือปุ่ม ----
@@ -1547,6 +1569,10 @@ TODAY_PANEL_CSS = """
 .today-sess__name { font-size: 14px; overflow-wrap: anywhere; }
 .today-sess__num { font-size: 14px; text-align: right; font-variant-numeric: tabular-nums; }
 .today-sess__zone { text-align: right; }
+/* ตัวเลขทุกตัวบนแผงนี้เป็น mono ด้วยเหตุผลเดียวกับการ์ดทีมข้างบน */
+.today-verdict__fig, .today-tile__val, .today-ef__val, .today-ef__tick,
+.today-ef__pin-val, .today-strip__val, .today-strip__day,
+.today-sess__when, .today-sess__num { font-family: "IBM Plex Mono", "IBM Plex Sans Thai", monospace; }
 /* แผงต้องไม่ถูกหั่นกลางใบตอนพิมพ์ A4 — ครึ่งใบอ่านไม่ได้ความ */
 @media print {
   .today-verdict, .today-tile, .today-panel { break-inside: avoid; page-break-inside: avoid; }
