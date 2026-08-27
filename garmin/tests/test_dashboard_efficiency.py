@@ -58,7 +58,8 @@ HELPERS = extract_helpers(
     "efficiency_recent_value",
     "efficiency_status",
     "efficiency_display",
-    "load_trend_display",
+    "load_volume_display",
+    "load_baseline_display",
     "compute_load_windows",
     "team_status",
 )
@@ -226,21 +227,31 @@ class EfficiencyStatusTests(unittest.TestCase):
 
 
 class LoadTrendDisplayTests(unittest.TestCase):
-    def test_seven_day_load_is_shown_raw_with_its_own_baseline(self):
-        display = HELPERS["load_trend_display"]
+    """โหลด 7 วันแยกเป็นสองค่า 27 ส.ค. 69 — ตัวดิบพกหน่วย ส่วนทิศทางเป็น % ล้วน
 
-        self.assertEqual(
-            display(64.1, 54.3, "ระยะวิ่ง", "km"), "64.1 km · +18% จากฐาน 28 วัน"
-        )
-        self.assertEqual(
-            display(711.0, 515.0, "training_load", "TL"), "711 TL · +38% จากฐาน 28 วัน"
-        )
+    เดิมเป็นสตริงเดียว ``"64.1 km · +18% จากฐาน 28 วัน"`` ซึ่งอ่านข้ามคนไม่ได้
+    เพราะหน่วยขึ้นกับรุ่นนาฬิกา — พฤติกรรมที่คุมไว้ยังเป็นข้อเดิม: ตัวดิบต้องพกหน่วย
+    ของตัวเองเสมอ และค่าที่ไม่มีต้องเป็นขีดกลาง ไม่ใช่ตัวเลขที่ไม่เคยมี
+    """
+
+    def test_seven_day_load_is_shown_raw_with_its_own_unit(self):
+        volume = HELPERS["load_volume_display"]
+
+        self.assertEqual(volume(64.1, "ระยะวิ่ง", "km"), "64.1 km")
+        self.assertEqual(volume(711.0, "training_load", "TL"), "711 TL")
+
+    def test_direction_is_a_bare_percent_so_it_reads_across_athletes(self):
+        baseline = HELPERS["load_baseline_display"]
+
+        self.assertEqual(baseline(64.1, 54.3), "+18%")
+        self.assertEqual(baseline(711.0, 515.0), "+38%")
 
     def test_load_without_a_baseline_still_shows_the_raw_number(self):
-        display = HELPERS["load_trend_display"]
+        volume, baseline = HELPERS["load_volume_display"], HELPERS["load_baseline_display"]
 
-        self.assertEqual(display(64.1, float("nan"), "ระยะวิ่ง", "km"), "64.1 km")
-        self.assertEqual(display(float("nan"), float("nan"), "ระยะวิ่ง", "km"), "–")
+        self.assertEqual(volume(64.1, "ระยะวิ่ง", "km"), "64.1 km")
+        self.assertEqual(baseline(64.1, float("nan")), "–")
+        self.assertEqual(volume(float("nan"), "ระยะวิ่ง", "km"), "–")
 
 
 class LoadWindowsTests(unittest.TestCase):
