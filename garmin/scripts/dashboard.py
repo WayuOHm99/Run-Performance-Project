@@ -2043,6 +2043,32 @@ def athlete_has_load(athlete_id):
     return n > 0
 
 
+LOAD_CURRENCY_SAMPLE = 5   # กี่กิจกรรมล่าสุดที่ใช้ตอบว่า "นาฬิกาตอนนี้ยังส่ง TL อยู่ไหม"
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def athlete_load_is_current(athlete_id):
+    """นาฬิกาที่คนนี้ใช้ **อยู่ตอนนี้** ยังส่ง ``training_load`` อยู่ไหม
+
+    ``athlete_has_load()`` ตอบจากประวัติทั้งหมด ซึ่งใช้ตอบคำถาม "เคยได้รับไหม" ได้ถูก
+    แต่ใช้เลือกหน่วยของโหลดไม่ได้ — คนที่เลิกใช้นาฬิการุ่นที่ให้ TL จะยังถูกรวมเฉพาะ
+    แถวที่มี TL กิจกรรมหลังเปลี่ยนจึงหายจากผลรวมทั้งที่อยู่ใน DB ผลคือ 0 TL · -100%
+    อ่านได้ว่า "หยุดซ้อม" และถ้าเกิน 42 วันจะไม่เหลือโหลดในกรอบเลยจน ``has_workload``
+    เป็นเท็จ แล้วสถานะการ์ดตกไปเป็น "ข้อมูลไม่พอ" ทั้งที่ซ้อมทุกวัน
+
+    ดูหลายรายการ ไม่ใช่รายการเดียว เพราะกิจกรรมเดี่ยว ๆ ที่ไม่มี TR (เช่นรายการที่กรอกเอง)
+    ไม่ควรสลับหน่วยของทั้งหน้า — ต้องเป็นการเปลี่ยนที่ค้างอยู่จริงถึงจะสลับ
+    """
+    conn = connect_db()
+    rows = conn.execute(
+        "SELECT training_load IS NOT NULL FROM fact_activity "
+        "WHERE athlete_id = ? AND deleted_at IS NULL "
+        "ORDER BY start_time_local DESC LIMIT ?",
+        (athlete_id, LOAD_CURRENCY_SAMPLE)).fetchall()
+    conn.close()
+    return any(row[0] for row in rows)
+
+
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def athlete_has_training_readiness(athlete_id):
     """บัญชีนี้เคยได้รับ Training Readiness หรือไม่ (ไม่ใช้ฟันธงรุ่นนาฬิกา)."""
@@ -2115,7 +2141,7 @@ def load_daily_load(athlete_id, start_date, end_date):
 def load_daily_workload(athlete_id, start_date, end_date):
     """คืน (df[date,value,sessions], metric, unit) สำหรับโหลดสะสม
     ใช้ training_load ถ้านาฬิกาให้ (จับ cross-training ครบ) ไม่งั้น fallback ระยะวิ่ง (กม.)"""
-    if athlete_has_load(athlete_id):
+    if athlete_load_is_current(athlete_id):
         return load_daily_load(athlete_id, start_date, end_date), "training_load", "TL"
     df = load_daily_run_km(athlete_id, start_date, end_date).rename(columns={"km": "value"})
     return df, "ระยะวิ่ง", "km"

@@ -249,5 +249,73 @@ class BaselineIsNotDilutedByDaysTheWatchNeverReported(unittest.TestCase):
         self.assertIn("เทียบฐานตัวเอง", notes[0])
 
 
+def seed_watch_dropped(conn):
+    """นักกีฬาที่ **เลิกใช้** นาฬิกาที่ให้ ``training_load`` เมื่อ 7 วันก่อน
+
+    ทิศตรงข้ามของ ``seed_watch_change`` — วิ่งเท่ากันทุกวันตลอด 42 วันเหมือนกัน
+    แต่ 7 วันหลังสุดไม่มี TL ติดมา ถ้าระบบยังยืนยันจะรวมเฉพาะแถวที่มี TL
+    ผลรวม 7 วันจะเป็น 0 แล้วหน้าจอขึ้นว่า "หยุดซ้อม" ทั้งที่ซ้อมทุกวัน
+    """
+    conn.execute(
+        "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
+        "VALUES (1, 'tester', 'Tester')"
+    )
+    for offset in range(35):
+        day = LAST_DAY - datetime.timedelta(days=34 - offset)
+        conn.execute(
+            "INSERT INTO fact_daily_wellness ("
+            " athlete_id, calendar_date, resting_hr, hrv_last_night, hrv_weekly_avg,"
+            " sleep_score, body_battery_high, stress_avg, fetched_at)"
+            " VALUES (1, ?, 50, 62, 62, 80, 85, 30, ?)",
+            (day.isoformat(), day.isoformat() + "T08:00:00Z"),
+        )
+    for offset in range(42):
+        day = LAST_DAY - datetime.timedelta(days=41 - offset)
+        load = None if (LAST_DAY - day).days <= 6 else 90
+        conn.execute(
+            "INSERT INTO fact_activity ("
+            " activity_id, athlete_id, activity_type, start_time_local, distance_m,"
+            " duration_sec, avg_hr, max_hr, avg_pace_min_per_km, training_load,"
+            " training_effect_aerobic)"
+            " VALUES (?, 1, 'running', ?, 8000, 2880, 132, 150, 6.0, ?, 2.5)",
+            (7100 + offset, f"{day.isoformat()} 06:00:00", load),
+        )
+
+
+class LoadFollowsTheWatchTheAthleteUsesNow(unittest.TestCase):
+    """เลิกใช้นาฬิกาที่ให้ TL แล้วต้องถอยไปใช้ระยะวิ่ง ไม่ใช่รายงานว่าหยุดซ้อม"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tab, _ = render_tab(TEAM_TAB_LABEL, seed_watch_dropped)
+
+    def _card(self):
+        for element in self.tab.get("markdown"):
+            # ต้องเจาะจงถึง markup ของการ์ด ไม่งั้นไปแมตช์สไตล์ชีตที่ประกาศคลาสเดียวกัน
+            if element.value and 'class="team-card__load"' in element.value:
+                return element.value
+        raise AssertionError("ไม่เจอการ์ดทีม — ข้อมูลทดสอบไม่พอ")
+
+    def _load_line(self):
+        return LOAD_LINE.search(self._card()).group(1)
+
+    def test_a_watch_that_stopped_reporting_does_not_read_as_a_stopped_athlete(self):
+        # ซ้อมทุกวันตลอด 42 วัน ตัวเลขที่ถูกคือปริมาณจริง ไม่ใช่ 0 และไม่ใช่ -100%
+        line = self._load_line()
+        self.assertNotIn("0 TL", line)
+        self.assertNotIn("-100%", line)
+        self.assertNotIn("0 เซสชัน", line)
+
+    def test_the_load_falls_back_to_the_distance_every_watch_reports(self):
+        line = self._load_line()
+        self.assertIn("km", line)
+        self.assertIn("วิ่ง", line)
+
+    def test_the_status_does_not_drop_to_missing_data_while_the_runs_are_there(self):
+        card = self._card()
+        self.assertNotIn("ข้อมูลไม่พอ", card)
+        self.assertNotIn("ไม่มีข้อมูล", card)
+
+
 if __name__ == "__main__":
     unittest.main()
