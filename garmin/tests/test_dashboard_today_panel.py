@@ -205,7 +205,9 @@ class VerdictTests(unittest.TestCase):
         "สถานะ": "🟡 เฝ้าระวัง",
         "ประสิทธิภาพการวิ่งเบา (EF)": "+2% จากฐาน 28 วัน",
         "โซน EF": "🟢 ปกติ",
-        "โหลด 7 วัน": "32.6 km · -12% จากฐาน 28 วัน",
+        "โหลด 7 วัน": "32.6 km",
+        "เทียบฐานตัวเอง": "-12%",
+        "ขอบเขตโหลด": "วิ่ง",
         "เซสชัน 7 วัน": 5,
         "ธงเฝ้าระวัง": "HRV UNBALANCED",
     }
@@ -244,6 +246,22 @@ class VerdictTests(unittest.TestCase):
         markup = HELPERS["render_today_verdict"](row)
         self.assertNotIn("<script>", markup)
         self.assertIn("&lt;script&gt;", markup)
+
+    def test_the_load_figure_is_the_one_that_reads_across_athletes(self):
+        # ตัวดิบมีหน่วยตามรุ่นนาฬิกา (TL หรือ km) อ่านข้ามคนไม่ได้ — ตัวดิบพร้อมหน่วย
+        # ยังอยู่ในแผงโหลดรายวันที่อยู่ถัดลงไปในหน้าเดียวกัน ช่องคำตัดสินจึงใช้ % แทน
+        markup = HELPERS["render_today_verdict"](dict(self.ROW))
+        self.assertIn("-12%", markup)
+        self.assertIn("เทียบฐานตัวเอง", markup)
+
+    def test_the_session_count_says_what_it_counted(self):
+        # 5 เซสชันของคนที่นับเฉพาะวิ่ง ไม่ใช่ของเดียวกับ 5 เซสชันของคนที่นับทุกกิจกรรม
+        self.assertIn("5 (วิ่ง)", HELPERS["render_today_verdict"](dict(self.ROW)))
+        self.assertIn(
+            "5 (ทุกกิจกรรม)",
+            HELPERS["render_today_verdict"](
+                dict(self.ROW, **{"ขอบเขตโหลด": "ทุกกิจกรรม"})),
+        )
 
 
 class TileTests(unittest.TestCase):

@@ -299,39 +299,33 @@ class PersonalRecordRowTests(unittest.TestCase):
         )
 
 
-def extract_load_trend_display():
+def extract_load_display(name):
     tree = ast.parse(DASHBOARD_SRC)
     functions = [
         node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "load_trend_display"
+        if isinstance(node, ast.FunctionDef) and node.name == name
     ]
     namespace = {"pd": pd}
     exec(
         compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
         namespace,
     )
-    return namespace["load_trend_display"]
+    return namespace[name]
 
 
 class LoadTrendDisplayTests(unittest.TestCase):
     def test_load_states_which_base_it_was_calculated_from(self):
         # ตารางทีมวางตัวเลขของทุกคนไว้คอลัมน์เดียว แต่ P'kao คิดจาก Garmin training_load
         # ส่วน Tong/Dan คิดจากระยะวิ่ง — หน่วยที่ติดมาคือสิ่งที่กันไม่ให้เทียบข้ามคนโดยไม่รู้ตัว
-        load_trend_display = extract_load_trend_display()
-        self.assertEqual(
-            load_trend_display(711.0, 515.0, "training_load", "TL"),
-            "711 TL · +38% จากฐาน 28 วัน",
-        )
-        self.assertEqual(
-            load_trend_display(64.1, 54.3, "ระยะวิ่ง", "km"),
-            "64.1 km · +18% จากฐาน 28 วัน",
-        )
+        volume = extract_load_display("load_volume_display")
+        self.assertEqual(volume(711.0, "training_load", "TL"), "711 TL")
+        self.assertEqual(volume(64.1, "ระยะวิ่ง", "km"), "64.1 km")
 
     def test_missing_load_shows_a_dash_instead_of_a_base_it_never_used(self):
-        load_trend_display = extract_load_trend_display()
-        self.assertEqual(
-            load_trend_display(float("nan"), float("nan"), "ระยะวิ่ง", "km"), "–"
-        )
+        volume = extract_load_display("load_volume_display")
+        baseline = extract_load_display("load_baseline_display")
+        self.assertEqual(volume(float("nan"), "ระยะวิ่ง", "km"), "–")
+        self.assertEqual(baseline(float("nan"), float("nan")), "–")
 
 
 class ChartGapPolicyTests(unittest.TestCase):

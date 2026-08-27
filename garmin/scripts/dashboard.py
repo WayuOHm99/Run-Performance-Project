@@ -800,20 +800,49 @@ def fmt_sec(sec):
     return f"{s // 60}:{s % 60:02d}"
 
 
-def load_trend_display(acute, chronic_wk, metric, unit):
-    """โหลด 7 วันแบบดิบ + ทิศทางเทียบฐาน 28 วัน — ไม่หารเป็นอัตราส่วนอีกแล้ว
+def load_volume_display(acute, metric, unit):
+    """ปริมาณ 7 วันแบบดิบพร้อมหน่วยของมันเอง — **อ่านได้เฉพาะเทียบกับตัวเอง**
 
-    เดิมช่องนี้เป็น ACWR (โหลด 7 วัน ÷ ฐาน 28 วัน) แต่หลักฐานหาเกณฑ์ตัดที่ทำนาย
-    การบาดเจ็บได้ไม่เจอ (ดูหมายเหตุที่ค่าคงที่ EF_* ด้านบน) ตัวเลขนี้จึงเป็น
-    "บริบท" ว่าสัปดาห์นี้ทำไปเท่าไหร่เทียบกับที่เคยทำ ไม่ใช่คำตัดสินว่าดีหรือแย่
+    หน่วยขึ้นกับรุ่นนาฬิกา: ได้ Garmin ``training_load`` (TL) ถ้านาฬิกาให้ ไม่งั้น
+    fallback เป็นระยะวิ่ง (km) วัดจริง 27 ส.ค. 69 ทีมนี้มีทั้งสองแบบพร้อมกัน
+    (32.7 km · 92.6 km · 323 TL) จึงห้ามเอาตัวเลขดิบของสองคนมาเทียบกัน
+    ตัวที่เทียบข้ามคนได้คือ ``load_baseline_display()``
     """
     if pd.isna(acute):
         return "–"
     digits = 0 if metric == "training_load" else 1
-    shown = f"{acute:.{digits}f} {unit}"
-    if pd.isna(chronic_wk) or chronic_wk <= 0:
-        return shown
-    return f"{shown} · {(acute / chronic_wk - 1) * 100:+.0f}% จากฐาน 28 วัน"
+    return f"{acute:.{digits}f} {unit}"
+
+
+def load_baseline_display(acute, chronic_wk):
+    """ทิศทางเทียบฐาน 28 วัน "ของตัวเอง" เป็น % — ไม่มีหน่วย จึงอ่านข้ามคนได้
+
+    เดิมช่องนี้เป็น ACWR (โหลด 7 วัน ÷ ฐาน 28 วัน) แต่หลักฐานหาเกณฑ์ตัดที่ทำนาย
+    การบาดเจ็บได้ไม่เจอ (ดูหมายเหตุที่ค่าคงที่ EF_* ด้านบน) ตัวเลขนี้จึงเป็น
+    "บริบท" ว่าสัปดาห์นี้ทำไปเท่าไหร่เทียบกับที่เคยทำ ไม่ใช่คำตัดสินว่าดีหรือแย่
+
+    ไม่มีฐานคืน "–" ไม่ใช่ 0% เพราะ 0% แปลว่าทำเท่าฐานเป๊ะ ซึ่งคนละเรื่องกับยังไม่มีฐาน
+    """
+    if pd.isna(acute) or pd.isna(chronic_wk) or chronic_wk <= 0:
+        return "–"
+    return f"{(acute / chronic_wk - 1) * 100:+.0f}%"
+
+
+def load_session_scope(metric):
+    """"เซสชัน 7 วัน" ของคนนี้นับอะไรบ้าง — คนละนิยามตามที่มาของโหลด
+
+    โหลดจาก ``training_load`` นับทุกกิจกรรม (รวม HIIT/เวท/มวย) ส่วนโหลดที่ fallback
+    เป็นระยะวิ่งนับเฉพาะการวิ่ง สองค่านี้เคยวางเรียงกันโดยไม่มีอะไรบอกว่าต่างกัน
+    """
+    return "ทุกกิจกรรม" if metric == "training_load" else "วิ่ง"
+
+
+def load_context_line(baseline, volume, sessions, scope):
+    """บรรทัดบริบทโหลด — ขึ้นต้นด้วยตัวที่เทียบข้ามคนได้ แล้วค่อยตามด้วยตัวดิบ"""
+    tail = f"{volume} · {sessions} เซสชัน ({scope})"
+    if baseline in ("–", "-", "", None):
+        return f"{tail} — ยังไม่มีฐาน 28 วันให้เทียบ"
+    return f"{baseline} จากฐานตัวเอง · {tail}"
 
 
 def efficiency_factor(distance_m, duration_sec, avg_hr):
@@ -1224,6 +1253,13 @@ def render_team_card(row):
         ("HRV", esc(hrv_val),
          f'<span style="color:{hrv_color}">{esc(hrv_note)}</span>' if hrv_note else ""),
     ]
+    load_line = load_context_line(
+        str(row.get("เทียบฐานตัวเอง") or "–"),
+        str(row.get("โหลด 7 วัน") or "–"),
+        row.get("เซสชัน 7 วัน") or 0,
+        str(row.get("ขอบเขตโหลด") or "วิ่ง"),
+    )
+
     numbers = "".join(
         f'<div><div class="team-card__lbl" style="margin-bottom:2px">{esc(title)}</div>'
         f'<div class="team-card__val">{value}</div>'
@@ -1243,9 +1279,7 @@ def render_team_card(row):
         f'<div class="team-card__flags">'
         f'<div class="team-card__lbl">{esc(flag_label)}</div>'
         f'<div class="team-card__chips">{chips}</div>'
-        f'<div class="team-card__load">โหลด 7 วัน '
-        f'{esc(str(row.get("โหลด 7 วัน") or "–"))} · '
-        f'{esc(str(row.get("เซสชัน 7 วัน") or 0))} เซสชัน '
+        f'<div class="team-card__load">โหลด 7 วัน {esc(load_line)} '
         f'<span style="color:#8a8d94">— บริบท ไม่ได้ตัดสินสถานะ</span></div>'
         f'</div>'
         f'<div class="team-card__nums">{numbers}</div>'
@@ -1438,8 +1472,11 @@ def render_today_verdict(row):
         f'<div class="today-verdict__fig">{esc(str(value))}</div></div>'
         for title, value in (
             ("ประสิทธิภาพวิ่งเบา", row.get("ประสิทธิภาพการวิ่งเบา (EF)") or "–"),
-            ("โหลด 7 วัน", row.get("โหลด 7 วัน") or "–"),
-            ("เซสชัน 7 วัน", row.get("เซสชัน 7 วัน") or 0),
+            # ช่องนี้เคยเป็นตัวดิบ ซึ่งอ่านข้ามคนไม่ได้เพราะหน่วยขึ้นกับรุ่นนาฬิกา —
+            # ตัวดิบพร้อมหน่วยยังอยู่ในแผงโหลดรายวันที่อยู่ถัดลงไปในหน้าเดียวกัน
+            ("โหลด 7 วัน เทียบฐานตัวเอง", row.get("เทียบฐานตัวเอง") or "–"),
+            ("เซสชัน 7 วัน", f'{row.get("เซสชัน 7 วัน") or 0} '
+                             f'({row.get("ขอบเขตโหลด") or "วิ่ง"})'),
         )
     )
     return (
@@ -2085,12 +2122,18 @@ def load_daily_workload(athlete_id, start_date, end_date):
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
-def load_first_activity_date(athlete_id):
-    """วันแรกที่มีกิจกรรม (ทุกประเภท) — ใช้ตัดสินความพอของประวัติเมื่อโหลดอิง training_load"""
+def load_first_load_date(athlete_id):
+    """วันแรกที่ **นาฬิกาเริ่มส่ง** ``training_load`` — ไม่ใช่วันแรกที่มีกิจกรรม
+
+    ``athlete_has_load()`` ตอบว่า "มี TL" ถ้าเจอแถวเดียวในประวัติทั้งหมด ถ้าใครเปลี่ยน
+    นาฬิกากลางคัน วันก่อนเปลี่ยนจะไม่มี TL แล้วถูกนับเป็น 0 ในฐาน 28 วัน = ฐานต่ำเกินจริง
+    หน้าจอจะขึ้นว่าซ้อมหนักขึ้นมหาศาลทั้งที่ทำเท่าเดิม **โดยไม่มี error สักตัว**
+    ฐานจึงต้องเริ่มนับที่นี่ แล้วปล่อยให้เกณฑ์ "ประวัติ ≥ 28 วัน" เงียบไว้จนกว่าจะพอจริง
+    """
     conn = connect_db()
     row = conn.execute(
         "SELECT MIN(SUBSTR(start_time_local, 1, 10)) FROM fact_activity "
-        "WHERE athlete_id = ? AND deleted_at IS NULL",
+        "WHERE athlete_id = ? AND training_load IS NOT NULL AND deleted_at IS NULL",
         (athlete_id,)).fetchone()
     conn.close()
     return datetime.date.fromisoformat(row[0]) if row and row[0] else None
@@ -2502,7 +2545,7 @@ if tab_today.open or tab_team.open:
             win28 = daily[daily["date"] >= pd.Timestamp(today - datetime.timedelta(days=27))]
             acute = win7["value"].sum()
             sessions_7d = int(win7["sessions"].sum())
-            first = load_first_activity_date(aid) if metric == "training_load" else load_first_run_date(aid)
+            first = load_first_load_date(aid) if metric == "training_load" else load_first_run_date(aid)
             days_of_history = (today - first).days + 1 if first else 0
             if days_of_history >= 28 and win28["value"].sum() > 0:
                 chronic_wk = win28["value"].sum() / 4
@@ -2638,8 +2681,11 @@ if tab_today.open or tab_team.open:
             "โซน EF": f"{emoji} {ef_txt}",
             "ความสด HRV (%)": (f"{hrv_pct:+.1f}%" if pd.notna(hrv_pct) else "–"),
             "โซนความสด HRV": hrv_trend_txt if pd.notna(hrv_pct) else "",
-            "โหลด 7 วัน": load_trend_display(acute, chronic_wk, metric, unit),
+            # ตัวเทียบข้ามคนได้มาก่อนตัวดิบเสมอ — ตัวดิบมาคนละหน่วยตามรุ่นนาฬิกา
+            "เทียบฐานตัวเอง": load_baseline_display(acute, chronic_wk),
+            "โหลด 7 วัน": load_volume_display(acute, metric, unit),
             "เซสชัน 7 วัน": sessions_7d,
+            "ขอบเขตโหลด": load_session_scope(metric),
             "Body Battery ตอนนี้/ล่าสุด": bb_now if pd.notna(bb_now) else None,
             "Sleep": sleep if pd.notna(sleep) else None,
             "RHR": rhr if pd.notna(rhr) else None,
@@ -2658,7 +2704,8 @@ if tab_today.open or tab_team.open:
         })
 
     team_df = pd.DataFrame(team_rows)
-    TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "EF จากฐาน (%)", "โซนความสด HRV"]
+    TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "EF จากฐาน (%)", "โซนความสด HRV",
+                             "ขอบเขตโหลด"]
 
 
 # =====================================================================
@@ -2720,6 +2767,20 @@ if tab_team.open:
                     "สถานะซ้อม (Garmin)": st.column_config.TextColumn(
                         "สถานะซ้อม (Garmin)",
                         help="สถานะที่ Garmin คำนวณเองและขึ้นกับรุ่นนาฬิกา"),
+                    # สองคอลัมน์นี้เคยรวมเป็นสตริงเดียว ทำให้ตัวดิบที่เทียบข้ามคนไม่ได้
+                    # ถูกอ่านเป็นคอลัมน์เดียวกันทั้งทีม ทั้งที่หน่วยขึ้นกับรุ่นนาฬิกา
+                    "เทียบฐานตัวเอง": st.column_config.TextColumn(
+                        "เทียบฐานตัวเอง",
+                        help="โหลด 7 วันเทียบฐาน 28 วันของคนคนนั้นเอง — "
+                             "ไม่มีหน่วย จึงเป็นช่องเดียวในสองช่องนี้ที่เทียบข้ามคนได้"),
+                    "โหลด 7 วัน": st.column_config.TextColumn(
+                        "โหลด 7 วัน",
+                        help="ปริมาณดิบพร้อมหน่วยของตัวเอง — TL จาก Garmin ถ้านาฬิกาให้ "
+                             "ไม่งั้นเป็นระยะวิ่ง (km) เทียบข้ามคนไม่ได้"),
+                    "เซสชัน 7 วัน": st.column_config.NumberColumn(
+                        "เซสชัน 7 วัน", format="%d",
+                        help="คนที่โหลดมาจาก TL นับทุกกิจกรรม "
+                             "ส่วนคนที่ใช้ระยะวิ่งนับเฉพาะการวิ่ง"),
                 },
             )
 
@@ -2742,6 +2803,15 @@ if tab_team.open:
                 + _legend_mark("unknown")
                 + " ไม่มีข้อมูล = ยังไม่มีทั้ง workload และ wellness",
                 unsafe_allow_html=True,
+            )
+            # หน่วยของโหลดขึ้นกับรุ่นนาฬิกา ทีมนี้จึงมีทั้ง TL และ km พร้อมกัน
+            # (วัดจริง 27 ส.ค. 69: 32.7 km · 92.6 km · 323 TL) — ถ้าไม่บอกไว้ตรงนี้
+            # ตัวเลขดิบที่วางเรียงกันจะถูกอ่านว่าเทียบกันได้
+            st.markdown(
+                "**โหลด 7 วัน:** หน่วยขึ้นกับ**รุ่นนาฬิกา** — ได้ Garmin Training Load (TL) "
+                "ถ้านาฬิกาส่งมา ไม่งั้นคิดจากระยะวิ่ง (km) **ตัวเลขดิบจึงเทียบข้ามคนไม่ได้** "
+                "ช่องที่เทียบข้ามคนได้คือ *เทียบฐานตัวเอง* เพราะทุกคนหารด้วยฐาน 28 วันของตัวเอง · "
+                "จำนวนเซสชันก็คนละนิยาม: โหลดจาก TL นับทุกกิจกรรม ส่วนโหลดจากระยะวิ่งนับเฉพาะการวิ่ง"
             )
             st.markdown(r"""
 
@@ -2978,7 +3048,8 @@ if tab_today.open:
                     )
                     + '<div style="font-size:13px;color:#55585f;margin-top:12px">รวม 7 วัน '
                     f'{html.escape(str(team_row["โหลด 7 วัน"] or "–"))} · '
-                    f'{html.escape(str(team_row["เซสชัน 7 วัน"] or 0))} เซสชัน</div></div>',
+                    f'{html.escape(str(team_row["เซสชัน 7 วัน"] or 0))} เซสชัน'
+                    f' ({html.escape(str(team_row["ขอบเขตโหลด"] or "วิ่ง"))})</div></div>',
                     unsafe_allow_html=True,
                 )
 
@@ -3674,7 +3745,7 @@ if tab_train.open:
             load_start = start_date - datetime.timedelta(days=56)
             daily_wl, wl_metric, wl_unit = load_daily_workload(athlete_id, load_start.isoformat(), end_date.isoformat())
             first_workload_date = (
-                load_first_activity_date(athlete_id)
+                load_first_load_date(athlete_id)
                 if wl_metric == "training_load"
                 else load_first_run_date(athlete_id)
             )
@@ -3695,9 +3766,9 @@ if tab_train.open:
                               f"{latest_load['chronic']:{_afmt}} {wl_unit}/สัปดาห์"
                               if pd.notna(latest_load["chronic"]) else "–", border=True)
                     st.metric("ทิศทาง",
-                              load_trend_display(latest_load["acute"], latest_load["chronic"],
-                                                 wl_metric, wl_unit).split(" · ")[-1]
-                              if pd.notna(latest_load["chronic"]) else "–", border=True,
+                              load_baseline_display(latest_load["acute"],
+                                                    latest_load["chronic"]),
+                              border=True,
                               help="บอกว่าทำไปเท่าไหร่เทียบกับที่เคยทำ "
                                    "ไม่มีโซนปลอดภัย/เสี่ยง เพราะหลักฐานหาเกณฑ์ตัด"
                                    "ที่ทำนายการบาดเจ็บได้ไม่เจอ "
