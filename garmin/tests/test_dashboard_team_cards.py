@@ -348,38 +348,65 @@ class CardIsADoorTests(unittest.TestCase):
     การ์ดเองจึงกดไม่ได้ ทางที่เหลือคือปุ่มจริงใต้การ์ด ซึ่งได้โฟกัสคีย์บอร์ดมาด้วยฟรี
     """
 
-    def test_one_click_switches_both_the_athlete_and_the_page(self):
+    def test_one_click_sets_both_the_athlete_and_the_page_to_go_to(self):
         """ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างหน้าเดิม ตั้งแค่หน้าจะย้ายหน้าแต่ยังเป็นคนเดิม
         ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน ปุ่มเดียวจึงต้องทำครบทั้งคู่
-
-        ``st.switch_page`` เป็น ``NoReturn`` (มันโยนเพื่อหยุดสคริปต์) ข้อนี้จึงดักการโยน
-        แล้วเช็คว่ามันถูกเรียกด้วยหน้าไหน — ถ้าใครถอดการย้ายหน้าออก ข้อนี้แดงทันที
         """
         import dashboard_context
 
-        switched = []
-
-        class _Stop(Exception):
-            pass
-
-        def fake_switch_page(page):
-            switched.append(page)
-            raise _Stop
-
         state = {}
-        original_state = dashboard_context.st.session_state
-        original_switch = dashboard_context.st.switch_page
+        original = dashboard_context.st.session_state
         dashboard_context.st.session_state = state
-        dashboard_context.st.switch_page = fake_switch_page
         try:
-            with self.assertRaises(_Stop):
-                dashboard_context.focus_athlete("Dan")
+            dashboard_context.focus_athlete("Dan")
         finally:
-            dashboard_context.st.session_state = original_state
-            dashboard_context.st.switch_page = original_switch
+            dashboard_context.st.session_state = original
 
         self.assertEqual(state[dashboard_context.ATHLETE_STATE_KEY], "Dan")
-        self.assertEqual(switched, [dashboard_context.TODAY_PAGE])
+        self.assertEqual(state[dashboard_context.PENDING_PAGE_KEY],
+                         dashboard_context.TODAY_PAGE)
+
+    def test_the_callback_does_not_try_to_switch_pages_by_itself(self):
+        """``st.switch_page`` ในคอลแบ็กของปุ่ม **เขียนค่าสำเร็จแต่หน้าไม่ย้าย**
+
+        ซอร์สของมันจบด้วย ``st.empty()`` เพื่อบังคับ ScriptRunner ให้ยอมสลับหน้า
+        ซึ่งได้ผลเฉพาะตอนสคริปต์กำลังรัน คอลแบ็กทำงานก่อนหน้านั้น ผลคือปุ่มเงียบ
+        โดยไม่มี error เลย — เทสกับ AppTest มองไม่เห็น จับได้ด้วย CDP ในเบราว์เซอร์จริง
+        เท่านั้น (29 ส.ค. 69) ข้อนี้จึงเฝ้าที่ *รูปแบบ* แทน: คอลแบ็กแค่ฝากคำขอไว้
+        แล้วหน้าเปลือกเป็นคนสั่งย้ายหลัง st.navigation
+        """
+        import inspect
+        import textwrap
+
+        import dashboard_context
+
+        def calls_switch_page(function):
+            """ดูที่ *การเรียกจริง* ใน AST ไม่ใช่ข้อความในไฟล์
+
+            เขียนแบบค้นข้อความไม่ได้ เพราะคอมเมนต์ของฟังก์ชันนี้อธิบายเรื่อง
+            ``st.switch_page`` อยู่ — ยามจะแดงเพราะคำอธิบาย ไม่ใช่เพราะโค้ด
+            """
+            tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+            return any(
+                isinstance(node, ast.Attribute) and node.attr == "switch_page"
+                and isinstance(node.value, ast.Name) and node.value.id == "st"
+                for node in ast.walk(tree)
+            )
+
+        self.assertFalse(calls_switch_page(dashboard_context.focus_athlete),
+                         "คอลแบ็กสั่งย้ายหน้าเองไม่ได้ — ต้องฝากไว้ให้หน้าเปลือกทำ")
+        self.assertTrue(calls_switch_page(dashboard_context.honour_pending_page))
+
+        shell = (Path(__file__).resolve().parent.parent
+                 / "scripts" / "dashboard.py").read_text(encoding="utf-8")
+        self.assertLess(
+            shell.index("st.navigation("), shell.index("honour_pending_page()"),
+            "ต้องเรียกหลัง st.navigation ไม่งั้น switch_page หาหน้าปลายทางไม่เจอ",
+        )
+        self.assertLess(
+            shell.index("honour_pending_page()"), shell.index("page.run()"),
+            "ต้องเรียกก่อน page.run() ไม่งั้นหน้าเดิมถูกวาดไปแล้วหนึ่งรอบ",
+        )
 
     def test_the_button_switches_to_a_page_navigation_actually_registers(self):
         """ปุ่มพาไปหน้าที่ ``st.navigation`` ไม่รู้จัก = StreamlitAPIException ตอนกด

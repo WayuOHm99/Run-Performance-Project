@@ -131,7 +131,7 @@ from dashboard_view import (
 )
 # ชั้นข้อมูลย้ายไป dashboard_data.py แล้ว — หน้าแต่ละหน้าต้องเรียก loader ตัวเดียวกัน
 # (แคชของ Streamlit ผูกกับตัวฟังก์ชัน สำเนาต่อหน้าจะได้แคชคนละก้อน)
-from dashboard_context import set_page_context
+from dashboard_context import honour_pending_page, set_page_context
 from dashboard_data import (
     load_daily_workload,
     DATA_AVAILABILITY_GROUPS,
@@ -843,6 +843,8 @@ page = st.navigation(
     ],
     position="top",
 )
+# ปุ่มบนการ์ดทีมฝากคำขอย้ายหน้าไว้ — ทำตรงนี้เพราะคอลแบ็กของปุ่มสั่งเองไม่ได้
+honour_pending_page()
 page.run()
 
 # แท็บอื่นจะไม่ลงทะเบียนเลย = ค้างข้อมูลเดิมเงียบ ๆ โดยไม่มี error (เกิดจริงใน c9f4b07

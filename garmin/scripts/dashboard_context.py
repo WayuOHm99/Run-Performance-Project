@@ -12,6 +12,7 @@ import streamlit as st
 CONTEXT_KEY = "_dashboard_context"
 ATHLETE_STATE_KEY = "selected_athlete"  # ต้องตรงกับ key ของ selectbox ใน sidebar
 TODAY_PAGE = "app_pages/today.py"
+PENDING_PAGE_KEY = "_dashboard_pending_page"
 
 
 def set_page_context(**values):
@@ -36,7 +37,24 @@ def focus_athlete(name):
     """ปุ่มบนการ์ดทีม: เลือกนักกีฬาคนนั้นแล้วพาไปหน้า "วันนี้" ในคลิกเดียว
 
     ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างหน้าเดิม ตั้งแค่หน้าจะย้ายหน้าแต่ยังเป็นคนเดิม
-    ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน จึงต้องทำครบทั้งคู่ที่นี่ที่เดียว
+    ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน จึงต้องทำครบทั้งคู่
+
+    **เรียก ``st.switch_page()`` ตรงนี้ไม่ได้** — ซอร์สของมันจบด้วย ``st.empty()``
+    เพื่อบังคับให้ ScriptRunner ยอมสลับหน้า ซึ่งได้ผลเฉพาะตอน *สคริปต์กำลังรัน*
+    คอลแบ็กของปุ่มทำงานก่อนหน้านั้น ผลคือค่าถูกเขียนลง session_state สำเร็จ
+    แต่หน้าไม่ย้าย และไม่มี error ให้เห็นเลย (จับได้ด้วย CDP ในเบราว์เซอร์จริง
+    เท่านั้น — ทั้งเทสและ AppTest มองไม่เห็น) จึงฝากคำขอไว้ให้หน้าเปลือกทำแทน
     """
     st.session_state[ATHLETE_STATE_KEY] = name
-    st.switch_page(TODAY_PAGE)
+    st.session_state[PENDING_PAGE_KEY] = TODAY_PAGE
+
+
+def honour_pending_page():
+    """หน้าเปลือกเรียกหลัง ``st.navigation()`` และก่อน ``page.run()``
+
+    ต้องอยู่หลัง ``st.navigation`` เพราะ ``switch_page`` ตรวจว่าหน้าปลายทาง
+    ลงทะเบียนไว้แล้วหรือยัง — เรียกก่อนหน้านั้นจะได้ StreamlitAPIException
+    """
+    pending = st.session_state.pop(PENDING_PAGE_KEY, None)
+    if pending:
+        st.switch_page(pending)
