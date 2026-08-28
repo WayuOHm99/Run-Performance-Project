@@ -5,9 +5,15 @@ import unittest
 from pathlib import Path
 
 
+import sys
+
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC as DASHBOARD_SRC  # noqa: E402
+
+# นโยบายนี้คุมทั้ง dashboard ไม่ใช่แค่ไฟล์เดียว — การคำนวณอยู่ dashboard_domain.py
+# และชิ้นส่วนหน้าตาอยู่ dashboard_view.py ตั้งแต่แยกโมดูล ยามจึงต้องอ่านครบทั้งสาม
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
-DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
 PROJECT_SRC = (GARMIN_ROOT.parent / "docs" / "PROJECT.md").read_text(encoding="utf-8")
 
 

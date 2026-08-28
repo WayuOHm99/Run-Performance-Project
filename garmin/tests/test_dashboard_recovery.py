@@ -21,59 +21,13 @@ DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
 DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
 
 
-def extract_helpers(*names):
-    tree = ast.parse(DASHBOARD_SRC)
-    wanted = set(names)
-    nodes = []
-    found = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in wanted:
-            nodes.append(node)
-            found.add(node.name)
-        elif isinstance(node, ast.Assign):
-            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if targets & wanted:
-                nodes.append(node)
-                found |= targets & wanted
-    missing = wanted - found
-    if missing:
-        raise AssertionError(f"dashboard.py missing helper(s): {sorted(missing)}")
-    namespace = {
-        "pd": pd, "datetime": datetime, "ZoneInfo": ZoneInfo,
-        "math": math, "Path": Path, "sqlite3": sqlite3,
-    }
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace
+# การคำนวณกับชิ้นส่วนหน้าตาอยู่ใน dashboard_domain.py / dashboard_view.py แล้ว
+# จึง import ได้ตรง ๆ ไม่ต้อง ast.parse + exec ทีละ node เหมือนเดิม
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 
-
-HELPERS = extract_helpers(
-    "fmt_num",
-    "fmt_signed_delta",
-    "has_any_value",
-    "available_series",
-    "latest_field",
-    "body_battery_snapshots",
-    "period_metric",
-    "calendar_aligned_frame",
-    "fmt_recovery_time",
-    "get_recovery_minutes",
-    "recovery_minutes_series",
-    "bangkok_date",
-    "to_bangkok_timestamp",
-    "device_inventory_labels",
-    "summarize_metric_group",
-    "field_freshness",
-    "readiness_when",
-    "wellness_quality_flags",
-    "team_status",
-    "compute_load_windows",
-    "aggregate_pace_min_per_km",
-    "usable_hr_zone_rows",
-    "hr_zone_coverage",
-)
+from dashboard_modules import HELPERS  # noqa: E402
 
 
 class DataAvailabilitySummaryTests(unittest.TestCase):

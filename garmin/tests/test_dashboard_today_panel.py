@@ -31,47 +31,13 @@ def today_tab_source():
     return DASHBOARD_SRC[start:end]
 
 
-def extract_helpers(*names):
-    tree = ast.parse(DASHBOARD_SRC)
-    wanted = set(names)
-    nodes = []
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            nodes.append(node)
-        elif isinstance(node, ast.Assign):
-            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if targets & wanted:
-                nodes.append(node)
-    namespace = {"pd": pd, "float": float, "html": html}
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace
+# การคำนวณกับชิ้นส่วนหน้าตาอยู่ใน dashboard_domain.py / dashboard_view.py แล้ว
+# จึง import ได้ตรง ๆ ไม่ต้อง ast.parse + exec ทีละ node เหมือนเดิม
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 
-
-HELPERS = extract_helpers(
-    "C_BLUE",
-    "C_CRIT",
-    "C_GOOD",
-    "C_WARN",
-    "INTENSITY_CHIP_COLORS",
-    "INTENSITY_ORDER",
-    "STATUS_COLORS",
-    "STATUS_SHAPES",
-    "STATUS_TEXT_COLORS",
-    "baseline_median",
-    "fmt_pace",
-    "fmt_sec",
-    "render_session_row",
-    "render_today_tile",
-    "render_today_verdict",
-    "session_intensity_chip",
-    "sparkline_svg",
-    "status_parts",
-    "status_shape_svg",
-    "tile_note",
-)
+from dashboard_modules import HELPERS  # noqa: E402
 
 
 def wellness_frame(values, end_date="2026-08-25", column="sleep_score"):

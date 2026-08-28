@@ -30,43 +30,9 @@ DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "scripts" / "dashboard
 DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
 
 
-def extract_helpers(*names):
-    """รันเฉพาะ constant กับ def ที่ต้องใช้ โดยไม่ต้องแตะ streamlit หรือฐานข้อมูล"""
-    tree = ast.parse(DASHBOARD_SRC)
-    wanted = set(names)
-    nodes = []
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            nodes.append(node)
-        elif isinstance(node, ast.Assign):
-            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if targets & wanted:
-                nodes.append(node)
-    namespace = {"pd": pd, "datetime": datetime, "html": html, "float": float}
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace
-
-
-HELPERS = extract_helpers(
-    "load_volume_display",
-    "load_session_scope",
-    "load_context_line",
-    "STATUS_COLORS",
-    "STATUS_TEXT_COLORS",
-    "TREND_KEY_BY_LABEL",
-    "STATUS_SHAPES",
-    "C_CRIT",
-    "C_WARN",
-    "C_GOOD",
-    "C_BLUE",
-    "status_parts",
-    "status_shape_svg",
-    "_num_text",
-    "render_team_card",
-)
+# การคำนวณกับชิ้นส่วนหน้าตาอยู่ใน dashboard_domain.py / dashboard_view.py แล้ว
+# จึง import ได้ตรง ๆ ไม่ต้อง ast.parse + exec ทีละ node เหมือนเดิม
+from dashboard_modules import HELPERS  # noqa: E402
 
 LOAD_LINE = re.compile(r'<div class="team-card__load">(.*?)</div>', re.S)
 

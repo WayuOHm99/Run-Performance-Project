@@ -16,45 +16,13 @@ DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "scripts" / "dashboard
 DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
 
 
-def extract_helpers(*names):
-    """รันเฉพาะ constant กับ def ที่ต้องใช้ โดยไม่ต้องแตะ streamlit หรือฐานข้อมูล"""
-    tree = ast.parse(DASHBOARD_SRC)
-    wanted = set(names)
-    nodes = []
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            nodes.append(node)
-        elif isinstance(node, ast.Assign):
-            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if targets & wanted:
-                nodes.append(node)
-    namespace = {"pd": pd, "datetime": datetime, "float": float}
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace
+# การคำนวณกับชิ้นส่วนหน้าตาอยู่ใน dashboard_domain.py / dashboard_view.py แล้ว
+# จึง import ได้ตรง ๆ ไม่ต้อง ast.parse + exec ทีละ node เหมือนเดิม
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 
-
-HELPERS = extract_helpers(
-    "EASY_MAX_PCT",
-    "EF_MIN_DISTANCE_M",
-    "EF_RECENT_DAYS",
-    "EF_BASELINE_DAYS",
-    "EF_BASELINE_MIN_DAYS",
-    "EF_STALE_DAYS",
-    "efficiency_factor",
-    "easy_run_efficiency",
-    "efficiency_windows",
-    "efficiency_change_pct",
-    "efficiency_recent_value",
-    "efficiency_status",
-    "efficiency_display",
-    "load_volume_display",
-    "load_context_line",
-    "compute_load_windows",
-    "team_status",
-)
+from dashboard_modules import HELPERS  # noqa: E402
 
 
 def easy_runs(rows):

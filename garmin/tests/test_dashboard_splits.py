@@ -56,51 +56,30 @@ def extract_load_splits(db_path):
     return ns["load_splits"]
 
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from dashboard_modules import helpers as _helpers  # noqa: E402
+
+
 def extract_session_candidates():
     """ใช้ฟังก์ชันคัดตัวเลือกจริงจาก dashboard เพื่อกันตัวกรองระยะกลับมาอีก"""
-    tree = ast.parse(DASHBOARD_SRC)
-    picked = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name == "prepare_session_candidates"]
-    assert len(picked) == 1, "ไม่พบ prepare_session_candidates ใน dashboard.py"
-    ns = {}
-    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
-    return ns["prepare_session_candidates"]
+    return _helpers("prepare_session_candidates")["prepare_session_candidates"]
 
 
 def extract_distance_half_analysis():
-    tree = ast.parse(DASHBOARD_SRC)
-    picked = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name == "analyze_distance_halves"]
-    assert len(picked) == 1, "ไม่พบ analyze_distance_halves ใน dashboard.py"
-    ns = {"pd": pd, "math": math}
-    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
-    return ns["analyze_distance_halves"]
+    return _helpers("analyze_distance_halves")["analyze_distance_halves"]
 
 
 def extract_helper(name):
-    """ดึงฟังก์ชันช่วยตัวเดียวจาก dashboard.py — เทสจึงใช้ตัวจัดรูปแบบตัวจริง ไม่เขียนซ้ำเอง"""
-    tree = ast.parse(DASHBOARD_SRC)
-    picked = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name == name]
-    assert len(picked) == 1, f"ไม่พบ {name} ใน dashboard.py"
-    ns = {"pd": pd}
-    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
-    return ns[name]
+    """ดึง helper ตัวเดียว — เทสจึงใช้ตัวจัดรูปแบบตัวจริง ไม่เขียนซ้ำเอง"""
+    return _helpers(name)[name]
 
 
 def extract_pace_axis_ticks():
-    """แกนเพซตัวจริงพร้อมค่าคงที่ของมัน — เทสจึงวัดเพดานที่ deploy อยู่จริง ไม่ใช่ค่าที่เขียนซ้ำ"""
-    tree = ast.parse(DASHBOARD_SRC)
-    functions = {"fmt_pace", "_pace_ticks_at", "pace_axis_ticks"}
-    constants = {"PACE_TICK_MAX", "PACE_TICK_STEPS_MIN"}
-    picked = [node for node in tree.body
-              if (isinstance(node, ast.FunctionDef) and node.name in functions)
-              or (isinstance(node, ast.Assign)
-                  and any(getattr(target, "id", "") in constants for target in node.targets))]
-    ns = {"pd": pd, "math": math}
-    exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
-    assert "pace_axis_ticks" in ns, "ไม่พบ pace_axis_ticks ใน dashboard.py"
-    return ns
+    """แกนเพซตัวจริงพร้อมค่าคงที่ของมัน — วัดเพดานที่ deploy อยู่จริง"""
+    return _helpers("fmt_pace", "_pace_ticks_at", "pace_axis_ticks",
+                    "PACE_TICK_MAX", "PACE_TICK_STEPS_MIN")
 
 
 class _FakeColumnConfig:
