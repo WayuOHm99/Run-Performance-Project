@@ -37,3 +37,6 @@ team_data/
 พี่มิลค์/
 _โค้ช/
 _ทีม/
+
+# ไฟล์ export ของนักกีฬา (xlsx/csv จาก garmin.db = ข้อมูลสุขภาพ)
+outputs/
