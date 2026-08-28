@@ -20,7 +20,16 @@ from pathlib import Path
 import pandas as pd
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_SRC = (GARMIN_ROOT / "scripts" / "dashboard.py").read_text(encoding="utf-8")
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC as _ALL_SRC  # noqa: E402
+
+# ยามที่ถามว่า "ข้อความ/กฎนี้ยังอยู่ไหม" ต้องอ่านทั้งสี่ไฟล์ของ dashboard ตั้งแต่
+# ชั้นข้อมูลกับการคำนวณแยกออกไป — ไม่งั้นมันแดงเพราะโค้ดย้ายไฟล์ ทั้งที่กฎยังถูก
+DASHBOARD_SRC = _ALL_SRC
+DATA_SRC = (_Path(__file__).resolve().parents[1] / "scripts" / "dashboard_data.py").read_text(
+    encoding="utf-8")
 
 
 def load_script(name, filename):
@@ -44,14 +53,14 @@ class _FakeStreamlit:
 
 
 def extract_load_splits(db_path):
-    tree = ast.parse(DASHBOARD_SRC)
+    tree = ast.parse(DATA_SRC)
     picked = [n for n in tree.body
               if isinstance(n, ast.FunctionDef)
               and n.name in {"connect_db", "load_splits"}]
     assert {node.name for node in picked} == {"connect_db", "load_splits"}, \
-        "ไม่พบ connect_db/load_splits ใน dashboard.py"
+        "ไม่พบ connect_db/load_splits ใน dashboard_data.py"
     ns = {"st": _FakeStreamlit, "sqlite3": sqlite3, "pd": pd,
-          "DB_PATH": Path(db_path), "CACHE_TTL_SEC": 0}
+          "db_path": (lambda path=Path(db_path): path), "CACHE_TTL_SEC": 0}
     exec(compile(ast.Module(body=picked, type_ignores=[]), "dashboard.py", "exec"), ns)
     return ns["load_splits"]
 

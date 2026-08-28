@@ -15,6 +15,7 @@ SCRIPTS_DIR = GARMIN_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import dashboard_data  # noqa: E402
 import dashboard_domain  # noqa: E402
 import dashboard_view  # noqa: E402
 
@@ -33,7 +34,7 @@ class _Helpers(dict):
 
 HELPERS = _Helpers(
     (name, value)
-    for module in (dashboard_domain, dashboard_view)
+    for module in (dashboard_domain, dashboard_view, dashboard_data)
     for name, value in vars(module).items()
     if not name.startswith("__")
 )
@@ -42,7 +43,8 @@ HELPERS = _Helpers(
 # ตั้งแต่การคำนวณกับชิ้นส่วนหน้าตาแยกออกไป
 ALL_SRC = chr(10).join(
     (SCRIPTS_DIR / name).read_text(encoding="utf-8")
-    for name in ("dashboard.py", "dashboard_domain.py", "dashboard_view.py")
+    for name in ("dashboard.py", "dashboard_domain.py", "dashboard_view.py",
+                 "dashboard_data.py")
 )
 
 

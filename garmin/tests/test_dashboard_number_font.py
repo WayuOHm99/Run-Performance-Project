@@ -16,9 +16,16 @@ import tomllib
 import unittest
 from pathlib import Path
 
+import sys
+
 GARMIN_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
-DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC  # noqa: E402
+
+# CSS ของตัวเลขย้ายไปนิยามที่ dashboard_view.py แต่ยังถูกฉีดที่ระดับบนสุดของ dashboard.py
+# ยามชุดนี้จึงต้องอ่านทั้งสี่ไฟล์ ไม่งั้นมันจะรายงานว่า "ไม่มีกฎไหนใช้ Plex Mono เลย"
+DASHBOARD_SRC = ALL_SRC
 CONFIG_PATH = GARMIN_ROOT / ".streamlit" / "config.toml"
 
 MONO_FAMILY = "IBM Plex Mono"

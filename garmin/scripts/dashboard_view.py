@@ -344,3 +344,168 @@ def render_load_strip(days, digits=1):
             f'<div class="today-strip__day">{esc(str(label))}</div></div>'
         )
     return f'<div class="today-strip">{"".join(columns)}</div>'
+
+
+# --- ตัวเลขของ st.metric = IBM Plex Mono (อาร์ตบอร์ด "ระบบดีไซน์" คลาส .num) ---
+# ``codeFont`` ใน .streamlit/config.toml ไปไม่ถึง st.metric — Streamlit เอาไปลงเฉพาะ
+# st.code / st.dataframe (ตรวจในเบราว์เซอร์ 26 ส.ค. 69: 0 element เป็น Plex Mono
+# และ FontFace ของมันยัง unloaded) จึงต้องชี้เอง
+# บล็อกนี้ต้องอยู่ระดับบนสุดของสคริปต์ ไม่ใช่ในบล็อกแท็บ เพราะ st.metric กระจายอยู่ทุกแท็บ
+# และแท็บที่ไม่ได้เปิดไม่ถูกรัน (lazy `tab.open`) — ฉีดในแท็บเดียวแท็บอื่นจะไม่ได้ฟอนต์เลย
+NUMBER_FONT_CSS = """
+<style>
+[data-testid="stMetricValue"],
+[data-testid="stMetricDelta"] {
+  font-family: "IBM Plex Mono", "IBM Plex Sans Thai", monospace;
+  font-variant-numeric: tabular-nums;
+}
+</style>
+"""
+
+TEAM_CARD_CSS = """
+<style>
+.team-card { display: grid; grid-template-columns: 232px minmax(0, 1fr) 500px;
+  border: 1px solid #e4e1da; border-left-width: 4px; border-radius: 2px;
+  background: #ffffff; }
+.team-card > div { padding: 14px 18px; }
+.team-card__flags, .team-card__nums { border-left: 1px solid #f4f2ee; }
+.team-card__who { display: flex; flex-direction: column; gap: 5px; }
+.team-card__head { display: flex; align-items: center; gap: 9px; }
+.team-card__name { font-size: 19px; font-weight: 700; }
+.team-card__status { font-size: 14px; font-weight: 600; }
+.team-card__fresh { font-size: 11px; color: #8a8d94; line-height: 1.45; }
+.team-card__lbl { font-size: 11px; letter-spacing: .06em; color: #8a8d94;
+  font-weight: 500; margin-bottom: 7px; }
+.team-card__chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.team-card__chip { display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 2px; font-size: 12px; font-weight: 500; }
+.team-card__load { font-size: 12px; color: #55585f; margin-top: 9px; }
+.team-card__nums { display: grid; grid-template-columns: 132px repeat(4, minmax(0, 1fr));
+  gap: 10px; }
+.team-card__sub { flex-wrap: wrap; }
+.team-card__val { font-size: 21px; font-weight: 600; line-height: 1.2;
+  font-variant-numeric: tabular-nums; }
+/* ตัวเลข = IBM Plex Mono ตามอาร์ตบอร์ด "ระบบดีไซน์" (คลาส .num) — ทุกหลักกว้างเท่ากัน
+   ตัวเลขคนละแถวจึงเรียงตรงคอลัมน์  ``codeFont`` ใน config.toml ทำแทนไม่ได้
+   Streamlit เอาไปลงเฉพาะ st.code / st.dataframe เท่านั้น
+   Plex Mono ไม่มีตัวไทย ป้ายที่ปนไทยจึงต้องตกไปที่ Plex Sans Thai ก่อนถึง monospace ของระบบ */
+.team-card__val { font-family: "IBM Plex Mono", "IBM Plex Sans Thai", monospace; }
+.team-card__sub { display: flex; align-items: center; gap: 5px; font-size: 12px;
+  margin-top: 2px; }
+/* ---- การ์ดทั้งใบคือปุ่ม ----
+   HTML ที่ฉีดผ่าน st.markdown คุยกลับหา Python ไม่ได้ จึงวาง "ปุ่มจริง" ทับทั้งใบ
+   แบบโปร่งใสแทน วิธีนี้ได้ทั้งการกดด้วยเมาส์ โฟกัสคีย์บอร์ด และสถานะครบทั้งหก
+   โดยไม่ต้องเขียน custom component  เจาะจงได้เพราะ Streamlit ติดคลาส st-key-<key>
+   ให้ทุก container/widget ที่มี key
+   ถ้าเบราว์เซอร์ไม่รับ CSS ชุดนี้ ปุ่มจะกลับไปเป็นปุ่มธรรมดาใต้การ์ด — หน้าตาเสีย
+   แต่ยังกดได้ ไม่ใช่ฟีเจอร์ที่หายไปเงียบ ๆ */
+[class*="st-key-teamcard-"] { position: relative; margin-bottom: 10px; }
+/* Streamlit ใส่ margin-bottom: -1rem ให้กล่องเนื้อหาของ st.markdown เพื่อหักลบ margin
+   ของ <p> ตัวสุดท้าย การ์ดของเราไม่มี <p> ท้าย ค่าลบนั้นจึงหดกล่องลงเฉย ๆ แล้วปุ่มที่
+   ทาบไว้เตี้ยกว่าการ์ด เหลือแถบล่างที่กดไม่โดน (วัดจริง 26 ส.ค. 69: การ์ด 501.34px
+   ปุ่ม 495.34px = 10px margin ของการ์ด ลบ 16px ของ Streamlit) → ล้างค่าลบตรงกล่องที่
+   ห่อการ์ดอยู่ แล้วย้ายระยะห่างระหว่างการ์ดไปไว้ที่ container ซึ่งอยู่นอกกล่องนั้น */
+[class*="st-key-teamcard-"] .stMarkdown div:has(> .team-card) { margin-bottom: 0; }
+[class*="st-key-teamcard-"] > div:last-child:has(.stButton) {
+  position: absolute; inset: 0; margin: 0; padding: 0; }
+[class*="st-key-teamcard-"] .stButton,
+[class*="st-key-teamcard-"] .stButton > button { height: 100%; width: 100%; }
+[class*="st-key-teamcard-"] .stButton > button {
+  opacity: 0; border: none; background: transparent; cursor: pointer; }
+/* เส้นโฟกัสวาดเอง ห้ามใช้ของเบราว์เซอร์ซึ่งหายไปบนพื้นขาว (กฎในระบบดีไซน์)
+   และต้องวาดที่ "การ์ด" ไม่ใช่ที่ปุ่ม — ของเดิมใช้ opacity: 1 ปลุกปุ่มทั้งใบขึ้นมา
+   ข้อความ "ดูรายละเอียดของ ..." จึงลอยทับกลางการ์ดทุกครั้งที่กด Tab (เจอ 26 ส.ค. 69)
+   ปุ่มยังโปร่งใสตลอดเวลา ข้อความยังอยู่ใน DOM ให้ screen reader อ่านเหมือนเดิม */
+[class*="st-key-teamcard-"]:has(.stButton > button:focus-visible) .team-card {
+  outline: 2px solid #184f95; outline-offset: 2px; }
+[class*="st-key-teamcard-"]:hover .team-card {
+  border-color: #184f95; transition: border-color 140ms ease-out; }
+[class*="st-key-teamcard-"]:active .team-card { background: #f4f2ee; }
+
+/* ---- ที่แคบ ----
+   สามคอลัมน์ของการ์ดเรียกร้องความกว้างตายตัว 232 + 500 = 732px ก่อนนับ padding
+   ได้น้อยกว่านั้นตัวเลข BB/Sleep/RHR/HRV ฝั่งขวาจะถูกบีบจนอ่านไม่ออกหรือตัดหายไปเลย
+   แคบกว่าเกณฑ์ให้ยุบเป็นแถวซ้อนกัน เส้นคั่นซ้ายกลายเป็นเส้นคั่นบน
+
+   เกณฑ์ต้องวัดจากพื้นที่ของการ์ดเอง ไม่ใช่ความกว้างหน้าต่าง — @media (max-width: 900px)
+   ของเดิมพลาดเคสหน้าต่าง 1000px ที่ sidebar กิน 300px ไป: การ์ดเหลือ 535px แต่ยังวาด
+   สามคอลัมน์แล้วล้น (scrollWidth 732 vs clientWidth 535 วัดจริง 26 ส.ค. 69)
+   container query อ่านความกว้างของ container ตรง ๆ จึงตัดถูกทั้งตอน sidebar เปิดและปิด */
+[class*="st-key-teamcard-"] { container-type: inline-size; }
+
+@container (max-width: 800px) {
+  .team-card { grid-template-columns: minmax(0, 1fr); }
+  .team-card > div { padding: 12px 14px; }
+  .team-card__flags, .team-card__nums {
+    border-left: none; border-top: 1px solid #f4f2ee; }
+  .team-card__nums { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* การ์ดต้องไม่ถูกหั่นกลางใบตอนพิมพ์ A4 — ครึ่งใบอ่านไม่ได้ความ */
+@media print { .team-card { break-inside: avoid; page-break-inside: avoid; } }
+</style>
+"""
+
+TODAY_PANEL_CSS = """
+<style>
+.today-lbl { font-size: 11px; letter-spacing: .06em; color: #8a8d94; font-weight: 500; }
+.today-verdict { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  gap: 26px; align-items: center; background: #ffffff; border: 1px solid #e4e1da;
+  border-top-width: 3px; border-radius: 2px; padding: 16px 20px; margin-bottom: 12px; }
+.today-verdict__head { display: flex; align-items: center; gap: 11px; }
+.today-verdict__title { font-size: 26px; font-weight: 700; line-height: 1.2; }
+.today-verdict__note { font-size: 12px; color: #8a8d94; margin-top: 7px; }
+.today-verdict__figs { display: flex; gap: 26px; padding-left: 24px;
+  border-left: 1px solid #e4e1da; }
+.today-verdict__fig { font-size: 18px; font-weight: 600; line-height: 1.35;
+  font-variant-numeric: tabular-nums; }
+.today-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.today-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
+  border-radius: 2px; font-size: 12px; font-weight: 500; }
+.today-chip--zone { border: none; }
+.today-none { font-size: 13px; color: #55585f; margin-top: 9px; }
+.today-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 10px; margin-bottom: 12px; }
+.today-tile { background: #ffffff; border: 1px solid #e4e1da; border-radius: 2px;
+  padding: 12px 14px 10px; }
+.today-tile__val { font-size: 26px; font-weight: 600; line-height: 1.15; margin-top: 5px;
+  font-variant-numeric: tabular-nums; }
+.today-tile__unit { font-size: 12px; color: #8a8d94; font-weight: 400; margin-left: 5px; }
+.today-tile__note { display: flex; align-items: center; gap: 5px; font-size: 12px;
+  margin-top: 4px; }
+.today-spark { display: block; margin-top: 8px; }
+.today-panel { background: #ffffff; border: 1px solid #e4e1da; border-radius: 2px;
+  padding: 15px 20px 18px; margin-bottom: 12px; }
+.today-panel__head { display: flex; align-items: baseline; justify-content: space-between;
+  gap: 16px; margin-bottom: 13px; }
+.today-panel__title { font-size: 15px; font-weight: 600; }
+.today-panel__hint { font-size: 12px; color: #8a8d94; }
+.today-ef__val { font-size: 34px; font-weight: 600; line-height: 1;
+  font-variant-numeric: tabular-nums; }
+.today-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.today-strip__col { text-align: center; }
+.today-strip__plot { display: flex; align-items: flex-end; justify-content: center;
+  height: 54px; }
+.today-strip__bar { width: 60%; background: #2a78d6; border-radius: 1px; min-height: 2px; }
+.today-strip__rest { width: 60%; height: 2px; background: #e4e1da; }
+.today-strip__val { font-size: 13px; font-weight: 600; margin-top: 5px;
+  font-variant-numeric: tabular-nums; }
+.today-strip__day { font-size: 11px; color: #8a8d94; font-variant-numeric: tabular-nums; }
+.today-sess__row, .today-sess__head { display: grid;
+  grid-template-columns: 108px minmax(0, 1fr) 92px 78px 72px 62px 104px;
+  gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid #f4f2ee; }
+.today-sess__head { border-bottom: 1px solid #e4e1da; padding-bottom: 7px; }
+.today-sess__when { font-size: 13px; color: #55585f; font-variant-numeric: tabular-nums; }
+.today-sess__name { font-size: 14px; overflow-wrap: anywhere; }
+.today-sess__num { font-size: 14px; text-align: right; font-variant-numeric: tabular-nums; }
+.today-sess__zone { text-align: right; }
+/* ตัวเลขทุกตัวบนแผงนี้เป็น mono ด้วยเหตุผลเดียวกับการ์ดทีมข้างบน */
+.today-verdict__fig, .today-tile__val, .today-ef__val,
+.today-strip__val, .today-strip__day,
+.today-sess__when, .today-sess__num { font-family: "IBM Plex Mono", "IBM Plex Sans Thai", monospace; }
+/* แผงต้องไม่ถูกหั่นกลางใบตอนพิมพ์ A4 — ครึ่งใบอ่านไม่ได้ความ */
+@media print {
+  .today-verdict, .today-tile, .today-panel { break-inside: avoid; page-break-inside: avoid; }
+}
+</style>
+"""

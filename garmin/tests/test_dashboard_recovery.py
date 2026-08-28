@@ -18,7 +18,16 @@ from streamlit.testing.v1 import AppTest
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
-DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC as _ALL_SRC  # noqa: E402
+
+# ยามที่ถามว่า "ข้อความ/กฎนี้ยังอยู่ไหม" ต้องอ่านทั้งสี่ไฟล์ของ dashboard ตั้งแต่
+# ชั้นข้อมูลกับการคำนวณแยกออกไป — ไม่งั้นมันแดงเพราะโค้ดย้ายไฟล์ ทั้งที่กฎยังถูก
+DASHBOARD_SRC = _ALL_SRC
+DATA_SRC = (_Path(__file__).resolve().parents[1] / "scripts" / "dashboard_data.py").read_text(
+    encoding="utf-8")
 
 
 # การคำนวณกับชิ้นส่วนหน้าตาอยู่ใน dashboard_domain.py / dashboard_view.py แล้ว
@@ -28,6 +37,15 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parent))
 
 from dashboard_modules import HELPERS  # noqa: E402
+
+
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC  # noqa: E402
+
+# ALL_SRC = ซอร์สของ dashboard ทั้งสี่ไฟล์ ใช้กับยามที่ถามว่า "ข้อความนี้มีอยู่ไหม"
+# ส่วน DASHBOARD_SRC เก็บไว้ให้ยามที่วิเคราะห์ *โครงของสคริปต์หน้าเว็บ* โดยเฉพาะ
 
 
 class DataAvailabilitySummaryTests(unittest.TestCase):
@@ -80,7 +98,7 @@ class DataAvailabilitySummaryTests(unittest.TestCase):
 
 class DataAvailabilitySourceIntegrationTests(unittest.TestCase):
     def test_dashboard_puts_availability_in_a_sidebar_popover(self):
-        self.assertIn("def load_data_availability(athlete_id, start_date, end_date):", DASHBOARD_SRC)
+        self.assertIn("def load_data_availability(athlete_id, start_date, end_date):", ALL_SRC)
         self.assertIn("ความพร้อมของข้อมูลจาก Garmin", DASHBOARD_SRC)
         self.assertIn('with st.sidebar:\n    with st.popover(', DASHBOARD_SRC)
         self.assertNotIn(
@@ -454,12 +472,12 @@ class FormattingAndVisibilityTests(unittest.TestCase):
 class DashboardDatabaseIsolationTests(unittest.TestCase):
     @staticmethod
     def _connect_function(db_path):
-        tree = ast.parse(DASHBOARD_SRC)
+        tree = ast.parse(DATA_SRC)
         node = next(
             node for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "connect_db"
         )
-        namespace = {"DB_PATH": Path(db_path), "sqlite3": sqlite3}
+        namespace = {"db_path": (lambda path=Path(db_path): path), "sqlite3": sqlite3}
         exec(compile(ast.Module(body=[node], type_ignores=[]), "dashboard.py", "exec"), namespace)
         return namespace["connect_db"]
 
@@ -611,7 +629,7 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
         self.assertIn("เวลาไทย", DASHBOARD_SRC)
 
     def test_device_inventory_discloses_freshness_and_filters_stale_entries(self):
-        self.assertIn('selected_columns.append("last_seen_at_utc")', DASHBOARD_SRC)
+        self.assertIn('selected_columns.append("last_seen_at_utc")', ALL_SRC)
         self.assertIn("device_inventory_labels(records, stale_days=90)", DASHBOARD_SRC)
         self.assertIn("กรองรายการที่ยืนยันว่า last_seen เกิน 90 วัน", DASHBOARD_SRC)
 
@@ -647,7 +665,7 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
         )
 
     def test_database_access_is_environment_scoped_and_read_only(self):
-        self.assertIn('os.environ.get("GARMIN_DATA_DIR"', DASHBOARD_SRC)
+        self.assertIn('os.environ.get("GARMIN_DATA_DIR"', ALL_SRC)
         self.assertIn('?mode=ro', DASHBOARD_SRC)
         self.assertEqual(DASHBOARD_SRC.count("sqlite3.connect("), 1)
 
