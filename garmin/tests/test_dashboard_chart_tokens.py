@@ -12,6 +12,7 @@ token และตรวจว่าไม่มีกราฟไหนหย�
 """
 
 import ast
+import datetime
 import re
 import unittest
 from pathlib import Path
@@ -27,29 +28,15 @@ CHART_SRC = DASHBOARD_SRC.split("# --- DB LOADERS ---", 1)[1]
 HEX = re.compile(r"#[0-9a-fA-F]{6}\b")
 
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from dashboard_modules import helpers as _helpers  # noqa: E402
+
+
 def extract_helpers(*names):
-    tree = ast.parse(DASHBOARD_SRC)
-    wanted = set(names)
-    nodes = []
-    found = set()
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if targets & wanted:
-                nodes.append(node)
-                found |= targets & wanted
-        elif isinstance(node, ast.FunctionDef) and node.name in wanted:
-            nodes.append(node)
-            found.add(node.name)
-    missing = wanted - found
-    if missing:
-        raise AssertionError(f"dashboard.py ไม่มี: {sorted(missing)}")
-    namespace = {"pd": pd, "float": float, "zip": zip, "dict": dict}
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace
+    """หยิบจาก dashboard_domain/dashboard_view ก่อน ที่เหลือแกะจาก dashboard.py"""
+    return _helpers(*names)
 
 
 TOKENS = extract_helpers(
@@ -176,8 +163,21 @@ class ContextIsGreyTests(unittest.TestCase):
         )
 
     def test_the_partial_today_marker_uses_the_context_token(self):
-        self.assertTrue('line=dict(color=C_CONTEXT, dash="dot", width=1)' in DASHBOARD_SRC,
-                        "เส้นบอก 'วันนี้ยังไม่จบ' ยังไม่ได้ใช้ token สีบริบท")
+        """เดิมข้อนี้ค้นข้อความ ``line=dict(color=C_CONTEXT, ...)`` ในซอร์ส ซึ่งแดงทันที
+        ที่ฟังก์ชันย้ายไฟล์ ทั้งที่เส้นยังถูกวาดด้วยสีเดิม — ตอนนี้เรียกของจริงแล้วอ่านรูปที่ได้
+        """
+        import plotly.graph_objects as go
+
+        mark_partial_today = extract_helpers("mark_partial_today")["mark_partial_today"]
+        today = datetime.date(2026, 8, 26)
+        figure = mark_partial_today(
+            go.Figure(), today, datetime.date(2026, 8, 1), datetime.date(2026, 8, 31)
+        )
+
+        marks = [shape for shape in figure.layout.shapes if shape.type == "line"]
+        self.assertEqual(len(marks), 1, "ต้องมีเส้นบอก 'วันนี้ยังไม่จบ' หนึ่งเส้น")
+        self.assertEqual(marks[0].line.color, TOKENS["C_CONTEXT"])
+        self.assertEqual(marks[0].line.dash, "dot")
 
 
 class PlotlyTemplateTests(unittest.TestCase):

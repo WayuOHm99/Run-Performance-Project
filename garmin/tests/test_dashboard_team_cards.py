@@ -14,6 +14,7 @@
 import ast
 import html
 import re
+import types
 import unittest
 from pathlib import Path
 
@@ -71,47 +72,13 @@ def tabs_around(*names, when):
     return found
 
 
-def extract_helpers(*names):
-    tree = ast.parse(DASHBOARD_SRC)
-    wanted = set(names)
-    nodes = []
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in wanted:
-            nodes.append(node)
-        elif isinstance(node, ast.Assign):
-            targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
-            if targets & wanted:
-                nodes.append(node)
-    # `focus_athlete` เขียนลง st.session_state — ให้ตัวปลอมที่เก็บค่าจริงไว้ตรวจได้
-    class _FakeStreamlit:
-        session_state = {}
+# การคำนวณกับชิ้นส่วนหน้าตาอยู่ใน dashboard_domain.py / dashboard_view.py แล้ว
+# จึง import ได้ตรง ๆ ไม่ต้อง ast.parse + exec ทีละ node เหมือนเดิม
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 
-    namespace = {"pd": pd, "float": float, "html": html, "st": _FakeStreamlit}
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace
-
-
-HELPERS = extract_helpers(
-    "STATUS_SHAPES",
-    "status_parts",
-    "status_shape_svg",
-    "render_team_card",
-    "load_context_line",
-    "STATUS_COLORS",
-    "STATUS_TEXT_COLORS",
-    "C_CRIT",
-    "C_WARN",
-    "C_GOOD",
-    "C_BLUE",
-    "_num_text",
-    "TEAM_URGENCY_ORDER",
-    "team_urgency_rank",
-    "team_status",
-    "TEAM_CARD_CSS",
-)
+from dashboard_modules import HELPERS, helpers as _helpers  # noqa: E402
 
 def css_rules(stylesheet):
     """``(หัว at-rule หรือ None, selector, ประกาศ)`` ทีละกฎ ตามลำดับในไฟล์
@@ -380,10 +347,18 @@ class CardIsADoorTests(unittest.TestCase):
     """
 
     def helpers(self):
-        namespace = extract_helpers(
+        """``focus_athlete`` เขียนลง ``st.session_state`` จึงต้องยัด st ปลอมให้มันก่อน
+
+        เดิม extractor ของไฟล์นี้ประกอบ namespace เองแล้วใส่ st ปลอมไว้ข้างใน
+        ตอนนี้ตัวกลางรับ ``extras`` แทน — เทสจึงถือ st ตัวเดียวกับที่ฟังก์ชันมองเห็น
+        """
+        fake_streamlit = types.SimpleNamespace(session_state={})
+        namespace = _helpers(
             "focus_athlete", "ATHLETE_STATE_KEY", "MAIN_TABS_KEY",
             "TAB_TODAY_LABEL", "MAIN_TAB_LABELS",
+            extras={"st": fake_streamlit},
         )
+        namespace["st"] = fake_streamlit
         return namespace
 
     def test_one_click_switches_both_the_athlete_and_the_tab(self):

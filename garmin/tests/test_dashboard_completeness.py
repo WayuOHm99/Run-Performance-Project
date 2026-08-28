@@ -203,7 +203,7 @@ class DashboardCompletenessSourceTests(unittest.TestCase):
             self.assertIn(snippet, DASHBOARD_SRC)
 
     def test_device_summary_is_not_presented_as_training_clearance(self):
-        self.assertIn("ข้อมูลจากอุปกรณ์ไม่ใช่คำอนุญาตให้ซ้อม", DASHBOARD_SRC)
+        self.assertIn("ข้อมูลจากอุปกรณ์ไม่ใช่คำอนุญาตให้ซ้อม", _ALL_SRC)
         today_tab = DASHBOARD_SRC.split("with tab_today:", 1)[1]
         today_tab = today_tab.split("with tab_health:", 1)[0]
         self.assertNotIn("st.error(", today_tab)
@@ -214,19 +214,15 @@ if __name__ == "__main__":
     unittest.main()
 
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC as _ALL_SRC  # noqa: E402
+from dashboard_modules import helpers as _helpers  # noqa: E402
+
+
 def extract_personal_record_label():
-    tree = ast.parse(DASHBOARD_SRC)
-    functions = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "personal_record_label"
-    ]
-    namespace = {}
-    exec(
-        compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace["personal_record_label"]
+    return _helpers("personal_record_label")["personal_record_label"]
 
 
 class PersonalRecordLabelTests(unittest.TestCase):
@@ -248,18 +244,7 @@ class PersonalRecordLabelTests(unittest.TestCase):
 
 
 def extract_personal_record_rows():
-    tree = ast.parse(DASHBOARD_SRC)
-    functions = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name in {"personal_record_label", "personal_record_rows", "fmt_sec"}
-    ]
-    namespace = {"pd": pd}
-    exec(
-        compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace["personal_record_rows"]
+    return _helpers("personal_record_rows")["personal_record_rows"]
 
 
 class PersonalRecordRowTests(unittest.TestCase):
@@ -297,17 +282,7 @@ class PersonalRecordRowTests(unittest.TestCase):
 
 
 def extract_load_display(name):
-    tree = ast.parse(DASHBOARD_SRC)
-    functions = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == name
-    ]
-    namespace = {"pd": pd}
-    exec(
-        compile(ast.Module(body=functions, type_ignores=[]), "dashboard.py", "exec"),
-        namespace,
-    )
-    return namespace[name]
+    return _helpers(name)[name]
 
 
 class LoadTrendDisplayTests(unittest.TestCase):
