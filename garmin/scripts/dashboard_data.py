@@ -442,3 +442,13 @@ def load_latest_lt(athlete_id):
            ORDER BY calendar_date DESC LIMIT 1""", (athlete_id,)).fetchone()
     conn.close()
     return row
+
+
+# --- ย้ายมาจาก dashboard.py ตอนแยกหน้า (st.navigation) ---
+def load_daily_workload(athlete_id, start_date, end_date):
+    """คืน (df[date,value,sessions], metric, unit) สำหรับโหลดสะสม
+    ใช้ training_load ถ้านาฬิกาให้ (จับ cross-training ครบ) ไม่งั้น fallback ระยะวิ่ง (กม.)"""
+    if athlete_load_is_current(athlete_id):
+        return load_daily_load(athlete_id, start_date, end_date), "training_load", "TL"
+    df = load_daily_run_km(athlete_id, start_date, end_date).rename(columns={"km": "value"})
+    return df, "ระยะวิ่ง", "km"

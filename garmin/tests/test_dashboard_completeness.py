@@ -213,7 +213,9 @@ class DashboardCompletenessSourceTests(unittest.TestCase):
 
     def test_device_summary_is_not_presented_as_training_clearance(self):
         self.assertIn("ข้อมูลจากอุปกรณ์ไม่ใช่คำอนุญาตให้ซ้อม", _ALL_SRC)
-        today_tab = DASHBOARD_SRC.split("with tab_today:", 1)[1]
+        # หน้า "วันนี้" เป็นไฟล์ของตัวเองแล้ว ไม่ต้องตัดจากสคริปต์รวม
+        today_tab = (Path(__file__).resolve().parent.parent
+                     / "scripts" / "app_pages" / "today.py").read_text(encoding="utf-8")
         today_tab = today_tab.split("with tab_health:", 1)[0]
         self.assertNotIn("st.error(", today_tab)
         self.assertNotIn('startswith("🔴")', today_tab)

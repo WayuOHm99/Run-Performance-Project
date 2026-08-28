@@ -24,11 +24,9 @@ DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
 
 
 def today_tab_source():
-    """เฉพาะบล็อกของแท็บวันนี้ — กันไม่ให้ assert ไปโดนแท็บอื่นที่ยังไม่ได้รื้อ"""
-    start = DASHBOARD_SRC.index("with tab_today:")
-    end = DASHBOARD_SRC.index("with tab_health:")
-    assert start < end
-    return DASHBOARD_SRC[start:end]
+    """ซอร์สของหน้า "วันนี้" — ตั้งแต่แยกหน้า มันคือไฟล์ของตัวเอง ไม่ต้องตัดจากไฟล์รวม"""
+    return (Path(__file__).resolve().parent.parent
+            / "scripts" / "app_pages" / "today.py").read_text(encoding="utf-8")
 
 
 # การคำนวณกับชิ้นส่วนหน้าตาอยู่ใน dashboard_domain.py / dashboard_view.py แล้ว

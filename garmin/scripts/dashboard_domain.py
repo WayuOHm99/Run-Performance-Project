@@ -998,3 +998,15 @@ def get_lthr(slug, athlete_id):
     if slug in LTHR_BY_SLUG:
         return LTHR_BY_SLUG[slug], LTHR_SOURCE_BY_SLUG.get(slug, "จากผลเทสล่าสุด")
     return None, "ยังไม่มี LTHR ที่ยืนยันจากการทดสอบ — ไม่ประมาณจาก HR สูงสุด"
+
+
+# --- ย้ายมาจาก dashboard.py ตอนแยกหน้า (st.navigation) ---
+HRV_TREND_LOOKBACK_DAYS = HRV_TREND_CURRENT_DAYS + HRV_TREND_BASELINE_DAYS
+
+# ใช้เฉพาะหมวดที่ Garmin ระบุเองเป็น poor/low/unbalanced เป็นสัญญาณให้ทบทวน
+# ไม่สร้าง cutoff Body Battery/RHR ในระบบเอง และไม่นับจำนวนธงเป็นคะแนนโหวต
+SLEEP_LOW = 60        # ขอบหมวด Poor ของ Garmin; เป็น vendor signal ไม่ใช่ clinical cutoff
+
+HRV_ALERT = {"LOW": "rest", "UNBALANCED": "watch"}
+
+READINESS_ALERT = ("POOR", "LOW")

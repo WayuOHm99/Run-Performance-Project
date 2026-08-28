@@ -509,3 +509,44 @@ TODAY_PANEL_CSS = """
 }
 </style>
 """
+
+
+# --- ย้ายมาจาก dashboard.py ตอนแยกหน้า (st.navigation) ---
+C_NEUTRAL = "#c3c9d2"  # เทาอมฟ้าอ่อน — เห็นได้บนพื้นขาว
+
+C_SECOND = "#eb6834" # เส้นที่สองในกราฟเดียวกัน (ตรวจ CVD แล้ว ΔE 24.7 จาก C_BLUE)
+
+# กฎกราฟ 02: ค่าที่มีลำดับใช้สีเดียวไล่อ่อน→เข้ม ไม่ใช่รุ้ง — เขียว-เหลือง-แดงทำให้ "เบา"
+# อ่านว่าดี และ "หนัก" อ่านว่าอันตราย ทั้งที่เป็นแค่ระดับความหนัก ไม่ใช่คำตัดสิน
+# และมันยังไปชนสีสถานะซึ่งจองไว้ให้สถานะอย่างเดียว (กฎกราฟ 03)
+BLUE_RAMP_3 = ["#cde2fb", C_BLUE, "#104281"]
+
+BLUE_RAMP_5 = ["#cde2fb", "#86b6ef", C_BLUE, "#1a5aa8", "#104281"]
+
+INTENSITY_COLORS = dict(zip(INTENSITY_ORDER, BLUE_RAMP_3))
+
+# กฎกราฟ 07: ค่าเดียวกันใช้สีเดียวกันทุกแท็บ — ตารางนี้คือที่เดียวที่ตัดสินว่าค่าไหนสีอะไร
+# เดิมแต่ละกราฟเลือกสีเอง ทำให้ HR เป็นแดงในกราฟหนึ่ง แต่ Readiness เป็นเขียวในอีกกราฟ
+# ทั้งที่ทั้งคู่ไม่ใช่สถานะ · หลักที่ใช้: หัวเรื่องของกราฟ = น้ำเงิน · ค่าที่สอง = ส้ม ·
+# เส้นฐาน/ค่าเฉลี่ยเคลื่อนที่ = เทา
+SERIES_COLORS = {
+    "sleep_score": C_BLUE,
+    "body_battery_high": C_SECOND,
+    "stress_avg": C_SECOND,
+    "training_readiness": C_BLUE,
+    "resting_hr": C_SECOND,
+    "hrv_last_night": C_BLUE,
+    "hrv_weekly_avg": C_CONTEXT,
+    "avg_sleep_respiration": C_BLUE,
+    "avg_waking_respiration": C_SECOND,
+    "recovery_time": C_BLUE,
+    "avg_hr": C_SECOND,
+    "avg_pace_min_per_km": C_BLUE,
+    "avg_cadence": C_BLUE,
+    "avg_power": C_SECOND,
+    "elevation_gain_m": C_CONTEXT,
+    "distance_km": C_BLUE,
+    "vo2max_trend": C_BLUE,
+    "time_5k_sec": C_BLUE,
+    "time_10k_sec": C_SECOND,
+}
