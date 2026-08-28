@@ -25,6 +25,9 @@ SUBPROCESS_TIMEOUT_SEC = 120
 
 
 class GarminConnectDependencyTests(unittest.TestCase):
+    def test_helper_uses_the_reviewed_security_release(self):
+        self.assertEqual(TOKEN_SCRIPT.GARMINCONNECT_VERSION, "0.3.11")
+
     def test_matching_version_does_not_invoke_pip(self):
         with (
             patch.object(
