@@ -36,8 +36,6 @@ PROGRESS_TAB_LABEL = "app_pages/progress.py"
 SPLITS_TAB_LABEL = "app_pages/session.py"
 TODAY_TAB_LABEL = "app_pages/today.py"
 
-# วันสุดท้ายของข้อมูลที่ปั้น — ใช้วันจริงเพื่อให้ช่วงเวลาเริ่มต้นของหน้าครอบข้อมูลนี้
-LAST_DAY = datetime.date.today()
 
 
 def load_script(name, filename):
@@ -53,6 +51,14 @@ def load_script(name, filename):
 # ของเครื่องนี้ ไม่ได้อยู่ในรีโป เทสที่อ่านมันจึงพังทั้งชุดบน CI (เจอจริง PR #47)
 # และการอ่านจากที่นี่ยังทำให้เทสแดงเองเมื่อ schema ขยับ แทนที่จะเงียบไปเฉย ๆ
 schema = load_script("garmin_schema_for_dashboard_tabs", "02_init_schema.py")
+
+# วันสุดท้ายของข้อมูลที่ปั้น — ใช้วันจริงเพื่อให้ช่วงเวลาเริ่มต้นของหน้าครอบข้อมูลนี้
+#
+# ต้องเป็น "วันตามเวลาไทย" ตัวเดียวกับที่ dashboard ใช้ (``bangkok_date()``) ไม่ใช่
+# ``date.today()`` ของเครื่อง — CI สาย Linux รันด้วย TZ=UTC ช่วง 17:00-24:00 UTC
+# วันของเครื่องจะช้ากว่าวันไทยหนึ่งวัน ข้อมูลที่ปั้นเลื่อนไปทั้งชุด แล้วหน้าต่างย้อนหลัง
+# นับได้ 27/28 คืนแทน 28/28 (CI แดงจริง 29 ส.ค. 69 ตอน 21:13 UTC)
+LAST_DAY = load_script("garmin_dashboard_domain_for_tests", "dashboard_domain.py").bangkok_date()
 
 
 def is_missing(value):
