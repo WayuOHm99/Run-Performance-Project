@@ -20,10 +20,20 @@ from pathlib import Path
 import pandas as pd
 
 DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "scripts" / "dashboard.py"
-DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
+import sys as _sys0
+from pathlib import Path as _Path0
+_sys0.path.insert(0, str(_Path0(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC  # noqa: E402
 
-# ทุกอย่างหลัง "# --- DB LOADERS ---" คือส่วนที่วาดหน้าจอจริง รวมบล็อกแท็บทุกแท็บ
-CHART_SRC = DASHBOARD_SRC.split("# --- DB LOADERS ---", 1)[1]
+# ยามชุดนี้ถามว่า "กฎสียังถูกใช้อยู่ไหม" ซึ่งเป็นคำถามระดับทั้ง dashboard ไม่ใช่ไฟล์เดียว
+DASHBOARD_SRC = ALL_SRC
+
+# ส่วนที่วาดหน้าจอจริงคือไฟล์หน้าใต้ app_pages/ ตั้งแต่ย้ายไป st.navigation
+# (เดิมเป็น "ทุกอย่างหลัง # --- DB LOADERS --- ในไฟล์เดียว")
+_PAGES_DIR = Path(__file__).resolve().parent.parent / "scripts" / "app_pages"
+CHART_SRC = chr(10).join(
+    path.read_text(encoding="utf-8") for path in sorted(_PAGES_DIR.glob("*.py"))
+)
 
 HEX = re.compile(r"#[0-9a-fA-F]{6}\b")
 
@@ -184,10 +194,17 @@ class PlotlyTemplateTests(unittest.TestCase):
     """template คือที่ที่กราฟซึ่งไม่ได้ตั้งสีเองจะไปหยิบสี — ต้องเป็นของระบบดีไซน์"""
 
     def test_template_is_defined_after_the_tokens_it_uses(self):
-        # ถ้า template ถูกตั้งก่อนค่าคงที่สี จะ NameError ตอน import
+        """ถ้า template ถูกตั้งก่อนที่ token สีจะมีค่า จะ NameError ตอนเปิดหน้า
+
+        เดิมวัดด้วยตำแหน่งของ ``C_SECOND = `` ในไฟล์เดียวกัน · ตั้งแต่ token ย้ายไป
+        ``dashboard_view.py`` สิ่งที่ต้องมาก่อนคือ *บรรทัด import* ไม่ใช่บรรทัดนิยาม
+        — ย้าย import ลงไปใต้ template เมื่อไหร่ ข้อนี้แดงทันที (เกิดมาแล้วจริง)
+        """
+        shell = (Path(__file__).resolve().parent.parent
+                 / "scripts" / "dashboard.py").read_text(encoding="utf-8")
         self.assertLess(
-            DASHBOARD_SRC.index("C_SECOND = "),
-            DASHBOARD_SRC.index("_print_friendly.layout.colorway"),
+            shell.index("from dashboard_view import ("),
+            shell.index("_print_friendly.layout.colorway"),
         )
 
     def test_template_carries_the_design_system_not_plotly_defaults(self):

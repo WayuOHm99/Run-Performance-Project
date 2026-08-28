@@ -11,7 +11,16 @@ import pandas as pd
 
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_SRC = (GARMIN_ROOT / "scripts" / "dashboard.py").read_text(encoding="utf-8")
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from dashboard_modules import ALL_SRC as _ALL_SRC  # noqa: E402
+
+# ยามที่ถามว่า "ข้อความ/กฎนี้ยังอยู่ไหม" ต้องอ่านทั้งสี่ไฟล์ของ dashboard ตั้งแต่
+# ชั้นข้อมูลกับการคำนวณแยกออกไป — ไม่งั้นมันแดงเพราะโค้ดย้ายไฟล์ ทั้งที่กฎยังถูก
+DASHBOARD_SRC = _ALL_SRC
+DATA_SRC = (_Path(__file__).resolve().parents[1] / "scripts" / "dashboard_data.py").read_text(
+    encoding="utf-8")
 
 
 class _FakeStreamlit:
@@ -21,14 +30,14 @@ class _FakeStreamlit:
 
 
 def extract_body_composition_loader(db_path):
-    tree = ast.parse(DASHBOARD_SRC)
+    tree = ast.parse(DATA_SRC)
     functions = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name in {"connect_db", "load_body_composition"}
     ]
     namespace = {
-        "DB_PATH": Path(db_path),
+        "db_path": (lambda path=Path(db_path): path),
         "CACHE_TTL_SEC": 0,
         "pd": pd,
         "sqlite3": sqlite3,
@@ -42,14 +51,14 @@ def extract_body_composition_loader(db_path):
 
 
 def extract_first_dashboard_date_loader(db_path):
-    tree = ast.parse(DASHBOARD_SRC)
+    tree = ast.parse(DATA_SRC)
     functions = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name in {"connect_db", "load_first_dashboard_date"}
     ]
     namespace = {
-        "DB_PATH": Path(db_path),
+        "db_path": (lambda path=Path(db_path): path),
         "CACHE_TTL_SEC": 0,
         "datetime": datetime,
         "sqlite3": sqlite3,
@@ -204,7 +213,9 @@ class DashboardCompletenessSourceTests(unittest.TestCase):
 
     def test_device_summary_is_not_presented_as_training_clearance(self):
         self.assertIn("ข้อมูลจากอุปกรณ์ไม่ใช่คำอนุญาตให้ซ้อม", _ALL_SRC)
-        today_tab = DASHBOARD_SRC.split("with tab_today:", 1)[1]
+        # หน้า "วันนี้" เป็นไฟล์ของตัวเองแล้ว ไม่ต้องตัดจากสคริปต์รวม
+        today_tab = (Path(__file__).resolve().parent.parent
+                     / "scripts" / "app_pages" / "today.py").read_text(encoding="utf-8")
         today_tab = today_tab.split("with tab_health:", 1)[0]
         self.assertNotIn("st.error(", today_tab)
         self.assertNotIn('startswith("🔴")', today_tab)

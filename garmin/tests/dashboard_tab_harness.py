@@ -27,12 +27,14 @@ import plotly.io as pio
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
 
-MAIN_TABS_KEY = "main_tabs"
-TEAM_TAB_LABEL = ":material/groups: ทีม"
-RECOVERY_TAB_LABEL = ":material/bedtime: การฟื้นตัว"
-TRAINING_TAB_LABEL = ":material/directions_run: การซ้อม"
-PROGRESS_TAB_LABEL = ":material/trending_up: ความก้าวหน้า"
-SPLITS_TAB_LABEL = ":material/query_stats: รายละเอียดเซสชัน"
+# แต่ละแท็บกลายเป็นไฟล์ของตัวเองใต้ app_pages/ ตั้งแต่ย้ายไป st.navigation
+# ป้ายเดิมยังใช้เป็น "ชื่อที่เทสเรียก" ได้ แต่สิ่งที่ต้องส่งให้ AppTest คือ path ของหน้า
+TEAM_TAB_LABEL = "app_pages/team.py"
+RECOVERY_TAB_LABEL = "app_pages/recovery.py"
+TRAINING_TAB_LABEL = "app_pages/training.py"
+PROGRESS_TAB_LABEL = "app_pages/progress.py"
+SPLITS_TAB_LABEL = "app_pages/session.py"
+TODAY_TAB_LABEL = "app_pages/today.py"
 
 # วันสุดท้ายของข้อมูลที่ปั้น — ใช้วันจริงเพื่อให้ช่วงเวลาเริ่มต้นของหน้าครอบข้อมูลนี้
 LAST_DAY = datetime.date.today()
@@ -124,7 +126,7 @@ def render_tab(tab_label, seed):
         os.environ["GARMIN_DATA_DIR"] = tmp
         try:
             app = AppTest.from_file(str(DASHBOARD_PATH))
-            app.session_state[MAIN_TABS_KEY] = tab_label
+            app.switch_page(tab_label)
             app.run(timeout=90)
         finally:
             if previous is None:
@@ -134,9 +136,12 @@ def render_tab(tab_label, seed):
 
     if list(app.exception):
         raise AssertionError(
-            f"แท็บ {tab_label!r} โยน exception: "
+            f"หน้า {tab_label!r} โยน exception: "
             + " | ".join(item.value for item in app.exception)
         )
-    tab = next(item for item in app.get("tab") if item.label == tab_label)
-    charts = [pio.from_json(el.proto.spec) for el in tab.get("plotly_chart")]
-    return tab, charts
+    # คืน ``app.main`` ไม่ใช่ ``app`` — รากของผังรวม sidebar ที่หน้าเปลือกวาดไว้ด้วย
+    # เทสที่นับ "ข้อความที่เห็นตอนเปิดหน้า" จะนับ caption ของ sidebar ปนเข้ามาทันที
+    # (เจอจริงตอนแยกหน้า: แท็บการฟื้นตัวรายงาน caption 8 อันแทนที่จะเป็น 4)
+    body = app.main
+    charts = [pio.from_json(el.proto.spec) for el in body.get("plotly_chart")]
+    return body, charts

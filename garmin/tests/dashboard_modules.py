@@ -15,6 +15,7 @@ SCRIPTS_DIR = GARMIN_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import dashboard_data  # noqa: E402
 import dashboard_domain  # noqa: E402
 import dashboard_view  # noqa: E402
 
@@ -33,17 +34,27 @@ class _Helpers(dict):
 
 HELPERS = _Helpers(
     (name, value)
-    for module in (dashboard_domain, dashboard_view)
+    for module in (dashboard_domain, dashboard_view, dashboard_data)
     for name, value in vars(module).items()
     if not name.startswith("__")
 )
 
 # ซอร์สของ "ทั้ง dashboard" — ยามที่ค้นข้อความต้องมองครบทั้งสามไฟล์ ไม่ใช่ไฟล์เดียว
 # ตั้งแต่การคำนวณกับชิ้นส่วนหน้าตาแยกออกไป
-ALL_SRC = chr(10).join(
-    (SCRIPTS_DIR / name).read_text(encoding="utf-8")
-    for name in ("dashboard.py", "dashboard_domain.py", "dashboard_view.py")
-)
+def _dashboard_sources():
+    """ทุกไฟล์ที่ประกอบกันเป็น Dashboard — หน้าเปลือก โมดูล และหน้าแต่ละหน้า
+
+    ยามที่ถามว่า "ข้อความ/กฎนี้ยังอยู่ไหม" ต้องมองครบ ไม่งั้นมันแดงเพราะโค้ดย้ายไฟล์
+    ทั้งที่กฎยังถูก — ซึ่งเป็นสิ่งที่ CLAUDE.md ห้ามไว้ตรง ๆ
+    """
+    paths = [SCRIPTS_DIR / name for name in (
+        "dashboard.py", "dashboard_domain.py", "dashboard_view.py",
+        "dashboard_data.py", "dashboard_team.py", "dashboard_context.py")]
+    paths += sorted((SCRIPTS_DIR / "app_pages").glob("*.py"))
+    return paths
+
+
+ALL_SRC = chr(10).join(path.read_text(encoding="utf-8") for path in _dashboard_sources())
 
 
 def helpers(*names, extras=None):

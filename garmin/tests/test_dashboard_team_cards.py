@@ -24,12 +24,12 @@ DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "scripts" / "dashboard
 DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
 
 
+PAGES_DIR = Path(__file__).resolve().parent.parent / "scripts" / "app_pages"
+
+
 def team_tab_source():
-    """เฉพาะบล็อกของแท็บทีม — กันไม่ให้ assert ไปโดนแท็บอื่นที่ยังไม่ได้รื้อ"""
-    start = DASHBOARD_SRC.index("with tab_team:")
-    end = DASHBOARD_SRC.index("with tab_today:")
-    assert start < end
-    return DASHBOARD_SRC[start:end]
+    """ซอร์สของหน้า "ทีม" — ตั้งแต่แยกหน้า มันคือไฟล์ของตัวเอง ไม่ต้องตัดจากไฟล์รวมแล้ว"""
+    return (PAGES_DIR / "team.py").read_text(encoding="utf-8")
 
 
 def tabs_around(*names, when):
@@ -78,7 +78,7 @@ import sys
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parent))
 
-from dashboard_modules import HELPERS, helpers as _helpers  # noqa: E402
+from dashboard_modules import ALL_SRC, HELPERS, helpers as _helpers  # noqa: E402
 
 def css_rules(stylesheet):
     """``(หัว at-rule หรือ None, selector, ประกาศ)`` ทีละกฎ ตามลำดับในไฟล์
@@ -293,7 +293,9 @@ class CrossTabContractTests(unittest.TestCase):
     """
 
     def test_every_key_the_today_tab_reads_is_still_produced_by_the_team_tab(self):
-        tree = ast.parse(DASHBOARD_SRC)
+        # team_rows ถูกสร้างใน dashboard_team.py ส่วนคนอ่านอยู่ app_pages/today.py
+        # จึงต้องมองซอร์สทั้งชุด ไม่ใช่ dashboard.py ไฟล์เดียวเหมือนตอนยังรวมกัน
+        tree = ast.parse(ALL_SRC)
 
         produced = set()
         for node in ast.walk(tree):
@@ -346,77 +348,94 @@ class CardIsADoorTests(unittest.TestCase):
     การ์ดเองจึงกดไม่ได้ ทางที่เหลือคือปุ่มจริงใต้การ์ด ซึ่งได้โฟกัสคีย์บอร์ดมาด้วยฟรี
     """
 
-    def helpers(self):
-        """``focus_athlete`` เขียนลง ``st.session_state`` จึงต้องยัด st ปลอมให้มันก่อน
+    def test_one_click_switches_both_the_athlete_and_the_page(self):
+        """ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างหน้าเดิม ตั้งแค่หน้าจะย้ายหน้าแต่ยังเป็นคนเดิม
+        ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน ปุ่มเดียวจึงต้องทำครบทั้งคู่
 
-        เดิม extractor ของไฟล์นี้ประกอบ namespace เองแล้วใส่ st ปลอมไว้ข้างใน
-        ตอนนี้ตัวกลางรับ ``extras`` แทน — เทสจึงถือ st ตัวเดียวกับที่ฟังก์ชันมองเห็น
+        ``st.switch_page`` เป็น ``NoReturn`` (มันโยนเพื่อหยุดสคริปต์) ข้อนี้จึงดักการโยน
+        แล้วเช็คว่ามันถูกเรียกด้วยหน้าไหน — ถ้าใครถอดการย้ายหน้าออก ข้อนี้แดงทันที
         """
-        fake_streamlit = types.SimpleNamespace(session_state={})
-        namespace = _helpers(
-            "focus_athlete", "ATHLETE_STATE_KEY", "MAIN_TABS_KEY",
-            "TAB_TODAY_LABEL", "MAIN_TAB_LABELS",
-            extras={"st": fake_streamlit},
-        )
-        namespace["st"] = fake_streamlit
-        return namespace
+        import dashboard_context
 
-    def test_one_click_switches_both_the_athlete_and_the_tab(self):
-        # ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างอยู่แท็บเดิม ตั้งแค่แท็บจะย้ายหน้าแต่ยังเป็นคนเดิม
-        # ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน
-        namespace = self.helpers()
+        switched = []
+
+        class _Stop(Exception):
+            pass
+
+        def fake_switch_page(page):
+            switched.append(page)
+            raise _Stop
+
         state = {}
-        namespace["st"].session_state = state
-        namespace["focus_athlete"]("Dan")
-        self.assertEqual(state[namespace["ATHLETE_STATE_KEY"]], "Dan")
-        self.assertEqual(state[namespace["MAIN_TABS_KEY"]], namespace["TAB_TODAY_LABEL"])
+        original_state = dashboard_context.st.session_state
+        original_switch = dashboard_context.st.switch_page
+        dashboard_context.st.session_state = state
+        dashboard_context.st.switch_page = fake_switch_page
+        try:
+            with self.assertRaises(_Stop):
+                dashboard_context.focus_athlete("Dan")
+        finally:
+            dashboard_context.st.session_state = original_state
+            dashboard_context.st.switch_page = original_switch
 
-    def test_the_tab_label_written_to_state_is_one_streamlit_actually_renders(self):
-        # ป้ายแท็บถูกใช้สองที่ (สร้างแท็บ กับเขียนลง session_state) ถ้าดริฟต์จากกัน
-        # ปุ่มจะเงียบไปโดยไม่มี error — สลับคนสำเร็จแต่ไม่ย้ายหน้า
-        namespace = self.helpers()
-        self.assertIn(namespace["TAB_TODAY_LABEL"], namespace["MAIN_TAB_LABELS"])
+        self.assertEqual(state[dashboard_context.ATHLETE_STATE_KEY], "Dan")
+        self.assertEqual(switched, [dashboard_context.TODAY_PAGE])
 
-    def test_tabs_track_state_or_the_button_writes_into_a_void(self):
-        # `key` อย่างเดียว **ไม่พอ** — ในซอร์ส Streamlit 1.61 `is_stateful = on_change != "ignore"`
-        # ถ้าไม่ส่ง on_change มันไม่เรียก register_widget เลย ป้ายแท็บที่ focus_athlete()
-        # เขียนลง session_state จะไม่มีใครอ่านกลับ ปุ่มเงียบโดยไม่มี error
-        # (วัดมาแล้ว: key อย่างเดียว tab.open = None ทุกตัว · ใส่ on_change แล้วเป็น True/False)
-        self.assertTrue("key=MAIN_TABS_KEY" in DASHBOARD_SRC,
-                        "st.tabs ไม่มี key แล้ว ปุ่มบนการ์ดจะสลับแท็บไม่ได้")
-        self.assertTrue('on_change="rerun"' in DASHBOARD_SRC,
-                        "st.tabs ไม่มี on_change แล้ว แท็บจะไม่ track state ปุ่มจะเงียบ")
-        self.assertTrue("key=ATHLETE_STATE_KEY" in DASHBOARD_SRC,
-                        "selectbox ไม่ได้ใช้คีย์เดียวกับที่ focus_athlete เขียนลงไป")
+    def test_the_button_switches_to_a_page_navigation_actually_registers(self):
+        """ปุ่มพาไปหน้าที่ ``st.navigation`` ไม่รู้จัก = StreamlitAPIException ตอนกด
 
-    def test_the_team_snapshot_is_built_for_exactly_the_tabs_that_read_it(self):
-        # `team_df` ถูกสร้างที่เดียวแต่มีสองแท็บใช้ — แท็บทีมวาดการ์ด แท็บวันนี้อ่านแถว
-        # ของนักกีฬาที่เลือก การคำนวณจึงต้องครอบ "พอดี" กับแท็บที่ใช้:
-        #   แคบไป -> เปิดแท็บที่ใช้แล้ว NameError ทันที (ผู้ใช้เห็นจอแดง)
-        #   กว้างไป -> อีกสี่แท็บจ่ายค่าคำนวณย้อนหลัง 42 วันของนักกีฬาทุกคนฟรี ๆ
-        # เดิมเทสนี้ยืนยันด้วย "ตำแหน่งในซอร์สต้องอยู่ก่อน st.tabs(" ซึ่งผูกกับรูปร่างโค้ด
-        # และแดงทันทีที่จัดโครงใหม่ทั้งที่เจตนายังถูก — เปลี่ยนมาถามเงื่อนไขจริงแทน
-        readers = tabs_around("team_df", "team_rows", when="read")
-        builders = tabs_around("team_df", "team_rows", when="assign")
+        เดิมความเสี่ยงคือป้ายแท็บใน session_state ดริฟต์จากป้ายที่ st.tabs สร้าง
+        ตอนนี้ความเสี่ยงย้ายมาที่ path — รูปแบบต่างกัน แต่เป็นความพังแบบเดียวกัน
+        """
+        import dashboard_context
+
+        shell = (Path(__file__).resolve().parent.parent
+                 / "scripts" / "dashboard.py").read_text(encoding="utf-8")
+        registered = set(re.findall(r'st\.Page\("([^"]+)"', shell))
+
+        self.assertTrue(registered, "หา st.Page ใน dashboard.py ไม่เจอ")
+        self.assertIn(dashboard_context.TODAY_PAGE, registered)
+        self.assertIn("key=ATHLETE_STATE_KEY", shell,
+                      "selectbox ไม่ได้ใช้คีย์เดียวกับที่ focus_athlete เขียนลงไป")
+
+    def test_the_team_snapshot_is_built_by_exactly_the_pages_that_read_it(self):
+        """หน้าไหนอ่าน ``team_df`` ต้องเรียก ``team_snapshot()`` เอง
+
+        เดิม team_df ถูกสร้างกลางสคริปต์แล้วครอบด้วยเงื่อนไข "แท็บใดแท็บหนึ่งเปิดอยู่"
+        ซึ่งแคบไปแล้ว NameError กว้างไปแล้วอีกสี่แท็บจ่ายค่าคำนวณย้อนหลัง 42 วันฟรี ๆ
+        แยกหน้าแล้วความเสี่ยงเปลี่ยนรูป: หน้าที่อ่านแต่ไม่ได้เรียกจะ NameError เหมือนเดิม
+        """
+        readers, builders = set(), set()
+        for path in sorted(PAGES_DIR.glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            if re.search(r"\bteam_df\b|\bteam_rows\b", text):
+                readers.add(path.name)
+            if "team_snapshot(" in text:
+                builders.add(path.name)
+
         self.assertEqual(
             readers, builders,
-            f"แท็บที่อ่าน team_df คือ {sorted(readers)} แต่คำนวณให้ {sorted(builders)} — "
-            "ส่วนต่างคือแท็บที่จะ NameError หรือแท็บที่จ่ายค่าคำนวณโดยไม่ได้ใช้",
+            f"หน้าที่อ่าน team_df คือ {sorted(readers)} แต่หน้าที่เรียก team_snapshot() "
+            f"คือ {sorted(builders)} — ส่วนต่างคือหน้าที่จะ NameError ตอนเปิด",
         )
-        self.assertEqual(
-            readers, {"today", "team"},
-            f"คาดว่ามีแท็บวันนี้กับแท็บทีมเท่านั้นที่ใช้ team_df แต่เจอ {sorted(readers)}",
-        )
+        self.assertEqual(readers, {"today.py", "team.py"}, sorted(readers))
 
-    def test_every_tab_body_only_runs_when_that_tab_is_open(self):
-        # กราฟ plotly คือตัวกินเวลาหลักของหนึ่งรอบรัน (วัดแล้ว ~0.7 จาก 1.1 วินาที)
-        # แท็บไหนหลุดการ์ดนี้ไปจะสร้างกราฟใหม่ทุกครั้งที่หน้าจอ rerun แม้ไม่มีใครเปิดดู
-        for name in ("tab_today", "tab_team", "tab_health", "tab_train",
-                     "tab_progress", "tab_splits"):
-            self.assertTrue(
-                f"if {name}.open:" in DASHBOARD_SRC,
-                f"{name} ไม่ได้ถูกครอบด้วย .open — มันจะรันทุกครั้งแม้ไม่ได้เปิดอยู่",
-            )
+    def test_only_the_open_page_runs_and_no_page_is_orphaned(self):
+        """กราฟ plotly คือตัวกินเวลาหลักของหนึ่งรอบรัน (วัดแล้ว ~0.7 จาก 1.1 วินาที)
+
+        เดิมต้องแฮ็ก ``if tab_x.open:`` ครอบทุกแท็บ ไม่งั้นทุกแท็บสร้างกราฟใหม่ทุกรอบ
+        ``st.navigation`` รันเฉพาะไฟล์ของหน้าที่เปิดอยู่ เงื่อนไขนั้นจึงไม่ต้องมี —
+        แต่เกิดความพังแบบใหม่แทน: ไฟล์หน้าที่ไม่ได้ลงทะเบียนจะไม่มีทางเปิดถึงเลย
+        """
+        shell = (Path(__file__).resolve().parent.parent
+                 / "scripts" / "dashboard.py").read_text(encoding="utf-8")
+        registered = {Path(p).name for p in re.findall(r'st\.Page\("([^"]+)"', shell)}
+        on_disk = {path.name for path in PAGES_DIR.glob("*.py")}
+
+        self.assertEqual(registered, on_disk,
+                         f"ลงทะเบียน {sorted(registered)} แต่มีไฟล์ {sorted(on_disk)}")
+        self.assertNotIn("st.tabs(", shell, "ยังมี st.tabs ค้างอยู่ — แท็บกับหน้าซ้อนกัน")
+        self.assertNotIn("tab_today.open", shell, "ยังมีการแฮ็ก .open ค้างอยู่")
 
     def test_buttons_do_not_print(self):
         # โปรเจกต์ล็อกธีมสว่างไว้เพื่อให้พิมพ์ A4 ได้ — ปุ่มบนกระดาษกดไม่ได้
