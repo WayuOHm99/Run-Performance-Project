@@ -219,22 +219,22 @@ class TeamOrderTests(unittest.TestCase):
     """คำถามแรกของเช้าคือ "ใครต้องดูก่อน" — การ์ดจึงเรียงตามความเร่งด่วน ไม่ใช่ตามชื่อ"""
 
     def test_the_athlete_who_needs_a_decision_comes_first(self):
-        # "ข้อมูลไม่พอ" มาก่อน "พร้อมซ้อม" เพราะช่องว่างของหลักฐานต้องถูกเห็น
+        # "ข้อมูลไม่พอ" มาก่อน "ไม่พบสัญญาณ" เพราะช่องว่างของหลักฐานต้องถูกเห็น
         # ไม่ใช่ถูกกลบไว้ท้ายรายการหลังคนที่ไม่มีอะไรต้องทำ
         rank = HELPERS["team_urgency_rank"]
         shuffled = [
-            "🟢 พร้อมซ้อม",
+            "🟢 ไม่พบสัญญาณเตือนจากอุปกรณ์",
             "⚪ ข้อมูลไม่พอ",
             "🔴 ต้องพัก/ลดโหลด",
-            "🟡 เฝ้าระวัง",
+            "🟡 ควรทบทวนก่อนซ้อม",
         ]
         self.assertEqual(
             sorted(shuffled, key=rank),
             [
                 "🔴 ต้องพัก/ลดโหลด",
-                "🟡 เฝ้าระวัง",
+                "🟡 ควรทบทวนก่อนซ้อม",
                 "⚪ ข้อมูลไม่พอ",
-                "🟢 พร้อมซ้อม",
+                "🟢 ไม่พบสัญญาณเตือนจากอุปกรณ์",
             ],
         )
 
@@ -255,11 +255,11 @@ class CardMarkupTests(unittest.TestCase):
 
     ROW = {
         "นักกีฬา": "Tong",
-        "สถานะ": "🟡 เฝ้าระวัง",
-        "ประสิทธิภาพการวิ่งเบา (EF)": "+2% จากฐาน 28 วัน",
-        "โซน EF": "🟢 ปกติ",
+        "สถานะ": "🟡 ควรทบทวนก่อนซ้อม",
+        "pace–HR trend": "+2% จากฐาน 28 วัน",
+        "สถานะ pace–HR": "🔵 แนวโน้มประกอบ",
         "โหลด 7 วัน": "32.6 km",
-        "เทียบฐานตัวเอง": "-12%",
+        "ค่าเฉลี่ยโหลด 28 วัน": "29.4 km/สัปดาห์",
         "ขอบเขตโหลด": "วิ่ง",
         "เซสชัน 7 วัน": 5,
         "Sleep": 78.0,
@@ -295,9 +295,8 @@ class CardMarkupTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", markup)
 
     def test_every_core_freshness_value_the_status_depends_on_is_shown(self):
-        # BB, Sleep, RHR, HRV คือ 4 ค่าที่นับเป็น fresh_core_count ซึ่งตัดสินว่าเขียวได้ไหม
-        # และ BB<40 ยังเป็นเงื่อนไขธง — โชว์วันที่ของมันในบรรทัดความสดแต่ไม่โชว์ค่า
-        # ทำให้อ่านเหมือนลืม ไม่เหมือนเลือก
+        # BB, Sleep, RHR, HRV คือ 4 ค่าที่ใช้บอกความครบของข้อมูลอุปกรณ์
+        # จึงต้องแสดงค่าจริง ไม่ใช่เพียงวันที่ซึ่งอ่านเหมือนระบบลืมข้อมูล
         markup = HELPERS["render_team_card"](dict(self.ROW))
         for label in ("BODY BAT.", "SLEEP", "RHR", "HRV"):
             self.assertIn(label, markup, f"การ์ดไม่ได้แสดง {label}")
@@ -307,8 +306,8 @@ class CardMarkupTests(unittest.TestCase):
         # เคสจริงของ P'kao: ซ้อม cross-training เป็นหลัก จึงแทบไม่มีรัน easy ให้คำนวณ
         # ถ้าปล่อยเป็นขีดเปล่า ๆ โค้ชจะอ่านว่า sync พังแล้วไปไล่แก้ระบบที่ไม่ได้เสีย
         row = dict(self.ROW, **{
-            "ประสิทธิภาพการวิ่งเบา (EF)": "–",
-            "โซน EF": "⚪ ข้อมูลไม่พอ",
+            "pace–HR trend": "–",
+            "สถานะ pace–HR": "⚪ ข้อมูลไม่พอ",
         })
         markup = HELPERS["render_team_card"](row)
         self.assertIn("ไม่ใช่ระบบขัดข้อง", markup)
@@ -362,7 +361,7 @@ class CrossTabContractTests(unittest.TestCase):
 class AlwaysOnTextBudgetTests(unittest.TestCase):
     """เกณฑ์วัดผลของใบงาน #18: ข้อความที่เห็นตลอดต้องลดจาก 22 เหลือ <= 5 ทั้งหน้า
 
-    แท็บทีมได้โควตาบรรทัดเดียว — บรรทัดที่บอกว่าอะไรคือตัวตัดสิน ที่เหลือพับเก็บ
+    แท็บทีมได้โควตาบรรทัดเดียว — บรรทัดที่บอกขอบเขตของสัญญาณ ที่เหลือพับเก็บ
     """
 
     def test_team_tab_keeps_one_always_visible_caption(self):

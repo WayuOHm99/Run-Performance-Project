@@ -1,18 +1,12 @@
-"""ประสิทธิภาพการวิ่งเบา (EF) — ตัวที่มาแทน ACWR บนแท็บรวมทีมและแท็บซ้อม
+"""pace-HR trend ของรันเบา — คุมให้เป็นบริบท ไม่กลายเป็น readiness veto.
 
-ที่มาของเกณฑ์ (25 ส.ค. 69): ACWR ถูกถอดออกเพราะหลักฐานตีตก — Garmin-RUNSAFE
-(Br J Sports Med 2025;59:1203-1210, 5,205 นักวิ่ง / 588,071 เซสชัน) พบว่า ACWR
-สัมพันธ์กับการบาดเจ็บ "ในทิศตรงข้าม" (HRR 0.75, 95% CI 0.59-0.96) และ Impellizzeri
-2020 (IJSPP 15(6):907) ชี้ปัญหา mathematical coupling ของอัตราส่วนนี้
-
-EF แทนที่ด้วยแนวคิด green/yellow/red light ของ Marius Bakken (Norwegian model)
-ที่ใช้ "HR ตอนวอร์มอัพที่เพซเดิม" เป็นตัวชี้ความสด เกณฑ์ % มาจากการวัด SD ของ
-ข้อมูลจริงใน garmin.db: ค่าที่ปรับเรียบ 3 รันแล้วมี SD 4.4% (ต้อง) และ 3.5% (แดน)
-เกณฑ์เฝ้าระวังจึงอยู่ที่ ~1 SD และเกณฑ์ต้องพักที่ ~2 SD
+สูตรความเร็ว/HR ยังใช้ดูแนวโน้มคนเดิมได้ แต่รันทั่วไปไม่ได้มาตรฐานและไม่วัด oxygen cost
+จึงไม่ใช่ running economy หรือความสด. ACWR-like ratio และ cutoff EF ถูกถอดออกทั้งหมด.
 """
 
 import ast
 import datetime
+import inspect
 import unittest
 from pathlib import Path
 
@@ -45,21 +39,19 @@ def extract_helpers(*names):
 HELPERS = extract_helpers(
     "EASY_MAX_PCT",
     "EF_MIN_DISTANCE_M",
-    "EF_RECENT_RUNS",
+    "EF_RECENT_DAYS",
     "EF_BASELINE_DAYS",
-    "EF_BASELINE_MIN_RUNS",
+    "EF_BASELINE_MIN_DAYS",
     "EF_STALE_DAYS",
-    "EF_WATCH_PCT",
-    "EF_REST_PCT",
-    "EF_GAIN_PCT",
     "efficiency_factor",
     "easy_run_efficiency",
+    "efficiency_windows",
     "efficiency_change_pct",
     "efficiency_recent_value",
     "efficiency_status",
     "efficiency_display",
     "load_volume_display",
-    "load_baseline_display",
+    "load_context_line",
     "compute_load_windows",
     "team_status",
 )
@@ -112,6 +104,21 @@ class EasyRunSelectionTests(unittest.TestCase):
 
         self.assertTrue(HELPERS["easy_run_efficiency"](runs, None).empty)
 
+    def test_multiple_garmin_records_on_one_day_contribute_one_daily_value(self):
+        """Warm-up/main/cool-down records must not count as three independent days."""
+        runs = easy_runs([
+            ("2026-08-01", 2000.0, 600.0, 120.0),
+            ("2026-08-01", 4000.0, 1200.0, 140.0),
+            ("2026-08-01", 2000.0, 600.0, 130.0),
+        ])
+
+        result = HELPERS["easy_run_efficiency"](runs, lthr=170)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["date"], pd.Timestamp("2026-08-01"))
+        # 8 km / 40 min = 200 m/min; duration-weighted HR = 132.5 bpm.
+        self.assertAlmostEqual(result.iloc[0]["ef"], 200.0 / 132.5, places=6)
+
 
 class EfficiencyChangeTests(unittest.TestCase):
     @staticmethod
@@ -129,6 +136,34 @@ class EfficiencyChangeTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(pct, -10.0, places=6)
+
+    def test_chart_baseline_window_excludes_older_history(self):
+        rows = [
+            ("2026-06-01", 9.0), ("2026-06-03", 9.0),
+            ("2026-07-10", 1.0), ("2026-07-12", 1.0),
+            ("2026-07-14", 1.0), ("2026-07-16", 1.0),
+            ("2026-07-18", 1.0),
+            ("2026-08-01", 0.9), ("2026-08-03", 0.9),
+            ("2026-08-05", 0.9),
+        ]
+
+        windows = HELPERS["efficiency_windows"](
+            self._series(rows), today=datetime.date(2026, 8, 6)
+        )
+
+        self.assertIsNotNone(windows)
+        self.assertEqual(len(windows["baseline"]), 5)
+        self.assertAlmostEqual(windows["baseline_median"], 1.0, places=6)
+
+    def test_baseline_does_not_include_any_of_the_three_recent_runs(self):
+        baseline = [(f"2026-07-{day:02d}", 1.00) for day in (10, 12, 14, 16, 18)]
+        recent = [("2026-07-30", 0.80), ("2026-08-02", 0.80), ("2026-08-05", 0.80)]
+
+        pct = HELPERS["efficiency_change_pct"](
+            self._series(baseline + recent), today=datetime.date(2026, 8, 6)
+        )
+
+        self.assertAlmostEqual(pct, -20.0, places=6)
 
     def test_not_enough_baseline_runs_reports_missing_instead_of_zero(self):
         rows = [("2026-08-01", 1.0), ("2026-08-03", 1.0), ("2026-08-05", 1.0),
@@ -174,7 +209,7 @@ class EfficiencyChangeTests(unittest.TestCase):
 class EfficiencyRecentValueTests(unittest.TestCase):
     """ตัวเลข EF ที่โชว์ต้องผ่านเกณฑ์ 'ตอนนี้' เดียวกับที่ใช้ตัดสิน
 
-    พี่เก้ามีรัน easy 3 ครั้งล่าสุดห่างกัน 16 วัน (26/07 · 29/07 · 11/08) — median
+    พี่เก้ามีข้อมูลวิ่ง easy 3 วันล่าสุดห่างกัน 16 วัน (26/07 · 29/07 · 11/08) — median
     ของสามค่านั้นคำนวณได้ก็จริง แต่ `efficiency_change_pct` ตัดสินแล้วว่าไม่ใช่
     ความสดปัจจุบัน แท็บซ้อมจึงต้องไม่โชว์ตัวเลขนั้นคู่กับป้าย "ข้อมูลไม่พอ"
     """
@@ -207,16 +242,12 @@ class EfficiencyRecentValueTests(unittest.TestCase):
 
 
 class EfficiencyStatusTests(unittest.TestCase):
-    def test_thresholds_follow_the_measured_spread_of_the_athletes_own_data(self):
+    def test_every_available_value_is_information_not_a_readiness_colour(self):
         status = HELPERS["efficiency_status"]
 
         self.assertEqual(status(float("nan"))[1], "ข้อมูลไม่พอ")
-        self.assertEqual(status(8.0)[0], "🔵")     # >= +5% ดีขึ้นชัด
-        self.assertEqual(status(0.0)[0], "🟢")     # อยู่ในช่วงแกว่งปกติ
-        self.assertEqual(status(-2.9)[0], "🟢")
-        self.assertEqual(status(-3.1)[0], "🟡")    # ~1 SD
-        self.assertEqual(status(-6.9)[0], "🟡")
-        self.assertEqual(status(-7.1)[0], "🔴")    # ~2 SD
+        for value in (8.0, 0.0, -2.9, -3.1, -6.9, -7.1):
+            self.assertEqual(status(value), ("🔵", "แนวโน้มประกอบ"))
 
     def test_display_shows_direction_and_never_a_bare_ratio(self):
         display = HELPERS["efficiency_display"]
@@ -227,12 +258,7 @@ class EfficiencyStatusTests(unittest.TestCase):
 
 
 class LoadTrendDisplayTests(unittest.TestCase):
-    """โหลด 7 วันแยกเป็นสองค่า 27 ส.ค. 69 — ตัวดิบพกหน่วย ส่วนทิศทางเป็น % ล้วน
-
-    เดิมเป็นสตริงเดียว ``"64.1 km · +18% จากฐาน 28 วัน"`` ซึ่งอ่านข้ามคนไม่ได้
-    เพราะหน่วยขึ้นกับรุ่นนาฬิกา — พฤติกรรมที่คุมไว้ยังเป็นข้อเดิม: ตัวดิบต้องพกหน่วย
-    ของตัวเองเสมอ และค่าที่ไม่มีต้องเป็นขีดกลาง ไม่ใช่ตัวเลขที่ไม่เคยมี
-    """
+    """โหลด 7 วันและค่าเฉลี่ย 28 วันต้องอยู่คนละตัวเลข ไม่หารเป็น ratio."""
 
     def test_seven_day_load_is_shown_raw_with_its_own_unit(self):
         volume = HELPERS["load_volume_display"]
@@ -240,18 +266,17 @@ class LoadTrendDisplayTests(unittest.TestCase):
         self.assertEqual(volume(64.1, "ระยะวิ่ง", "km"), "64.1 km")
         self.assertEqual(volume(711.0, "training_load", "TL"), "711 TL")
 
-    def test_direction_is_a_bare_percent_so_it_reads_across_athletes(self):
-        baseline = HELPERS["load_baseline_display"]
-
-        self.assertEqual(baseline(64.1, 54.3), "+18%")
-        self.assertEqual(baseline(711.0, 515.0), "+38%")
-
     def test_load_without_a_baseline_still_shows_the_raw_number(self):
-        volume, baseline = HELPERS["load_volume_display"], HELPERS["load_baseline_display"]
+        volume = HELPERS["load_volume_display"]
 
         self.assertEqual(volume(64.1, "ระยะวิ่ง", "km"), "64.1 km")
-        self.assertEqual(baseline(64.1, float("nan")), "–")
         self.assertEqual(volume(float("nan"), "ระยะวิ่ง", "km"), "–")
+
+    def test_context_keeps_current_and_rolling_values_separate(self):
+        line = HELPERS["load_context_line"]("64.1 km", "54.3 km/สัปดาห์", 5, "วิ่ง")
+
+        self.assertEqual(line, "64.1 km · เฉลี่ย 28 วัน 54.3 km/สัปดาห์ · 5 เซสชัน (วิ่ง)")
+        self.assertNotIn("%", line)
 
 
 class LoadWindowsTests(unittest.TestCase):
@@ -270,49 +295,55 @@ class LoadWindowsTests(unittest.TestCase):
 
 
 class TeamStatusTests(unittest.TestCase):
-    def test_a_large_efficiency_drop_calls_for_rest_on_its_own(self):
-        status = HELPERS["team_status"](
-            -9.0, [], has_workload=True, wellness_core_count=4
-        )
+    def test_pace_hr_never_calls_for_rest_because_status_cannot_see_it(self):
+        """เดิมข้อนี้ส่ง EF = -9% เข้าไปแล้วดูว่ายังเขียวไหม ตอนนี้แรงกว่านั้น:
+        ``team_status()`` ไม่รับค่า pace-HR เข้ามาเลย จึงเอาไปตัดสินไม่ได้แม้จะอยากทำ
 
-        self.assertEqual(status, "🔴 ต้องพัก/ลดโหลด")
+        ถ้าใครต่อ pace-HR กลับเข้าคำตัดสิน ต้องเพิ่มพารามิเตอร์ก่อน ซึ่งข้อนี้จะแดงทันที
+        """
+        params = inspect.signature(HELPERS["team_status"]).parameters
+
+        self.assertEqual(
+            [], [name for name in params
+                 if any(word in name.lower() for word in ("ef", "efficiency", "pace"))],
+        )
 
     def test_missing_efficiency_does_not_block_green_when_training_data_exists(self):
-        # พี่เก้าซ้อม HIIT/indoor เป็นหลัก จึงแทบไม่มีรัน easy ให้คำนวณ EF
-        # ขาด EF ต้องไม่ทำให้เขาค้างที่ "ข้อมูลไม่พอ" ตลอดกาลทั้งที่ข้อมูลซ้อมครบ
+        # พี่เก้าซ้อม HIIT/indoor เป็นหลัก จึงแทบไม่มีรัน easy ให้คำนวณ pace-HR
+        # ขาดค่านั้นต้องไม่ทำให้เขาค้างที่ "ข้อมูลไม่พอ" ตลอดกาลทั้งที่ข้อมูลซ้อมครบ
         status = HELPERS["team_status"](
-            float("nan"), [], has_workload=True, wellness_core_count=4
+            [], has_workload=True, wellness_core_count=4
         )
 
-        self.assertEqual(status, "🟢 พร้อมซ้อม")
+        self.assertEqual(status, "🟢 ไม่พบสัญญาณเตือนจากอุปกรณ์")
 
     def test_thin_wellness_or_no_training_evidence_still_refuses_to_go_green(self):
         team_status = HELPERS["team_status"]
 
         self.assertEqual(
-            team_status(0.0, [], has_workload=True, wellness_core_count=2),
+            team_status([], has_workload=True, wellness_core_count=2),
             "⚪ ข้อมูลไม่พอ",
         )
         self.assertEqual(
-            team_status(0.0, [], has_workload=False, wellness_core_count=4),
+            team_status([], has_workload=False, wellness_core_count=4),
             "⚪ ข้อมูลไม่พอ",
         )
         self.assertEqual(
-            team_status(float("nan"), [], has_workload=False, wellness_core_count=0),
+            team_status([], has_workload=False, wellness_core_count=0),
             "⚪ ไม่มีข้อมูล",
         )
 
-    def test_flags_keep_their_existing_escalation(self):
+    def test_correlated_flags_do_not_vote_the_athlete_into_an_automatic_rest_order(self):
         team_status = HELPERS["team_status"]
 
         self.assertEqual(
-            team_status(0.0, ["นอนแย่ (52)"], has_workload=True, wellness_core_count=4),
-            "🟡 เฝ้าระวัง",
+            team_status(["นอนแย่ (52)"], has_workload=True, wellness_core_count=4),
+            "🟡 ควรทบทวนก่อนซ้อม",
         )
         self.assertEqual(
-            team_status(0.0, ["นอนแย่ (52)", "HRV LOW"],
+            team_status(["นอนแย่ (52)", "HRV LOW"],
                         has_workload=True, wellness_core_count=4),
-            "🔴 ต้องพัก/ลดโหลด",
+            "🟡 ควรทบทวนก่อนซ้อม",
         )
 
 
@@ -323,6 +354,7 @@ class AcwrIsGoneTests(unittest.TestCase):
         self.assertNotIn("acwr_status", DASHBOARD_SRC)
         self.assertNotIn("acwr_display", DASHBOARD_SRC)
         self.assertNotIn("Acute:Chronic Workload Ratio", DASHBOARD_SRC)
+        self.assertNotIn("(acute / chronic_wk", DASHBOARD_SRC)
 
     def test_the_training_tab_no_longer_paints_ratio_risk_bands(self):
         self.assertNotIn("เสี่ยงบาดเจ็บ > 1.5", DASHBOARD_SRC)

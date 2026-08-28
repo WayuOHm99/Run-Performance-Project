@@ -202,11 +202,8 @@ class DashboardCompletenessSourceTests(unittest.TestCase):
         ):
             self.assertIn(snippet, DASHBOARD_SRC)
 
-    def test_red_athlete_status_is_not_presented_as_a_system_failure(self):
-        # เจตนาเดิมยังอยู่: สถานะแดงคือคำเตือนเรื่องตัวนักกีฬา ไม่ใช่ระบบพัง — ถ้าอ่านผิด
-        # โค้ชจะไปไล่แก้ sync ที่ไม่ได้เสีย  ส่วนวิธีวาดเปลี่ยนไปเป็นแผงคำตัดสิน (ใบงาน #18)
-        # จึงเลิกผูกกับกล่อง st.warning ที่เลือกด้วยอีโมจินำหน้าสตริง
-        self.assertIn("ไม่ใช่ข้อผิดพลาดของระบบ", DASHBOARD_SRC)
+    def test_device_summary_is_not_presented_as_training_clearance(self):
+        self.assertIn("ข้อมูลจากอุปกรณ์ไม่ใช่คำอนุญาตให้ซ้อม", DASHBOARD_SRC)
         today_tab = DASHBOARD_SRC.split("with tab_today:", 1)[1]
         today_tab = today_tab.split("with tab_health:", 1)[0]
         self.assertNotIn("st.error(", today_tab)
@@ -323,9 +320,8 @@ class LoadTrendDisplayTests(unittest.TestCase):
 
     def test_missing_load_shows_a_dash_instead_of_a_base_it_never_used(self):
         volume = extract_load_display("load_volume_display")
-        baseline = extract_load_display("load_baseline_display")
         self.assertEqual(volume(float("nan"), "ระยะวิ่ง", "km"), "–")
-        self.assertEqual(baseline(float("nan"), float("nan")), "–")
+        self.assertEqual(volume(float("nan"), "ระยะวิ่ง", "km/สัปดาห์"), "–")
 
 
 class ChartGapPolicyTests(unittest.TestCase):

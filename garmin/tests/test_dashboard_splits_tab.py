@@ -37,10 +37,9 @@ EMOJI = re.compile(
 
 
 def seed_session_with_splits(conn):
-    """กิจกรรมเดียวที่มี splits 8 รอบและแผ่วปลายชัด — พอให้การ์ด Pacing ถูกวาด
+    """กิจกรรมเดียวที่มี splits 8 รอบและครึ่งหลังช้าชัด — พอให้สรุปเลขดิบถูกวาด
 
-    ครึ่งหลังช้ากว่าครึ่งแรกเกิน 2% ซึ่งเป็นเงื่อนไขของคำตัดสิน "แผ่วปลาย"
-    ถ้าไม่แผ่วจริง การ์ดจะขึ้นคำอื่นและเทสจะตรวจไม่ตรงเคสที่ตั้งใจ
+    ไม่มีคำตัดสินแผ่ว/นิ่ง/negative split เพราะต้องรู้เป้าหมาย เส้นทาง และความชันก่อน
     """
     conn.execute(
         "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
@@ -56,7 +55,7 @@ def seed_session_with_splits(conn):
         (f"{day.isoformat()} 06:00:00",),
     )
     for split_num in range(1, 9):
-        # ครึ่งแรกเพซ 5.7 ครึ่งหลัง 6.3 = ช้าลง ~10.5% → "แผ่วปลาย"
+        # ครึ่งแรกเพซ 5.7 ครึ่งหลัง 6.3 = ครึ่งหลังช้าลง ~10.5%
         pace = 5.7 if split_num <= 4 else 6.3
         conn.execute(
             "INSERT INTO fact_activity_split ("
@@ -88,17 +87,16 @@ class SplitsTabPrintsInBlackAndWhiteTests(unittest.TestCase):
             "ยังมีอีโมจิบนหน้าจอ:\n" + "\n".join(f"- {t}" for t in offenders),
         )
 
-    def test_the_pacing_verdict_still_says_what_happened(self):
-        """ยามคู่กับข้อบน — ตัดอีโมจิได้ แต่คำตัดสินต้องยังอ่านออกว่าเกิดอะไรขึ้น"""
+    def test_the_pacing_summary_reports_the_raw_difference_without_a_verdict(self):
+        """รายงานสิ่งที่วัดได้ โดยไม่ตัดสินเซสชันเมื่อไม่รู้จุดประสงค์และเส้นทาง"""
         pacing = [
             element for element in self.tab.get("metric")
-            if element.label == "Pacing"
+            if element.label == "เพซครึ่งหลังเทียบครึ่งแรก"
         ]
-        self.assertTrue(pacing, "ไม่มีการ์ด Pacing เลย — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
-        self.assertIn(
-            "แผ่วปลาย", pacing[0].value,
-            f"คำตัดสินหายไปพร้อมอีโมจิ: {pacing[0].value!r}",
-        )
+        self.assertTrue(pacing, "ไม่มีการ์ดเทียบเพซ — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
+        self.assertRegex(pacing[0].value, r"\+10(\.[0-9])?%")
+        self.assertIn("เป้าหมายเซสชัน", pacing[0].proto.help)
+        self.assertNotIn("แผ่วปลาย", pacing[0].value)
 
 
 if __name__ == "__main__":

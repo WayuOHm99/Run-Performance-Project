@@ -1,10 +1,10 @@
 """แท็บ "วันนี้" — แผงตัดสินแทน st.metric 17 ช่อง (เฟส 3 ของใบงาน #18)
 
 ที่มา: แท็บนี้เคยวางตัวเลข 17 ช่องเรียงเท่ากันหมด โค้ชที่เปิดตอนเช้าจึงต้องอ่าน
-ทุกช่องก่อนจะรู้ว่า "วันนี้ต้องตัดสินใจอะไร" ทั้งที่ตัวตัดสินมีตัวเดียวคือ EF
+ทุกช่องก่อนจะรู้ว่า "วันนี้มีสัญญาณอะไร" และเคยให้น้ำหนัก EF เกินหลักฐาน
 
-แผงใหม่เรียงตามลำดับการตัดสินใจ: คำตัดสิน → ธงที่ทำให้ตัดสินแบบนั้น → ค่าที่
-ประกอบคำตัดสิน → บริบทโหลด → เซสชันจริง  ส่วนคำอธิบายที่เคยเห็นตลอดถูกพับเข้า
+แผงใหม่เรียงตามลำดับอ่าน: สัญญาณ → ธงจากอุปกรณ์ → ค่าประกอบ → บริบทโหลด
+→ เซสชันจริง  ส่วนคำอธิบายที่เคยเห็นตลอดถูกพับเข้า
 expander ตามเกณฑ์วัดผลของใบงาน
 
 กับดักที่เทสชุดนี้ต้องกัน: แท็บนี้เคยตัดสินชนิดกล่องเตือนด้วย
@@ -55,18 +55,12 @@ HELPERS = extract_helpers(
     "C_CRIT",
     "C_GOOD",
     "C_WARN",
-    "EF_GAIN_PCT",
-    "EF_REST_PCT",
-    "EF_SCALE_MAX",
-    "EF_SCALE_MIN",
-    "EF_WATCH_PCT",
     "INTENSITY_CHIP_COLORS",
     "INTENSITY_ORDER",
     "STATUS_COLORS",
     "STATUS_SHAPES",
     "STATUS_TEXT_COLORS",
     "baseline_median",
-    "ef_scale_position",
     "fmt_pace",
     "fmt_sec",
     "render_session_row",
@@ -174,39 +168,16 @@ class SparklineTests(unittest.TestCase):
         self.assertEqual(len(points), 3)
 
 
-class EfScaleTests(unittest.TestCase):
-    """EF คือตัวตัดสินตัวเดียว จึงได้แถบเกณฑ์ของตัวเอง ไม่ใช่ตัวเลขลอย ๆ"""
-
-    def test_marker_position_is_clamped_inside_the_bar(self):
-        position = HELPERS["ef_scale_position"]
-        self.assertEqual(position(-99.0), 0.0)
-        self.assertEqual(position(99.0), 1.0)
-
-    def test_no_value_has_no_position_instead_of_defaulting_to_the_middle(self):
-        # ค่าว่างที่ถูกวาดไว้กลางแถบอ่านได้ว่า "ปกติ" ซึ่งตรงข้ามกับความจริง
-        self.assertIsNone(HELPERS["ef_scale_position"](float("nan")))
-
-    def test_position_rises_with_the_value(self):
-        position = HELPERS["ef_scale_position"]
-        self.assertLess(position(HELPERS["EF_REST_PCT"]), position(HELPERS["EF_WATCH_PCT"]))
-        self.assertLess(position(HELPERS["EF_WATCH_PCT"]), position(0.0))
-        self.assertLess(position(0.0), position(HELPERS["EF_GAIN_PCT"]))
-
-    def test_the_scale_spans_every_threshold_the_project_uses(self):
-        self.assertLess(HELPERS["EF_SCALE_MIN"], HELPERS["EF_REST_PCT"])
-        self.assertGreater(HELPERS["EF_SCALE_MAX"], HELPERS["EF_GAIN_PCT"])
-
-
 class VerdictTests(unittest.TestCase):
-    """คำตัดสินต้องอ่านได้ก่อนตัวเลขใด ๆ และต้องไม่พึ่งอีโมจิ"""
+    """สรุปสัญญาณต้องอ่านได้ก่อนตัวเลขใด ๆ และต้องไม่พึ่งอีโมจิ"""
 
     ROW = {
         "นักกีฬา": "Tong",
-        "สถานะ": "🟡 เฝ้าระวัง",
-        "ประสิทธิภาพการวิ่งเบา (EF)": "+2% จากฐาน 28 วัน",
-        "โซน EF": "🟢 ปกติ",
+        "สถานะ": "🟡 ควรทบทวนก่อนซ้อม",
+        "pace–HR trend": "+2% จากฐาน 28 วัน",
+        "สถานะ pace–HR": "🔵 แนวโน้มประกอบ",
         "โหลด 7 วัน": "32.6 km",
-        "เทียบฐานตัวเอง": "-12%",
+        "ค่าเฉลี่ยโหลด 28 วัน": "29.4 km/สัปดาห์",
         "ขอบเขตโหลด": "วิ่ง",
         "เซสชัน 7 วัน": 5,
         "ธงเฝ้าระวัง": "HRV UNBALANCED",
@@ -215,7 +186,7 @@ class VerdictTests(unittest.TestCase):
     def test_the_verdict_reads_as_a_sentence_about_the_athlete(self):
         markup = HELPERS["render_today_verdict"](dict(self.ROW))
         self.assertIn("Tong", markup)
-        self.assertIn("เฝ้าระวัง", markup)
+        self.assertIn("ควรทบทวนก่อนซ้อม", markup)
 
     def test_status_arrives_as_a_drawn_shape_so_it_survives_black_and_white_print(self):
         markup = HELPERS["render_today_verdict"](dict(self.ROW))
@@ -230,14 +201,16 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("นอนแย่ (52)", markup)
         self.assertNotIn("|", markup)
 
-    def test_a_red_verdict_says_it_is_the_athlete_not_a_broken_sync(self):
-        # ข้อความนี้เคยอยู่ในกล่อง st.warning ที่เลือกด้วย startswith("🔴")
-        row = dict(self.ROW, **{"สถานะ": "🔴 ต้องพัก/ลดโหลด"})
+    def test_verdict_says_device_data_is_not_training_clearance(self):
+        row = dict(self.ROW)
         markup = HELPERS["render_today_verdict"](row)
-        self.assertIn("ไม่ใช่ข้อผิดพลาดของระบบ", markup)
+        self.assertIn("ไม่ใช่คำอนุญาตให้ซ้อม", markup)
+        self.assertIn("อาการเจ็บ", markup)
 
     def test_no_flags_reads_as_none_rather_than_an_empty_box(self):
-        row = dict(self.ROW, **{"สถานะ": "🟢 พร้อมซ้อม", "ธงเฝ้าระวัง": "—"})
+        row = dict(self.ROW, **{
+            "สถานะ": "🟢 ไม่พบสัญญาณเตือนจากอุปกรณ์", "ธงเฝ้าระวัง": "—"
+        })
         markup = HELPERS["render_today_verdict"](row)
         self.assertIn("ไม่มีธงเฝ้าระวัง", markup)
 
@@ -247,12 +220,12 @@ class VerdictTests(unittest.TestCase):
         self.assertNotIn("<script>", markup)
         self.assertIn("&lt;script&gt;", markup)
 
-    def test_the_load_figure_is_the_one_that_reads_across_athletes(self):
-        # ตัวดิบมีหน่วยตามรุ่นนาฬิกา (TL หรือ km) อ่านข้ามคนไม่ได้ — ตัวดิบพร้อมหน่วย
-        # ยังอยู่ในแผงโหลดรายวันที่อยู่ถัดลงไปในหน้าเดียวกัน ช่องคำตัดสินจึงใช้ % แทน
+    def test_load_windows_are_shown_separately_without_a_ratio(self):
         markup = HELPERS["render_today_verdict"](dict(self.ROW))
-        self.assertIn("-12%", markup)
-        self.assertIn("เทียบฐานตัวเอง", markup)
+        self.assertIn("32.6 km", markup)
+        self.assertIn("29.4 km/สัปดาห์", markup)
+        self.assertIn("ค่าเฉลี่ยโหลด 28 วัน", markup)
+        self.assertNotIn("เทียบฐานตัวเอง", markup)
 
     def test_the_session_count_says_what_it_counted(self):
         # 5 เซสชันของคนที่นับเฉพาะวิ่ง ไม่ใช่ของเดียวกับ 5 เซสชันของคนที่นับทุกกิจกรรม
@@ -365,7 +338,7 @@ class TodayTabSourceTests(unittest.TestCase):
         today_tab = today_tab_source()
         self.assertLessEqual(
             today_tab.count("st.metric("), 5,
-            "แท็บวันนี้ยังวางตัวเลขเรียงเท่ากันหมด ตัวตัดสินจึงจมอยู่ในนั้น",
+            "แท็บวันนี้ยังวางตัวเลขเรียงเท่ากันหมด สัญญาณหลักจึงจมอยู่ในนั้น",
         )
         self.assertTrue("render_today_verdict" in today_tab)
         self.assertTrue("render_today_tile" in today_tab)

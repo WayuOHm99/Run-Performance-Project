@@ -4,9 +4,8 @@
 ไม่มีตัวเลขไหนผิด แต่ 92.6 กับ 323 วางติดกันในคอลัมน์เดียว ตาอ่านว่า "P'kao หนักกว่า
 Dan 3.5 เท่า" ทั้งที่คนละมาตรวัด (Garmin ``training_load`` vs ระยะวิ่ง)
 
-ตัวที่เทียบข้ามคนได้จริงคือ **% เทียบฐาน 28 วันของตัวเอง** เพราะแต่ละคนเทียบกับตัวเอง
-ไฟล์นี้จึงคุมสองข้อ: ตัวเทียบได้ต้องมาก่อนตัวดิบ · และฐานที่เอามาหารต้องไม่ถูกเจือจาง
-ด้วยวันก่อนที่นาฬิกาจะเริ่มให้ ``training_load``
+หลัง audit 27 ส.ค. ระบบไม่หาร 7/28 วันเป็น ACWR-like percent อีก จึงคุมให้แสดงค่าดิบ
+สองช่วงแยกกันพร้อมหน่วย และไม่ทำให้วันที่ไม่มี ``training_load`` หายเงียบ
 """
 
 import ast
@@ -53,7 +52,6 @@ def extract_helpers(*names):
 
 HELPERS = extract_helpers(
     "load_volume_display",
-    "load_baseline_display",
     "load_session_scope",
     "load_context_line",
     "STATUS_COLORS",
@@ -88,25 +86,6 @@ class LoadVolumeIsOnlyReadableAgainstItself(unittest.TestCase):
         self.assertEqual(volume(float("nan"), "ระยะวิ่ง", "km"), "–")
 
 
-class BaselineIsTheOnlyCrossAthleteNumber(unittest.TestCase):
-    """% เทียบฐานตัวเองอ่านข้ามคนได้ เพราะทุกคนหารด้วยฐานของตัวเอง"""
-
-    def test_baseline_reports_the_direction_without_any_unit(self):
-        baseline = HELPERS["load_baseline_display"]
-
-        self.assertEqual(baseline(711.0, 515.0), "+38%")
-        self.assertEqual(baseline(64.1, 54.3), "+18%")
-        self.assertEqual(baseline(40.0, 50.0), "-20%")
-
-    def test_no_baseline_yet_is_a_dash_not_a_zero_percent(self):
-        # 0% แปลว่า "ทำเท่าฐานเป๊ะ" ซึ่งคนละเรื่องกับ "ยังไม่มีฐานให้เทียบ"
-        baseline = HELPERS["load_baseline_display"]
-
-        self.assertEqual(baseline(64.1, float("nan")), "–")
-        self.assertEqual(baseline(64.1, 0.0), "–")
-        self.assertEqual(baseline(float("nan"), 54.3), "–")
-
-
 class SessionCountMeansDifferentThingsPerAthlete(unittest.TestCase):
     """คนที่ fallback เป็นระยะวิ่งนับเฉพาะการวิ่ง คนที่ใช้ TL นับทุกกิจกรรม"""
 
@@ -117,30 +96,31 @@ class SessionCountMeansDifferentThingsPerAthlete(unittest.TestCase):
         self.assertEqual(scope("ระยะวิ่ง"), "วิ่ง")
 
 
-class ContextLineLeadsWithTheComparableNumber(unittest.TestCase):
-    def test_the_baseline_percent_comes_before_the_raw_volume(self):
-        line = HELPERS["load_context_line"]("+25%", "92.6 km", 15, "วิ่ง")
+class ContextLineKeepsTheTwoWindowsSeparate(unittest.TestCase):
+    def test_current_and_rolling_load_are_both_named_with_units(self):
+        line = HELPERS["load_context_line"]("92.6 km", "85.0 km/สัปดาห์", 15, "วิ่ง")
 
-        self.assertLess(line.index("+25%"), line.index("92.6 km"))
+        self.assertIn("92.6 km", line)
+        self.assertIn("เฉลี่ย 28 วัน 85.0 km/สัปดาห์", line)
+        self.assertNotIn("%", line)
         self.assertIn("15 เซสชัน", line)
         self.assertIn("วิ่ง", line)
 
-    def test_a_missing_baseline_says_so_instead_of_leading_with_a_dash(self):
-        line = HELPERS["load_context_line"]("–", "92.6 km", 15, "ทุกกิจกรรม")
+    def test_a_missing_rolling_window_says_so(self):
+        line = HELPERS["load_context_line"]("92.6 km", "–", 15, "ทุกกิจกรรม")
 
-        self.assertIn("ยังไม่มีฐาน 28 วัน", line)
+        self.assertIn("ยังไม่มีค่าเฉลี่ย 28 วัน", line)
         self.assertIn("92.6 km", line)
-        self.assertNotIn("– จากฐาน", line)
 
 
 class TeamCardShowsBothNumbersInTheRightOrder(unittest.TestCase):
     ROW = {
         "นักกีฬา": "Tong",
-        "สถานะ": "🟡 เฝ้าระวัง",
-        "ประสิทธิภาพการวิ่งเบา (EF)": "+2% จากฐาน 28 วัน",
-        "โซน EF": "🟢 ปกติ",
+        "สถานะ": "🟡 ควรทบทวนก่อนซ้อม",
+        "pace–HR trend": "+2% จากฐาน 28 วัน",
+        "สถานะ pace–HR": "🔵 แนวโน้มประกอบ",
         "โหลด 7 วัน": "32.6 km",
-        "เทียบฐานตัวเอง": "-12%",
+        "ค่าเฉลี่ยโหลด 28 วัน": "29.4 km/สัปดาห์",
         "ขอบเขตโหลด": "วิ่ง",
         "เซสชัน 7 วัน": 5,
         "Sleep": 78.0,
@@ -158,10 +138,12 @@ class TeamCardShowsBothNumbersInTheRightOrder(unittest.TestCase):
         self.assertIsNotNone(found, "การ์ดไม่มีบรรทัดโหลด 7 วันแล้ว")
         return found.group(1)
 
-    def test_the_card_leads_with_the_number_that_survives_a_cross_athlete_read(self):
+    def test_the_card_shows_both_windows_without_a_ratio(self):
         line = self._load_line(self.ROW)
 
-        self.assertLess(line.index("-12%"), line.index("32.6 km"))
+        self.assertIn("32.6 km", line)
+        self.assertIn("29.4 km/สัปดาห์", line)
+        self.assertNotIn("%", line)
 
     def test_the_card_says_which_sessions_it_counted(self):
         # 5 เซสชันของคนที่นับเฉพาะวิ่ง ไม่ใช่ของเดียวกับ 5 เซสชันของคนที่นับทุกกิจกรรม
@@ -171,9 +153,8 @@ class TeamCardShowsBothNumbersInTheRightOrder(unittest.TestCase):
             self._load_line(dict(self.ROW, **{"ขอบเขตโหลด": "ทุกกิจกรรม"})),
         )
 
-    def test_the_card_still_calls_the_load_line_context_not_a_verdict(self):
-        # ยามของกฎเดิม: ตัวเลขนี้ไม่ตัดสินสถานะ และบรรทัดนี้ต้องพูดแบบนั้นต่อไป
-        self.assertIn("บริบท", self._load_line(self.ROW))
+    def test_the_card_says_it_does_not_compute_a_risk_ratio(self):
+        self.assertIn("ไม่คำนวณอัตราส่วนเสี่ยง", self._load_line(self.ROW))
 
 
 def seed_watch_change(conn):
@@ -246,7 +227,7 @@ class BaselineIsNotDilutedByDaysTheWatchNeverReported(unittest.TestCase):
             notes,
             "แท็บทีมไม่ได้บอกว่าหน่วยของโหลดขึ้นกับรุ่นนาฬิกา",
         )
-        self.assertIn("เทียบฐานตัวเอง", notes[0])
+        self.assertIn("ไม่หารเป็น ACWR", notes[0])
 
 
 def seed_watch_dropped(conn):

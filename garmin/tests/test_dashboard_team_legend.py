@@ -22,7 +22,7 @@ from dashboard_tab_harness import (  # noqa: E402
     render_tab,
 )
 
-FRESHNESS_LABEL = "ความสด (HRV 7 วัน)"
+HRV_TREND_LABEL = "เทรนด์ HRV 7 คืน"
 
 EMOJI = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U0000FE0F]"
@@ -97,7 +97,7 @@ class TeamLegendMatchesTheCardsTests(unittest.TestCase):
     def _legend(self):
         blocks = [
             element.value for element in self.tab.get("markdown")
-            if element.value and "**สถานะ:**" in element.value
+            if element.value and "**สรุปสัญญาณจากอุปกรณ์:**" in element.value
         ]
         self.assertTrue(blocks, "ไม่เจอกล่องเกณฑ์ที่ใช้ประเมิน — ข้อมูลทดสอบไม่พอ")
         return blocks[0]
@@ -114,7 +114,7 @@ class TeamLegendMatchesTheCardsTests(unittest.TestCase):
     def test_the_legend_still_names_every_status(self):
         """ยามคู่กับข้อบน — ตัดอีโมจิได้ แต่ต้องยังบอกครบว่ามีสถานะอะไรบ้าง"""
         legend = self._legend()
-        for status in ("ต้องพัก", "เฝ้าระวัง", "พร้อมซ้อม", "ข้อมูลไม่พอ"):
+        for status in ("ควรทบทวนก่อนซ้อม", "ไม่พบสัญญาณเตือนจากอุปกรณ์", "ข้อมูลไม่พอ"):
             self.assertIn(
                 status, legend,
                 f"คำอธิบายไม่ได้พูดถึงสถานะ {status!r} แล้ว",
@@ -151,7 +151,7 @@ def seed_runner_with_hrv(conn):
     """
     conn.execute(
         "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
-        "VALUES (1, 'tester', 'Tester')"
+        "VALUES (1, 'dan', 'Tester')"
     )
     for offset in range(35):
         day = LAST_DAY - datetime.timedelta(days=34 - offset)
@@ -175,11 +175,11 @@ def seed_runner_with_hrv(conn):
         )
 
 
-class LowMileageAthleteStillGetsAFreshnessNumberTests(unittest.TestCase):
-    """นักกีฬาที่วิ่งน้อยต้องไม่ค้าง "ข้อมูลไม่พอ" ถาวรบนการ์ด
+class LowMileageAthleteStillGetsAnHrvTrendTests(unittest.TestCase):
+    """นักกีฬาที่วิ่งน้อยยังเห็น HRV trend ได้โดยไม่เรียกมันว่าความสด
 
-    EF ต้องการรัน easy >= 5 ครั้งใน 28 วัน — P'kao มี 2 การ์ดของคนที่ใช้นาฬิกาดีที่สุด
-    จึงไม่เคยมีตัวเลขความสดให้โค้ชติดตามเลย
+    pace–HR ต้องการข้อมูลวิ่ง easy >= 5 วันใน 28 วัน — P'kao มีข้อมูลไม่พอ
+    จึงใช้เทรนด์ HRV เป็นข้อมูลประกอบเมื่อ pace–HR คำนวณไม่ได้
     """
 
     @classmethod
@@ -203,14 +203,17 @@ class LowMileageAthleteStillGetsAFreshnessNumberTests(unittest.TestCase):
     def test_the_card_shows_an_hrv_number_when_ef_cannot_be_computed(self):
         card = self._card_html()
         self.assertIn(
-            FRESHNESS_LABEL, card,
-            f"การ์ดไม่มีช่อง {FRESHNESS_LABEL!r} ทั้งที่ EF คำนวณไม่ได้ — "
-            "โค้ชจึงไม่มีตัวเลขความสดให้ติดตามเลย",
+            HRV_TREND_LABEL, card,
+            f"การ์ดไม่มีช่อง {HRV_TREND_LABEL!r} ทั้งที่ pace–HR คำนวณไม่ได้",
         )
         self.assertRegex(
             card, r"-1[23](\.[0-9])?%",
-            "ช่องความสดไม่ได้แสดง % ที่ HRV ต่างจากฐาน "
+            "ช่องเทรนด์ HRV ไม่ได้แสดง % ที่ต่างจากฐาน "
             "(ข้อมูลทดสอบตั้งไว้ที่ 46 เทียบฐาน 53 = -13.2%)",
+        )
+        self.assertIn(
+            "7/7 คืน · ฐาน 28/28 คืน", card,
+            "การ์ดไม่บอกจำนวนคืนจริงที่ใช้คำนวณ HRV trend",
         )
 
     def test_an_athlete_with_enough_easy_runs_still_sees_ef(self):
@@ -227,11 +230,11 @@ class LowMileageAthleteStillGetsAFreshnessNumberTests(unittest.TestCase):
             and "<style>" not in element.value
         ][0]
         self.assertIn(
-            "ประสิทธิภาพวิ่งเบา", card,
-            "คนที่มีรัน easy พอกลับไม่เห็น EF",
+            "แนวโน้ม pace–HR รันเบา", card,
+            "คนที่มีรัน easy พอกลับไม่เห็น pace–HR trend",
         )
         self.assertNotIn(
-            FRESHNESS_LABEL, card,
+            HRV_TREND_LABEL, card,
             "คนที่มีรัน easy พอ (และมี HRV ครบ) กลับถูกเปลี่ยนไปใช้ตัวแทน",
         )
 

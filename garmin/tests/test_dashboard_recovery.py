@@ -31,14 +31,10 @@ def extract_helpers(*names):
             nodes.append(node)
             found.add(node.name)
         elif isinstance(node, ast.Assign):
-            # ค่าคงที่ระดับโมดูลที่ helper อ้างถึง (เช่น เกณฑ์ EF_*) ต้องมาด้วย
-            # ไม่งั้น helper จะ NameError ตอนถูกเรียกในเทส
             targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
             if targets & wanted:
                 nodes.append(node)
                 found |= targets & wanted
-            elif targets & {"EF_REST_PCT", "EF_WATCH_PCT", "EF_GAIN_PCT"}:
-                nodes.append(node)
     missing = wanted - found
     if missing:
         raise AssertionError(f"dashboard.py missing helper(s): {sorted(missing)}")
@@ -55,6 +51,7 @@ def extract_helpers(*names):
 
 HELPERS = extract_helpers(
     "fmt_num",
+    "fmt_signed_delta",
     "has_any_value",
     "available_series",
     "latest_field",
@@ -75,6 +72,7 @@ HELPERS = extract_helpers(
     "compute_load_windows",
     "aggregate_pace_min_per_km",
     "usable_hr_zone_rows",
+    "hr_zone_coverage",
 )
 
 
@@ -318,6 +316,20 @@ class TrainingMathTests(unittest.TestCase):
 
         self.assertEqual(usable["activity_id"].tolist(), [3])
 
+    def test_hr_zone_coverage_uses_all_garmin_duration_as_the_denominator(self):
+        columns = [f"hr_zone{i}_sec" for i in range(1, 6)]
+        activities = pd.DataFrame([
+            {"duration_sec": 600, **dict.fromkeys(columns, 0), "hr_zone2_sec": 480},
+            {"duration_sec": 300, **dict.fromkeys(columns, None)},
+        ])
+
+        coverage = HELPERS["hr_zone_coverage"](activities, columns)
+
+        self.assertEqual(coverage["duration_sec"], 900)
+        self.assertEqual(coverage["classified_sec"], 480)
+        self.assertEqual(coverage["unclassified_sec"], 420)
+        self.assertAlmostEqual(coverage["coverage_pct"], 480 / 900 * 100)
+
 
 class CalendarTests(unittest.TestCase):
     def test_calendar_alignment_inserts_an_explicit_nan_for_a_missing_day(self):
@@ -338,6 +350,13 @@ class FormattingAndVisibilityTests(unittest.TestCase):
     def test_integer_metrics_do_not_show_dot_zero(self):
         self.assertEqual(HELPERS["fmt_num"](93.0), "93")
         self.assertEqual(HELPERS["fmt_num"](44.6, " bpm"), "44.6 bpm")
+
+    def test_rounded_zero_delta_never_displays_a_negative_zero(self):
+        fmt = HELPERS["fmt_signed_delta"]
+
+        self.assertEqual(fmt(-0.4, " bpm"), "0 bpm")
+        self.assertEqual(fmt(1.2, " bpm"), "+1 bpm")
+        self.assertEqual(fmt(-1.2, " bpm"), "-1 bpm")
 
     def test_recovery_minutes_are_formatted_as_hours_and_minutes(self):
         self.assertEqual(HELPERS["fmt_recovery_time"](5_425), "90 ชม. 25 นาที")
@@ -441,24 +460,24 @@ class FormattingAndVisibilityTests(unittest.TestCase):
 
     def test_team_cannot_be_green_when_training_or_core_wellness_is_missing(self):
         status = HELPERS["team_status"](
-            float("nan"), [], has_workload=True, wellness_core_count=0
+            [], has_workload=True, wellness_core_count=0
         )
         self.assertEqual(status, "⚪ ข้อมูลไม่พอ")
 
         status = HELPERS["team_status"](
-            0.0, [], has_workload=True, wellness_core_count=2
+            [], has_workload=True, wellness_core_count=2
         )
         self.assertEqual(status, "⚪ ข้อมูลไม่พอ")
 
         status = HELPERS["team_status"](
-            0.0, [], has_workload=False, wellness_core_count=4
+            [], has_workload=False, wellness_core_count=4
         )
         self.assertEqual(status, "⚪ ข้อมูลไม่พอ")
 
         status = HELPERS["team_status"](
-            0.0, [], has_workload=True, wellness_core_count=4
+            [], has_workload=True, wellness_core_count=4
         )
-        self.assertEqual(status, "🟢 พร้อมซ้อม")
+        self.assertEqual(status, "🟢 ไม่พบสัญญาณเตือนจากอุปกรณ์")
 
     def test_anomaly_copy_flags_values_for_review_without_mutating_frame(self):
         frame = pd.DataFrame({
@@ -547,15 +566,14 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
             DASHBOARD_SRC,
         )
 
-        # สถานะโหลดต้องเตือนแม้ wellness วันนี้ยังไม่มา — เดิมเทสนี้ยืนยันด้วยคอมเมนต์
-        # ตอนนี้ยืนยันด้วยลำดับจริง: แผงคำตัดสินถูกวาดก่อนอ่านค่า wellness ค่าแรก
+        # สรุปสัญญาณต้องวาดแม้ wellness วันนี้ยังไม่มา และต้องมาก่อนรายละเอียดค่าเดี่ยว
         # จึงเป็นไปไม่ได้ที่มันจะไปห้อยอยู่ใต้เงื่อนไข "วันนี้มี wellness ไหม"
         today_tab = DASHBOARD_SRC.split("with tab_today:", 1)[1]
         today_tab = today_tab.split("with tab_health:", 1)[0]
         self.assertLess(
             today_tab.index("render_today_verdict("),
             today_tab.index('latest_field(recent_wellness, "sleep_score")'),
-            "แผงคำตัดสินถูกวาดหลังอ่าน wellness — เสี่ยงเงียบเมื่อวันนี้ยังไม่มีค่า",
+            "แผงสรุปสัญญาณถูกวาดหลังอ่าน wellness — เสี่ยงเงียบเมื่อวันนี้ยังไม่มีค่า",
         )
 
     def test_recovery_averages_use_period_metric_instead_of_silent_mean(self):
@@ -666,7 +684,7 @@ class DashboardSourceIntegrationTests(unittest.TestCase):
             "_lane_paths",
         ):
             self.assertNotIn(operational_text, DASHBOARD_SRC)
-        self.assertIn('st.header("สถานะทีมวันนี้")', DASHBOARD_SRC)
+        self.assertIn('st.header("สัญญาณทีมวันนี้")', DASHBOARD_SRC)
 
     def test_sleep_respiration_is_treated_as_a_finalized_overnight_metric(self):
         self.assertIn(
