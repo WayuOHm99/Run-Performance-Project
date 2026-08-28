@@ -1,5 +1,7 @@
 * text=auto
 
+# hook ทุกตัวใต้ .claude/ รันด้วย bash — CRLF ทำให้พังทั้งไฟล์
+*.sh   text eol=lf
 *.py   text eol=lf
 *.md   text eol=lf
 *.toml text eol=lf
