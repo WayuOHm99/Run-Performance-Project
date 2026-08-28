@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Garmin Connect sync tools for Run-Performance-Project (fetch -> SQLite -> Streamlit dashboard)"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "garminconnect==0.3.9",
+    "garminconnect==0.3.11",
     "streamlit>=1.59.2",
     "pandas>=3.0.3",
     "plotly>=6.9.0",

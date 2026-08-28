@@ -2,6 +2,7 @@ import csv
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import types
@@ -25,6 +26,33 @@ SUBPROCESS_TIMEOUT_SEC = 120
 
 
 class GarminConnectDependencyTests(unittest.TestCase):
+    # 0.3.10 และ 0.3.11 เป็น security release ที่แก้เรื่อง token บนดิสก์โดยตรง —
+    # ปฏิเสธ tokenstore ที่เป็น symlink, เขียนไฟล์ด้วยชื่อ temp ที่เดาไม่ได้ + O_EXCL
+    # แทนชื่อคงที่ที่เปิดด้วย O_TRUNC และเลิกปล่อยเนื้อ token ลง log
+    # helper ตัวนี้คือสิ่งที่นักกีฬารันบนเครื่องตัวเอง จึงห้ามไหลกลับไปต่ำกว่านี้
+    def test_helper_pins_the_release_with_the_symlink_and_o_excl_token_fixes(self):
+        self.assertEqual(TOKEN_SCRIPT.GARMINCONNECT_VERSION, "0.3.11")
+
+    def test_helper_installs_the_same_version_the_project_itself_runs(self):
+        """นักกีฬาต้องได้เวอร์ชันเดียวกับที่เทสชุดนี้รันจริง ไม่ใช่เวอร์ชันที่ค้างอยู่ใน helper.
+
+        เทียบกับ requirements.txt และ pyproject.toml เพราะสองไฟล์นั้นคนแก้ด้วยมือ
+        ส่วน uv.lock ให้ `uv sync --frozen` ใน CI คุมอยู่แล้ว ไม่ต้องตรวจซ้ำที่นี่
+        """
+        garmin_root = Path(__file__).resolve().parents[1]
+        pinned = {}
+        for name in ("requirements.txt", "pyproject.toml"):
+            text = (garmin_root / name).read_text(encoding="utf-8")
+            found = re.findall(r"garminconnect==([0-9][0-9.]*)", text)
+            self.assertEqual(1, len(found), f"{name} ต้องปัก garminconnect ไว้ที่เดียว")
+            pinned[name] = found[0]
+
+        for name, version in pinned.items():
+            self.assertEqual(
+                TOKEN_SCRIPT.GARMINCONNECT_VERSION, version,
+                f"helper ปัก {TOKEN_SCRIPT.GARMINCONNECT_VERSION} แต่ {name} ปัก {version}",
+            )
+
     def test_matching_version_does_not_invoke_pip(self):
         with (
             patch.object(

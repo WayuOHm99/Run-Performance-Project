@@ -30,7 +30,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 MIN_PY = (3, 12)
-GARMINCONNECT_VERSION = "0.3.9"
+GARMINCONNECT_VERSION = "0.3.11"
 GARMINCONNECT_REQUIREMENT = f"garminconnect=={GARMINCONNECT_VERSION}"
 
 _WINDOWS_PRIVATE_ACL = r"""
