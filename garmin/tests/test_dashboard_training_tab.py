@@ -46,7 +46,7 @@ def seed_training(conn):
     """
     conn.execute(
         "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
-        "VALUES (1, 'tester', 'Tester')"
+        "VALUES (1, 'dan', 'Tester')"
     )
     for offset in range(20):
         day = LAST_DAY - datetime.timedelta(days=28 - offset)
@@ -93,16 +93,16 @@ def seed_training(conn):
 
 
 def seed_zone_setup_conflict(conn):
-    """นาฬิกาตั้งโซนต่ำกว่า LTHR จากผลเทส — เคสจริงของ Tong เมื่อ 26 ส.ค. 69
+    """time-in-zone ต่างจากการจำแนกด้วย HR เฉลี่ย — ทั้งสองวิธีวัดคนละอย่าง
 
-    HR สูงสุด 190 ทำให้ระบบประมาณ LTHR = 169 → เพดาน easy 150 bpm
-    ทุกรันวิ่งที่ avg_hr 140 จึงเป็น "เบา" ตามกฎของโปรเจกต์ แต่วินาทีในโซนที่นาฬิกา
+    ใช้ LTHR 171 จาก 5K TT ที่ลงทะเบียนไว้ให้ Tong → เพดาน easy 152 bpm
+    ทุกรันวิ่งที่ avg_hr 140 จึงเป็น "เบา" ตาม working zone แต่เวลาที่นาฬิกา
     เก็บมากลับกองอยู่ Z3 เกือบทั้งหมด = สองเกณฑ์ให้คำตอบคนละอย่าง
     (วัดจริง: Tong เบา 31% ตามโซนนาฬิกา แต่ 72% ตาม %LTHR = ต่าง 41 จุด)
     """
     conn.execute(
         "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
-        "VALUES (1, 'tester', 'Tester')"
+        "VALUES (1, 'tong', 'Tester')"
     )
     for offset in range(16):
         day = LAST_DAY - datetime.timedelta(days=28 - offset)
@@ -183,7 +183,7 @@ class TrainingTabDesignTests(unittest.TestCase):
             if element.proto.help
         ]
         joined = " ".join(helps)
-        for topic in ("SD", "โซนปลอดภัย", "โซน HR จริง"):
+        for topic in ("ไม่ใช่ running economy", "เป้า 80% สากล", "โซน HR จริง"):
             self.assertIn(
                 topic, joined,
                 f"ที่มาของตัวเลขเรื่อง {topic!r} หายไปจากหน้าโดยไม่มีที่อยู่ใหม่",
@@ -215,7 +215,7 @@ class TrainingTabDesignTests(unittest.TestCase):
     def test_no_meaning_is_carried_by_an_emoji(self):
         """ทิศทาง A — อีโมจิหายตอนพิมพ์ขาวดำ ความหมายจึงห้ามฝากไว้กับมัน
 
-        การ์ด EF ส่งคำตัดสินผ่าน ``delta`` ซึ่งเป็นข้อความที่โค้ชอ่าน ไม่ใช่คีย์ภายใน
+        การ์ด pace–HR ส่งคำอธิบายผ่าน ``delta`` ซึ่งเป็นข้อความที่โค้ชอ่าน ไม่ใช่คีย์ภายใน
         """
         texts = []
         for element in self.tab.get("metric"):
@@ -226,17 +226,29 @@ class TrainingTabDesignTests(unittest.TestCase):
             "ยังมีอีโมจิบนหน้าจอ:\n" + "\n".join(f"- {t}" for t in offenders),
         )
 
-    def test_the_ef_verdict_still_says_what_happened(self):
-        """ยามคู่กับข้อบน — ตัดอีโมจิได้ แต่คำตัดสินของ EF ต้องยังอ่านออก"""
+    def test_the_pace_hr_card_still_states_its_interpretation(self):
+        """ยามคู่กับข้อบน — ตัดอีโมจิได้ แต่คำอธิบาย pace–HR ต้องยังอ่านออก"""
         ef_cards = [
             element for element in self.tab.get("metric")
-            if element.label.startswith("EF ล่าสุด")
+            if element.label.startswith("pace–HR ล่าสุด")
         ]
-        self.assertTrue(ef_cards, "ไม่มีการ์ด EF เลย — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
+        self.assertTrue(ef_cards, "ไม่มีการ์ด pace–HR — ข้อมูลทดสอบไม่พอ เทสจะเขียวหลอก")
         self.assertTrue(
             (ef_cards[0].proto.delta or "").strip(),
-            "คำตัดสิน EF หายไปพร้อมอีโมจิ",
+            "คำอธิบาย pace–HR หายไปพร้อมอีโมจิ",
         )
+
+    def test_pace_hr_is_labelled_as_daily_evidence_not_activity_records(self):
+        labels = [element.label for element in self.tab.get("metric")]
+        pace_hr_traces = [
+            trace.name or ""
+            for chart in self.charts
+            for trace in chart.data
+            if "pace–HR" in (trace.name or "")
+        ]
+
+        self.assertTrue(any("3 วัน" in label for label in labels), labels)
+        self.assertTrue(any("ต่อวัน" in name for name in pace_hr_traces), pace_hr_traces)
 
     def test_intensity_split_separates_running_from_cross_training(self):
         """โดนัทต้องแยกวงการวิ่งออกจากวงทั้งหมดเมื่อ cross-training มีน้ำหนักจริง
@@ -276,17 +288,22 @@ class TrainingTabDesignTests(unittest.TestCase):
             f"การ์ดไม่ได้บอกว่านับเฉพาะการวิ่ง: {cards[0].label!r}",
         )
 
+    def test_zone_share_discloses_coverage_and_unclassified_duration(self):
+        cards = [element for element in self.tab.get("metric") if "สัดส่วน" in element.label]
+        self.assertTrue(cards, "ไม่มีการ์ดสัดส่วนความหนัก")
+        note = (cards[0].proto.delta or "") + " " + (cards[0].proto.help or "")
+        self.assertIn("ครอบคลุม", note)
+        self.assertIn("ไม่ได้จัดโซน", note)
 
-class ZoneSetupConflictTests(unittest.TestCase):
-    """สองเกณฑ์ความหนักที่ขัดกันต้องถูกพูดออกมา ไม่ใช่เลือกข้างเงียบ ๆ
 
-    ระบบมีเกณฑ์ความหนักสองชุดพร้อมกัน — วินาทีในโซนที่นาฬิกาเก็บ (ที่โดนัทใช้)
-    กับ %LTHR จากผลเทส (ที่ EF ใช้) วัดจริง 26 ส.ค. 69: Dan ตรงกัน 5 จุด
-    แต่ Tong ต่างกัน **41 จุด** และ P'kao 24 จุด — ตัวเลข 80/20 ของสองคนนั้น
-    จึงเชื่อไม่ได้จนกว่าจะรู้ว่าโซนบนนาฬิกาตั้งตรงหรือเปล่า
+class IntensityMethodBoundaryTests(unittest.TestCase):
+    """ห้ามวินิจฉัยการตั้งโซนจากวิธีวัดสองแบบที่เทียบตรง ๆ ไม่ได้
+
+    วินาทีใน Garmin HR zones เป็น time-in-zone แต่การใช้ HR เฉลี่ยเทียบ LTHR จัดทั้ง
+    เซสชันลงถังเดียว โดยเฉพาะ interval ย่อมให้คำตอบต่างกันได้แม้ตั้งโซนถูก
     """
 
-    def test_a_disagreement_between_the_two_intensity_rules_is_reported(self):
+    def test_time_in_zone_is_not_compared_to_session_average_hr(self):
         tab, _ = render_tab(TRAINING_TAB_LABEL, seed_zone_setup_conflict)
         page = " ".join(
             [element.value for element in tab.get("caption") if element.value]
@@ -294,22 +311,11 @@ class ZoneSetupConflictTests(unittest.TestCase):
             + [element.value for element in tab.get("warning") if element.value]
             + [element.proto.help for element in tab.get("metric") if element.proto.help]
         )
-        self.assertIn(
-            "ตั้งโซน", page,
-            "หน้าจอไม่ได้บอกว่าโซนบนนาฬิกากับ LTHR จากผลเทสให้คำตอบต่างกัน",
-        )
-
-    def test_an_athlete_whose_zones_agree_is_not_nagged(self):
-        """Dan ตรงกัน 5 จุด — ถ้าเตือนทุกคนคำเตือนจะกลายเป็นสิ่งที่ถูกมองข้าม"""
-        tab, _ = render_tab(TRAINING_TAB_LABEL, seed_training)
-        # ต้องกวาด warning ด้วย — คำเตือนอยู่ในนั้น ไม่ใช่ caption
-        # รอบแรกลืมเก็บ แล้ว mutation "เตือนทุกคน" ก็ผ่านฉลุย
-        page = " ".join(
-            [element.value for element in tab.get("caption") if element.value]
-            + [element.value for element in tab.get("warning") if element.value]
-            + [element.proto.help for element in tab.get("metric") if element.proto.help]
-        )
-        self.assertNotIn("ตั้งโซน", page, "เตือนทั้งที่สองเกณฑ์ให้คำตอบตรงกัน")
+        self.assertNotIn("ตั้งโซน", page)
+        self.assertNotIn("lthr_intensity_minutes", Path(
+            __file__).resolve().parent.parent.joinpath("scripts", "dashboard.py").read_text(
+                encoding="utf-8"
+            ))
 
     def test_the_run_count_says_how_many_days_were_trained(self):
         """"44 ครั้ง" คือจำนวนรายการ ไม่ใช่เซสชัน — Tong ซ้อมจริง 19 วัน
