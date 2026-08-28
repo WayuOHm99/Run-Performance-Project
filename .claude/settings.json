@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && .claude/hooks/stop-run-tests.sh",
+            "shell": "bash",
+            "timeout": 240,
+            "statusMessage": "ตรวจเทส garmin ก่อนจบเทิร์น..."
+          },
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && .claude/hooks/stop-dashboard-boot.sh",
+            "shell": "bash",
+            "timeout": 180,
+            "statusMessage": "เปิด dashboard จริงหนึ่งรอบ..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && .claude/hooks/pre-merge-review-guard.sh",
+            "shell": "bash",
+            "timeout": 90,
+            "statusMessage": "ตรวจ path เสี่ยงก่อน merge..."
+          }
+        ]
+      }
+    ]
+  }
+}
