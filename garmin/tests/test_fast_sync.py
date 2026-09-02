@@ -1322,8 +1322,9 @@ class DeepActivityBackfillTests(IsolatedDataDirMixin, unittest.TestCase):
     ธงนี้แยกสองอย่างออกจากกัน โดยยังเก็บ enrichment (detail/weather/splits) ครบ
     """
 
-    def _run_main(self, extra_argv, garmin):
-        schema.init_schema(self.data_dir / "garmin.db")
+    def _run_main(self, extra_argv, garmin, *, init_schema=True):
+        if init_schema:
+            schema.init_schema(self.data_dir / "garmin.db")
         project_root = self.data_dir / "project"
         (project_root / "tokens" / "probe").mkdir(parents=True)
         fake_garminconnect = types.ModuleType("garminconnect")
@@ -1379,9 +1380,54 @@ class DeepActivityBackfillTests(IsolatedDataDirMixin, unittest.TestCase):
                 ):
                     backfill.main()
                 self.assertEqual(raised.exception.code, 2)
+                self.assertIn("ใช้ร่วมกันไม่ได้", stderr.getvalue())
                 self.assertIn("--skip-wellness", stderr.getvalue())
                 self.assertIn(other, stderr.getvalue())
 
+
+    def _seed_activity(self, activity_id, day):
+        """ใส่กิจกรรมที่ "มีใน DB แต่ไม่อยู่ในรายการที่ Garmin คืนมา" ลงไปก่อน."""
+        conn = sqlite3.connect(self.data_dir / "garmin.db")
+        try:
+            conn.execute(
+                "INSERT INTO dim_athlete (athlete_id, slug, display_name) "
+                "VALUES (1, 'probe', 'Probe')"
+            )
+            conn.execute(
+                "INSERT INTO fact_activity "
+                "(activity_id, athlete_id, activity_type, start_time_local, "
+                " duration_sec, distance_m, avg_hr) "
+                "VALUES (?, 1, 'running', ?, 1500, 5000, 150)",
+                (activity_id, f"{day} 06:00:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_skip_wellness_never_reconciles_the_deep_window(self):
+        """ที่หน้าต่างกว้างหลายปี reconcile คือกับดัก ไม่ใช่การกู้คืน.
+
+        `present_ids` ถูกเก็บจาก list ครั้งเดียวตอนเริ่ม แล้วลูปเดินต่ออีกเป็นชั่วโมง
+        (แดน 2,738 รายการ × sleep 0.8 วิ/รายการ) — กิจกรรมที่ fast sync
+        ทุก 15 นาทีเพิ่งใส่เข้าระหว่างทางจึงไม่อยู่ใน `present_ids` แล้วโดน mark ว่าถูกลบ
+        (2 ก.ย. 69 ผู้ใช้สั่งให้ sync ประจำทำงานต่อระหว่าง backfill)
+        การตัดกิ่งนี้ทิ้งไม่เสียอะไร — สาย `--reconcile` รายสัปดาห์คุมการลบอยู่แล้ว
+        """
+        schema.init_schema(self.data_dir / "garmin.db")
+        today = backfill.datetime.now(backfill.BANGKOK_TZ).date().isoformat()
+        self._seed_activity(999, today)
+
+        garmin = RecordingGarmin([synthetic_activity()])
+        self._run_main(["--skip-wellness"], garmin, init_schema=False)
+
+        conn = sqlite3.connect(self.data_dir / "garmin.db")
+        try:
+            deleted = conn.execute(
+                "SELECT deleted_at FROM fact_activity WHERE activity_id = 999"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertIsNone(deleted)
 
 class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
     """--catch-up-slots: Task ยิงทุกชั่วโมง แต่ต้องทำงานจริงแค่ช่องละครั้ง."""

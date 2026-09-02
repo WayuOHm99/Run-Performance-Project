@@ -2022,16 +2022,23 @@ def main():
             print(f"\n📊 (ข้ามการดึงกิจกรรม — {_why})")
             activity_count = 0
         else:
+            # reconcile ที่หน้าต่างกว้างหลายปีคือกับดัก ไม่ใช่การกู้คืน (2 ก.ย. 69):
+            # `present_ids` ถูกเก็บจาก list ครั้งเดียวตอนเริ่ม แล้วลูปเดินต่ออีกเป็นชั่วโมง
+            # (แดน 2,738 รายการ × sleep 0.8 วิ/รายการ) — กิจกรรมที่ fast sync
+            # ทุก 15 นาทีใส่เข้าระหว่างทางจึงไม่อยู่ใน `present_ids` แล้วโดน mark ว่าถูกลบ
+            # สาย `--reconcile` รายสัปดาห์ (90 วัน) คุมการลบอยู่แล้ว ตัดกิ่งนี้ทิ้งจึงไม่เสียอะไร
             activity_count = fetch_and_insert_activities(
                 garmin, conn, athlete_id, start_date, end_date,
                 fast=args.activities_only,
+                reconcile=not args.skip_wellness,
             )
 
-        if args.activities_only or args.skip_wellness:
+        if args.activities_only:
             wellness_count = None
-            _why = ("--activities-only" if args.activities_only
-                    else "--skip-wellness")
-            print(f"\n⚡ ข้าม wellness/extras ({_why})")
+            print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
+        elif args.skip_wellness:
+            wellness_count = None
+            print("\n⚡ ข้าม wellness/extras (--skip-wellness) — สั่ง --skip-activities อีกรอบเพื่อเติมช่วงที่ต้องการ")
         elif args.wellness_fast:
             wellness_count = fetch_and_update_wellness_fast(
                 garmin, conn, athlete_id, start_date, end_date,
