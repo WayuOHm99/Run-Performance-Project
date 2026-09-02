@@ -1917,6 +1917,10 @@ def main():
     parser.add_argument("--activities-only", action="store_true",
                         help="fast sync: ดึง activity summary + splits เฉพาะกิจกรรมที่มีระยะและ"
                              "ยังไม่มี splits; ไม่ดึง detail/weather/wellness/extras หรือ reconcile")
+    parser.add_argument("--skip-wellness", action="store_true",
+                        help="ดึงกิจกรรม+splits+detail/weather และ reconcile ตามปกติ แต่ข้าม "
+                             "wellness/extras ทั้งช่วง — ใช้ backfill กิจกรรมย้อนลึกหลายปี "
+                             "โดยไม่ยิง 9 endpoint/วันของ wellness ที่ไม่ต้องการทิ้งเปล่า")
     parser.add_argument("--wellness-fast", action="store_true",
                         help="fast wellness: ดึงเฉพาะค่าที่ขยับระหว่างวัน (body battery/RHR/stress/"
                              "steps/HRV/นอน/readiness) แล้วอัปเดตทับเป็นรายคอลัมน์ — ไม่ดึงกิจกรรม/"
@@ -1928,6 +1932,7 @@ def main():
         ("--activities-only", args.activities_only),
         ("--wellness-fast", args.wellness_fast),
         ("--skip-activities", args.skip_activities),
+        ("--skip-wellness", args.skip_wellness),
         ("--reconcile", args.reconcile),
     ) if on]
     if len(_exclusive) > 1:
@@ -2022,9 +2027,11 @@ def main():
                 fast=args.activities_only,
             )
 
-        if args.activities_only:
+        if args.activities_only or args.skip_wellness:
             wellness_count = None
-            print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
+            _why = ("--activities-only" if args.activities_only
+                    else "--skip-wellness")
+            print(f"\n⚡ ข้าม wellness/extras ({_why})")
         elif args.wellness_fast:
             wellness_count = fetch_and_update_wellness_fast(
                 garmin, conn, athlete_id, start_date, end_date,

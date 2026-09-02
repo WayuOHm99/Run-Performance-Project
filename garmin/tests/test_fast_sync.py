@@ -108,6 +108,44 @@ class SyntheticGarmin:
         return [{"distance": 1000, "duration": 300, "averageHR": 150}]
 
 
+class RecordingGarmin(SyntheticGarmin):
+    """SyntheticGarmin ที่จำว่ามีใครแตะ endpoint ฝั่ง wellness/extras บ้าง.
+
+    ยามเฝ้ากฎต้องแดงเมื่อ --skip-wellness เผลอยิง endpoint รายวันหรือ extras
+    ดังนั้นทุกตัวบันทึกชื่อแล้วค่อยคืนค่า ไม่ใช่ raise (raise ทำให้แยกไม่ออกว่า
+    โค้ดไม่เรียก หรือเรียกแล้วพังเงียบ)
+    """
+
+    _WELLNESS_ENDPOINTS = (
+        "get_stats", "get_hrv_data", "get_sleep_data", "get_respiration_data",
+        "get_training_readiness", "get_training_status", "get_max_metrics",
+        "get_endurance_score", "get_hill_score",
+    )
+    _EXTRAS_ENDPOINTS = (
+        "get_lactate_threshold", "get_fitnessage_data", "get_race_predictions",
+        "get_body_composition", "get_personal_record", "get_user_profile",
+        "get_gear", "get_gear_stats", "get_devices",
+    )
+
+    def __init__(self, activities):
+        super().__init__(activities)
+        self.wellness_calls = []
+
+    def login(self, _token_dir):
+        return None
+
+    def get_full_name(self):
+        return "Probe"
+
+    def __getattr__(self, name):
+        if name in self._WELLNESS_ENDPOINTS or name in self._EXTRAS_ENDPOINTS:
+            def _record(*_args, **_kwargs):
+                self.wellness_calls.append(name)
+                return {}
+            return _record
+        raise AttributeError(name)
+
+
 def synthetic_activity(activity_id=101, distance=5000):
     return {
         "activityId": activity_id,
@@ -1273,6 +1311,76 @@ class RunAthleteDiagnosticsTests(IsolatedDataDirMixin, unittest.TestCase):
 
         self.assertEqual(result["ok"], False)
         self.assertEqual(result["reason"], "status_missing")
+
+
+class DeepActivityBackfillTests(IsolatedDataDirMixin, unittest.TestCase):
+    """--skip-wellness: ดึงกิจกรรมย้อนลึกโดยไม่ลาก wellness ทั้งช่วงมาด้วย.
+
+    2 ก.ย. 69 พบว่าแดนมีกิจกรรมบน Garmin 2,526 รายการก่อนวันที่ DB เริ่มเก็บ
+    (ย้อนถึง 9 เม.ย. 2023) แต่ `--days` ผูก activities กับ wellness ไว้ด้วยกัน
+    → จะเอากิจกรรมครบต้องยิง wellness 1,238 วัน (~9 endpoint/วัน) ทิ้งเปล่า
+    ธงนี้แยกสองอย่างออกจากกัน โดยยังเก็บ enrichment (detail/weather/splits) ครบ
+    """
+
+    def _run_main(self, extra_argv, garmin):
+        schema.init_schema(self.data_dir / "garmin.db")
+        project_root = self.data_dir / "project"
+        (project_root / "tokens" / "probe").mkdir(parents=True)
+        fake_garminconnect = types.ModuleType("garminconnect")
+        fake_garminconnect.Garmin = lambda: garmin
+        argv = ["03_backfill.py", "--athlete", "probe", "--days", "0", *extra_argv]
+        with (
+            mock.patch.object(backfill, "PROJECT_ROOT", project_root),
+            mock.patch.object(backfill.time, "sleep"),
+            mock.patch.dict(sys.modules, {"garminconnect": fake_garminconnect}),
+            mock.patch.object(sys, "argv", argv),
+        ):
+            backfill.main()
+        return backfill.json.loads(
+            (backfill.STATUS_DIR / "probe.json").read_text(encoding="utf-8")
+        )
+
+    def test_skip_wellness_keeps_full_activity_enrichment(self):
+        garmin = RecordingGarmin([synthetic_activity()])
+        payload = self._run_main(["--skip-wellness"], garmin)
+
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["activities"], 1)
+        self.assertEqual(
+            (garmin.detail_calls, garmin.weather_calls, garmin.split_calls),
+            (1, 1, 1),
+        )
+
+    def test_skip_wellness_never_touches_a_wellness_or_extras_endpoint(self):
+        garmin = RecordingGarmin([synthetic_activity()])
+        payload = self._run_main(["--skip-wellness"], garmin)
+
+        self.assertEqual(garmin.wellness_calls, [])
+        self.assertIsNone(payload["wellness_days"])
+
+    def test_skip_wellness_cannot_be_combined_with_another_lane_flag(self):
+        """ต้องแดงด้วยข้อความ "ใช้ร่วมกันไม่ได้" เท่านั้น.
+
+        เช็กแค่ exit code 2 ไม่พอ — main() ออกด้วย 2 ตอน token dir
+        หายด้วย เทสจึงเขียวได้ทั้งที่กฎถูกถอนออก (พิสูจน์แล้ว 2 ก.ย. 69)
+        """
+        for other in ("--skip-activities", "--activities-only",
+                      "--wellness-fast", "--reconcile"):
+            with self.subTest(other=other):
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(
+                        sys, "argv",
+                        ["03_backfill.py", "--athlete", "probe", "--days", "0",
+                         "--skip-wellness", other],
+                    ),
+                    mock.patch.object(sys, "stderr", stderr),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    backfill.main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("--skip-wellness", stderr.getvalue())
+                self.assertIn(other, stderr.getvalue())
 
 
 class CatchUpSlotTests(IsolatedDataDirMixin, unittest.TestCase):
