@@ -284,6 +284,39 @@ class CardMarkupTests(unittest.TestCase):
         markup = HELPERS["render_team_card"](row)
         self.assertNotIn("nan", markup.lower())
 
+    def test_a_watch_that_has_not_synced_today_says_so_on_the_card(self):
+        # เคสจริง 3 ก.ย. 69: ต้องหยุด sync ตั้งแต่ 2 ก.ย. 09:15 น. ค่าหลักทั้งสี่จึงเป็น
+        # ของเมื่อวานทั้งชุด ซึ่งยังนับว่า "สด" (อายุ ≤1 วัน) การ์ดจึงเขียวเท่าคนที่
+        # sync มาแล้วเช้านี้ ต่างกันแค่บรรทัดวันที่ตัวเล็กสีเทา — โค้ชกวาดตาผ่านหน้าทีม
+        # ตอนบ่ายแล้วมองไม่เห็นว่ามีคนหนึ่งยังไม่ส่งข้อมูลมาเลยทั้งวัน
+        row = dict(self.ROW, **{"สถานะ sync": "ยังไม่ sync วันนี้ · ล่าสุด 02/09"})
+        markup = HELPERS["render_team_card"](row)
+        self.assertIn("ยังไม่ sync วันนี้", markup)
+        self.assertIn("ล่าสุด 02/09", markup)
+
+    def test_a_watch_that_synced_today_gets_no_such_note(self):
+        # ป้ายที่ขึ้นตลอดเวลาไม่ใช่ป้าย — ต้องเงียบสนิทในวันปกติ
+        markup = HELPERS["render_team_card"](dict(self.ROW))
+        self.assertNotIn("ยังไม่ sync", markup)
+
+    def test_the_unsynced_note_never_borrows_a_status_colour(self):
+        # กฎดีไซน์: เขียว/เหลือง/แดง จองไว้ให้ "สถานะ" อย่างเดียว ถ้าป้ายนี้ยืมไปใช้
+        # สีเดียวกันจะแปลสองความหมายในการ์ดใบเดียว — "ยังไม่ sync" ไม่ใช่คำตัดสิน
+        # ว่าซ้อมได้หรือไม่ได้ มันบอกแค่ว่าตัวเลขที่อ่านอยู่เก่าไปหนึ่งวัน
+        row = dict(self.ROW, **{"สถานะ sync": "ยังไม่ sync วันนี้ · ล่าสุด 02/09"})
+        markup = HELPERS["render_team_card"](row)
+        chip = re.search(r'<div class="team-card__stale">.*?</div>\s*<div class="team-card__fresh"',
+                         markup, re.S)
+        self.assertIsNotNone(chip, "ไม่พบป้าย ยังไม่ sync ในโครงการ์ด")
+        for status_colour in (HELPERS["C_GOOD"], HELPERS["C_WARN"], HELPERS["C_CRIT"]):
+            self.assertNotIn(status_colour.lower(), chip.group(0).lower(),
+                             f"ป้าย ยังไม่ sync ยืมสีสถานะ {status_colour} มาใช้")
+
+    def test_the_unsynced_note_has_a_style_rule_of_its_own(self):
+        # ถ้าไม่มีกฎ CSS ป้ายจะไหลไปกองกับบรรทัดวันที่สีเทาตัวเล็ก = มองไม่เห็นเหมือนเดิม
+        selectors = {selector for _, selector, _ in css_rules(HELPERS["TEAM_CARD_CSS"])}
+        self.assertIn(".team-card__stale", selectors)
+
 
 class CrossTabContractTests(unittest.TestCase):
     """แท็บ "วันนี้" อ่าน team_df ที่แท็บทีมสร้าง — เปลี่ยนชื่อคีย์เมื่อไหร่พังเงียบ

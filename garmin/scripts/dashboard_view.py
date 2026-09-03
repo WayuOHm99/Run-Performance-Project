@@ -116,6 +116,21 @@ def render_team_card(row):
         flag_label = "ธงเฝ้าระวัง"
         chips = '<div style="font-size:14px;color:#55585f">ไม่มี</div>'
 
+    # นาฬิกาที่ยังไม่ส่งข้อมูลของวันนี้มาเลย — ค่าหลักทั้งสี่ที่เหลือยังอ่านได้ (เป็นของ
+    # เมื่อวาน) การ์ดจึงไม่เปลี่ยนสถานะ แต่ต้องบอกให้เห็นว่าตัวเลขที่กำลังอ่านอยู่นี้
+    # ไม่ใช่ของวันนี้ ใช้สีกลางกับวงว่างของ "ข้อมูลไม่พอ" เพราะเขียว/เหลือง/แดง
+    # จองไว้ให้สถานะอย่างเดียว
+    # `pd.notna` ก่อนเสมอ — `team_rows` ผ่าน `pd.DataFrame` ซึ่งแปลง None เป็น NaN
+    # เมื่อคอลัมน์มีทั้งค่าว่างและสตริง (= ทีมที่มีทั้งคน sync แล้วและยังไม่ sync)
+    # และ NaN เป็น truthy ป้ายจึงถูกวาดว่า "nan" ให้คนที่ sync ปกติ (เจอในเบราว์เซอร์
+    # จริง 3 ก.ย. 69 — เหตุผลเดียวกับที่ตัวเลขบนการ์ดต้องผ่าน `_num_text`)
+    stale_raw = row.get("สถานะ sync")
+    stale_note = str(stale_raw).strip() if pd.notna(stale_raw) else ""
+    stale_chip = (
+        f'<div class="team-card__stale">{status_shape_svg("unknown", 10)}'
+        f'<span>{esc(stale_note)}</span></div>'
+    ) if stale_note else ""
+
     ef_key, ef_label = status_parts(row.get("สถานะ pace–HR") or "")
     ef_color = STATUS_TEXT_COLORS.get(ef_key, STATUS_TEXT_COLORS["unknown"])
 
@@ -182,6 +197,7 @@ def render_team_card(row):
         f'<div class="team-card__head">{status_shape_svg(key, 13)}'
         f'<span class="team-card__name">{esc(str(row["นักกีฬา"]))}</span></div>'
         f'<div class="team-card__status" style="color:{text_color}">{esc(label)}</div>'
+        f'{stale_chip}'
         f'<div class="team-card__fresh">{esc(str(row.get("ความสดรายค่า") or ""))}</div>'
         f'</div>'
         f'<div class="team-card__flags">'
@@ -374,6 +390,12 @@ TEAM_CARD_CSS = """
 .team-card__name { font-size: 19px; font-weight: 700; }
 .team-card__status { font-size: 14px; font-weight: 600; }
 .team-card__fresh { font-size: 11px; color: #8a8d94; line-height: 1.45; }
+/* ป้าย "ยังไม่ sync วันนี้" — ต้องอ่านออกกว่าบรรทัดวันที่ตัวเล็กใต้มัน แต่ห้ามใช้
+   เขียว/เหลือง/แดง ซึ่งจองไว้ให้สถานะ จึงได้กรอบเทากับพื้นอ่อนแทน */
+.team-card__stale { display: inline-flex; align-items: center; gap: 6px;
+  align-self: flex-start; padding: 3px 9px; border-radius: 2px;
+  border: 1px solid #c9c6bf; background: #f4f2ee;
+  font-size: 12px; font-weight: 600; color: #55585f; }
 .team-card__lbl { font-size: 11px; letter-spacing: .06em; color: #8a8d94;
   font-weight: 500; margin-bottom: 7px; }
 .team-card__chips { display: flex; flex-wrap: wrap; gap: 7px; }
