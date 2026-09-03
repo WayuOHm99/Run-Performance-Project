@@ -118,6 +118,19 @@ def team_snapshot(athletes_df, today):
             and 0 <= field_age_days(snapshot, today) <= 1
         )
 
+        # นาฬิกาที่ยังไม่ส่งอะไรของวันนี้มาเลย ต่างจาก "ค่าบางตัวยังไม่มา" ซึ่งเป็นเรื่อง
+        # ปกติของทุกเช้า — เกณฑ์จึงเป็น "ไม่มีของวันนี้สักค่าเดียวในสี่ค่าหลัก"
+        # ไม่ใช่ "ค่าใดค่าหนึ่งขาด" ไม่งั้นป้ายจะขึ้นทุกเช้าก่อนนาฬิกา sync รอบแรก
+        # จนโค้ชเลิกมอง  ค่าหลักทั้งสี่ยังนับว่า "สด" อยู่ (อายุ ≤1 วัน) สถานะจึงไม่ขยับ
+        # ป้ายนี้ตอบคนละคำถาม: ตัวเลขบนการ์ดใบนี้เป็นของวันไหน
+        dated_core = [snapshot for snapshot in core_snaps
+                      if snapshot and snapshot.get("date")]
+        stale_sync = None
+        if dated_core and not any(
+                field_age_days(snapshot, today) == 0 for snapshot in dated_core):
+            newest = max(snapshot["date"] for snapshot in dated_core)
+            stale_sync = f"ยังไม่ sync วันนี้ · ล่าสุด {newest.strftime('%d/%m')}"
+
         # สัญญาณให้ทบทวน — เก็บคู่กับค่าเพื่อให้แท็บวันนี้ตีกรอบไทล์ตรงกัน
         # ถ้าแท็บนั้นคำนวณเกณฑ์เองซ้ำ สองหน้าจะขัดกันเงียบ ๆ ทันทีที่เกณฑ์ฝั่งใดฝั่งหนึ่งขยับ
         flags = []
@@ -198,6 +211,7 @@ def team_snapshot(athletes_df, today):
                               if pd.notna(hrv_ms) else "–"),
             "Readiness": ready if pd.notna(ready) else None,
             "ความสดรายค่า": freshness_note,
+            "สถานะ sync": stale_sync,
             "ธงเฝ้าระวัง": (" | ".join(flags) if flags else "—")
                            + ((" · ข้อมูลไม่พอ: " + ", ".join(coverage_notes))
                               if status.startswith("⚪") and coverage_notes else ""),
@@ -208,7 +222,9 @@ def team_snapshot(athletes_df, today):
         })
 
     team_df = pd.DataFrame(team_rows)
+    # "สถานะ sync" อยู่ในนี้เพราะการ์ดวาดมันเป็นป้ายอยู่แล้ว ส่วนตารางรวมมี
+    # "ความสดรายค่า" ที่บอกวันที่ของทุกค่าอยู่ก่อนแล้ว — ใส่ซ้ำได้แต่กว้างขึ้นเปล่า ๆ
     TEAM_INTERNAL_COLUMNS = ["ธงเฝ้าระวังรายค่า", "pace–HR จากฐาน (%)", "สถานะเทรนด์ HRV",
-                             "ขอบเขตโหลด"]
+                             "ขอบเขตโหลด", "สถานะ sync"]
 
     return team_df, TEAM_INTERNAL_COLUMNS
