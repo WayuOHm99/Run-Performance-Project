@@ -1,7 +1,12 @@
 import importlib.util
+import io
 import json
+import os
+import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "heartbeat_issue_alert.py"
@@ -121,6 +126,49 @@ class HeartbeatIssueAlertTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True, "action": "none"})
         self.assertEqual(len(gh.calls), 1)
+
+
+class WorkflowRunVerdictTests(unittest.TestCase):
+    """Only a new incident (or a broken alert) should turn the hourly run red.
+
+    Sep 2026: the open incident #82 already tracked the outage, yet every hourly run
+    failed as well and sent another GitHub notification each time.
+    """
+
+    def setUp(self):
+        self.alert = load_script()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.output = Path(temp.name) / "github_output"
+        self.output.write_text("", encoding="utf-8")
+
+    def run_main(self, result):
+        argv = ["--status", "failure", "--repository", "owner/repo",
+                "--run-url", "https://github.com/owner/repo/actions/runs/1"]
+        with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(self.output)}), \
+                mock.patch.object(self.alert, "sync_incident", return_value=result), \
+                redirect_stdout(io.StringIO()):
+            self.alert.main(argv)
+        return dict(
+            line.split("=", 1)
+            for line in self.output.read_text(encoding="utf-8").splitlines()
+        )
+
+    def test_known_incident_does_not_fail_the_run_again(self):
+        outputs = self.run_main({"ok": True, "action": "existing", "issue": 82})
+        self.assertEqual(outputs["fail_run"], "false")
+
+    def test_newly_opened_incident_fails_the_run(self):
+        outputs = self.run_main({"ok": True, "action": "opened", "issue": 83})
+        self.assertEqual(outputs["fail_run"], "true")
+
+    def test_broken_alert_delivery_fails_the_run(self):
+        outputs = self.run_main({"ok": False, "reason": "github_issue_alert_failed"})
+        self.assertEqual(outputs["fail_run"], "true")
+
+    def test_recovery_does_not_fail_the_run(self):
+        outputs = self.run_main({"ok": True, "action": "recovered", "issue": 82})
+        self.assertEqual(outputs["fail_run"], "false")
 
 
 if __name__ == "__main__":

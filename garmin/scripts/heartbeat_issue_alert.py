@@ -156,7 +156,23 @@ def main(argv=None):
     except (AlertError, OSError, ValueError):
         result = {"ok": False, "reason": "github_issue_alert_failed"}
     print(json.dumps(result, sort_keys=True))
+    _write_step_output(result)
     return 0 if result["ok"] else 1
+
+
+def _write_step_output(result):
+    """Tell the workflow whether this run should go red.
+
+    The open issue is the incident record.  Failing every hourly run while it stays
+    open only repeats a GitHub notification for something already tracked, so the
+    run fails when an incident is first opened or when delivering it broke.
+    """
+    path = os.environ.get("GITHUB_OUTPUT")
+    if not path:
+        return
+    fail_run = not result["ok"] or result.get("action") == "opened"
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"fail_run={'true' if fail_run else 'false'}\n")
 
 
 if __name__ == "__main__":

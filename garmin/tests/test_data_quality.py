@@ -399,6 +399,124 @@ class ActivityCoverageTests(unittest.TestCase):
         self.assertEqual(training_load["recent"], (1, 1))
 
 
+class SensorApplicabilityTests(unittest.TestCase):
+    """Fields that only some activities can produce must not drift on training mix.
+
+    27 ก.ย. 69 deep lane ล้มเพราะ dan เล่นเวท 5 ครั้งใน 7 วัน: elevation 93% → 20%
+    และ vo2max_trend 80% → 14% ถูกตีเป็น ERROR ทั้งที่การวิ่งทุกครั้งมีข้อมูลครบ
+    """
+
+    TODAY = date(2030, 2, 1)
+    SENSOR_FIELDS = ("avg_cadence", "avg_power", "normalized_power", "elevation_gain_m")
+
+    def setUp(self):
+        self.conn = create_db()
+        self.addCleanup(self.conn.close)
+        for column in ("activity_type TEXT", "start_latitude REAL", "avg_cadence REAL",
+                       "avg_power REAL", "normalized_power REAL", "elevation_gain_m REAL"):
+            self.conn.execute(f"ALTER TABLE fact_activity ADD COLUMN {column}")
+        self.conn.execute("ALTER TABLE fact_daily_wellness ADD COLUMN vo2max_trend REAL")
+        self.next_id = 1
+
+    def add_activity(self, day, activity_type, *, gps=True, sensors=True, elevation=None):
+        has_elevation = gps if elevation is None else elevation
+        self.conn.execute(
+            """INSERT INTO fact_activity (
+                   activity_id, athlete_id, start_time_local, activity_type,
+                   start_latitude, avg_cadence, avg_power, normalized_power,
+                   elevation_gain_m
+               ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                self.next_id, f"{day.isoformat()}T17:00:00", activity_type,
+                13.7 if gps else None,
+                170 if sensors else None, 300 if sensors else None,
+                310 if sensors else None, 25 if has_elevation else None,
+            ),
+        )
+        self.next_id += 1
+
+    def add_outdoor_runs(self, first_day, last_day, **kwargs):
+        day = first_day
+        while day <= last_day:
+            self.add_activity(day, "running", **kwargs)
+            day += timedelta(days=1)
+
+    def activity_drift_fields(self):
+        coverage = dq.coverage_for_athlete(self.conn, 1, today=self.TODAY)
+        return {
+            item["field"] for item in dq.drift_findings(coverage)
+            if item["table"] == "activity"
+        }
+
+    def test_strength_heavy_week_is_not_a_sensor_outage(self):
+        self.add_outdoor_runs(date(2029, 12, 26), date(2030, 1, 24))
+        self.add_activity(date(2030, 1, 25), "running")
+        self.add_activity(date(2030, 1, 29), "running")
+        for day in (26, 27, 28, 30, 31):
+            self.add_activity(date(2030, 1, day), "strength_training",
+                              gps=False, sensors=False)
+
+        self.assertEqual(self.activity_drift_fields() & set(self.SENSOR_FIELDS), set())
+
+    def test_treadmill_run_needs_cadence_but_not_elevation(self):
+        self.add_outdoor_runs(date(2029, 12, 26), date(2030, 1, 24))
+        for day in range(25, 32):
+            self.add_activity(date(2030, 1, day), "treadmill_running",
+                              gps=False, sensors=True)
+
+        self.assertEqual(self.activity_drift_fields(), set())
+
+    def test_runs_losing_sensor_data_are_still_drift(self):
+        # Guard: the applicability filter must not blind the check to a real outage.
+        self.add_outdoor_runs(date(2029, 12, 26), date(2030, 1, 24))
+        self.add_outdoor_runs(date(2030, 1, 25), date(2030, 1, 31),
+                              sensors=False, elevation=False)
+
+        self.assertEqual(self.activity_drift_fields(), set(self.SENSOR_FIELDS))
+
+    def vo2max_short_coverage(self):
+        coverage = dq.coverage_for_athlete(self.conn, 1, today=self.TODAY)
+        return next(
+            item for item in coverage
+            if item["table"] == "wellness" and item["field"] == "vo2max_trend"
+        )
+
+    def test_vo2max_is_judged_only_on_outdoor_run_days(self):
+        day = date(2029, 12, 26)
+        while day <= date(2030, 1, 31):
+            outdoor = day.day % 2 == 0 or day < date(2030, 1, 25)
+            if outdoor:
+                self.add_activity(day, "running")
+            elif day.day in (27, 29):
+                self.add_activity(day, "treadmill_running", gps=False)
+            insert_complete_day(self.conn, day, vo2max_trend=58.0 if outdoor else None)
+            day += timedelta(days=1)
+
+        item = self.vo2max_short_coverage()
+        self.assertEqual(item["short"], (3, 3))  # Jan 26, 28, 30
+        self.assertIsNone(dq.judge_drift(
+            "wellness", "vo2max_trend", item["short"], item["short_baseline"],
+            horizon_days=7,
+        ))
+
+    def test_outdoor_runs_without_vo2max_are_still_drift(self):
+        day = date(2029, 12, 26)
+        while day <= date(2030, 1, 31):
+            self.add_activity(day, "running")
+            insert_complete_day(
+                self.conn, day,
+                vo2max_trend=58.0 if day < date(2030, 1, 25) else None,
+            )
+            day += timedelta(days=1)
+
+        coverage = dq.coverage_for_athlete(self.conn, 1, today=self.TODAY)
+        fields = {
+            item["field"] for item in dq.drift_findings(coverage)
+            if item["table"] == "wellness"
+        }
+        self.assertIn("vo2max_trend", fields)
+
+
 class SentinelAndRangeTests(unittest.TestCase):
     def test_invalid_sentinels_ranges_and_relations_are_reported(self):
         conn = create_db()

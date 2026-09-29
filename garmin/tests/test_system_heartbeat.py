@@ -121,6 +121,8 @@ class SystemHeartbeatCliTests(unittest.TestCase):
         self.assertIn("steps.validate.outputs.code", source)
         self.assertIn("steps.verdict.outputs.status != 'quiet'", source)
         self.assertIn("steps.verdict.outputs.status == 'failure'", source)
+        # incident ที่เปิดค้างอยู่ต้องไม่ทำให้ทุกรอบแดงซ้ำ (ตัดสินใน heartbeat_issue_alert.py)
+        self.assertIn("steps.incident.outputs.fail_run != 'false'", source)
         self.assertIn("if: always()", source)
         self.assertIn("continue-on-error: true", source)
         self.assertNotRegex(source, r"(?m)^    env:\s*$")

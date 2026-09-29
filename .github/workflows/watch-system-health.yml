@@ -81,6 +81,7 @@ jobs:
       # quiet = ไม่แตะ incident เลย ทั้งไม่เปิดใหม่และไม่ปิดของเดิม — ปิดให้เท่ากับ
       # โกหกว่า "recovered" ทั้งที่ยังไม่มี heartbeat ใหม่มายืนยันสักรอบ
       - name: Open or recover the system incident
+        id: incident
         if: always() && steps.verdict.outputs.status != 'quiet'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -92,6 +93,17 @@ jobs:
           --repository "$GITHUB_REPOSITORY"
           --run-url "$RUN_URL"
 
+      # issue ที่เปิดค้างคือบันทึก incident อยู่แล้ว — ถ้า run แดงทุกชั่วโมงระหว่างนั้น
+      # GitHub จะส่งแจ้งเตือนซ้ำทุกรอบ (ก.ย. 69 ขึ้นหลายสิบรายการ) จึงแดงเฉพาะรอบที่เพิ่ง
+      # เปิด incident หรือส่ง incident ไม่สำเร็จ · output ว่าง (สคริปต์ล้มก่อนเขียน) = แดง
       - name: Fail after incident delivery
-        if: always() && steps.verdict.outputs.status == 'failure'
+        if: >-
+          always() && steps.verdict.outputs.status == 'failure'
+          && steps.incident.outputs.fail_run != 'false'
         run: exit 1
+
+      - name: Note the incident that is still open
+        if: >-
+          always() && steps.verdict.outputs.status == 'failure'
+          && steps.incident.outputs.fail_run == 'false'
+        run: echo "::warning::Heartbeat still unhealthy; tracked in the open 'Run Performance system alert' issue."
