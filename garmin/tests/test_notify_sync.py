@@ -119,6 +119,20 @@ class NotifySyncBehaviorTests(unittest.TestCase):
         serialized = "\n".join(json.dumps(item, ensure_ascii=False) for item in notifications)
         self.assertNotIn("id 999", serialized)
 
+    def test_failed_result_with_free_text_slug_still_notifies(self):
+        # 27 ก.ย. 69: check_drift writes slug "data quality/schema drift"; the space and
+        # slash made an invalid condition key and the whole round's toast was dropped.
+        drift = {
+            "slug": "data quality/schema drift", "ok": False, "reason": "drift",
+            "warnings": ["พบข้อมูลน่าสงสัย 5 จุด; ดู deepsync log"],
+        }
+        self.write_status([drift])
+        self.invoke("2026-08-17T10:01:00+07:00", 1)
+
+        notifications = self.notifications()
+        self.assertEqual(len(notifications), 1, msg="\n".join(self.outputs))
+        self.assertIn("data quality/schema drift", notifications[0]["body"])
+
     def test_unreadable_status_is_unknown_and_does_not_claim_recovery(self):
         failed = {"slug": "probe", "ok": False, "reason": "network", "warnings": []}
         healthy = {"slug": "probe", "ok": True, "reason": "ok", "warnings": []}

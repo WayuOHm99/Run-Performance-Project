@@ -64,7 +64,9 @@ def use_data_dir(path) -> Path:
 def _coverage_line(item: dict) -> str:
     recent_nn, recent_total = item["recent"]
     prior_nn, prior_total = item["prior"]
-    unit = "วันปฏิทิน" if item["table"] == "wellness" else "แถวกิจกรรม"
+    unit = item.get("unit") or (
+        "วันปฏิทิน" if item["table"] == "wellness" else "แถวกิจกรรม"
+    )
     return (
         f"   {item['table']}.{item['field']}: "
         f"ล่าสุด {recent_nn}/{recent_total} {unit} ({_percent(recent_nn, recent_total)})"

@@ -92,6 +92,26 @@ ACTIVITY_FIELDS = (
     "avg_power", "normalized_power", "elevation_gain_m",
 )
 
+# Some values only exist for certain kinds of training.  Counting every row made a
+# strength-heavy week look like a sensor outage: 27 ก.ย. 69 dan เล่นเวท 5 ครั้งใน 7 วัน
+# → elevation 93% → 20% และ vo2max_trend 80% → 14% (ERROR) ทั้งที่การวิ่งทุกครั้งครบ.
+# Each rule is (columns it needs, SQL over fact_activity).  A pre-migration database
+# without those columns falls back to counting every row.
+RUNNING_SQL = "activity_type LIKE '%running%'"
+GPS_SQL = "start_latitude IS NOT NULL"
+ACTIVITY_FIELD_APPLICABILITY = {
+    "avg_cadence": (("activity_type",), RUNNING_SQL),
+    "avg_power": (("activity_type",), RUNNING_SQL),
+    "normalized_power": (("activity_type",), RUNNING_SQL),
+    # Treadmill and strength sessions have no GPS track, so no elevation either.
+    "elevation_gain_m": (("start_latitude",), GPS_SQL),
+}
+# Garmin's generic (running) VO2max only updates after an outdoor GPS run, so a
+# calendar day without one is "not measured", not "missing".
+WELLNESS_FIELD_ACTIVITY_DAYS = {
+    "vo2max_trend": (("activity_type", "start_latitude"), f"{RUNNING_SQL} AND {GPS_SQL}"),
+}
+
 WELLNESS_METADATA_FIELDS = {
     "athlete_id", "calendar_date", "fetched_at", "repair_attempted_at_utc",
     # Internal Garmin identifier retained for correlation only; it is not a
@@ -337,40 +357,67 @@ def coverage_for_athlete(
         wellness_columns - set(wellness_fields) - WELLNESS_METADATA_FIELDS
         - legacy_exclusions
     ))
+    activity_columns = table_columns(conn, "fact_activity")
+    deleted_filter = " AND deleted_at IS NULL" if "deleted_at" in activity_columns else ""
+
     for field in wellness_fields:
         if field not in wellness_columns:  # supports pre-migration databases
             continue
+        # Fixed calendar denominators, unless the field is only produced on days
+        # with a particular kind of activity; then count only those days.
+        extra_condition = ""
+        days = {"recent": 30, "prior": 30, "short": 7, "short_baseline": 30}
+        row_extra = {}
+        gate = WELLNESS_FIELD_ACTIVITY_DAYS.get(field)
+        if gate and set(gate[0]) <= activity_columns:
+            extra_condition = (
+                " AND EXISTS (SELECT 1 FROM fact_activity"
+                " WHERE fact_activity.athlete_id = fact_daily_wellness.athlete_id"
+                " AND substr(fact_activity.start_time_local, 1, 10)"
+                " = fact_daily_wellness.calendar_date"
+                f" AND {gate[1]}{deleted_filter})"
+            )
+            days = dict.fromkeys(days)
+            row_extra["unit"] = "วันที่วิ่งกลางแจ้ง"
         rows.append({
             "table": "wellness",
             "field": field,
             "recent": _rate(
                 conn, table="fact_daily_wellness", field=field,
                 athlete_id=athlete_id, date_field="calendar_date",
-                start=recent_start, end=recent_end, denominator_days=30,
+                start=recent_start, end=recent_end,
+                extra_condition=extra_condition, denominator_days=days["recent"],
             ),
             "prior": _rate(
                 conn, table="fact_daily_wellness", field=field,
                 athlete_id=athlete_id, date_field="calendar_date",
-                start=prior_start, end=prior_end, denominator_days=30,
+                start=prior_start, end=prior_end,
+                extra_condition=extra_condition, denominator_days=days["prior"],
             ),
             "short": _rate(
                 conn, table="fact_daily_wellness", field=field,
                 athlete_id=athlete_id, date_field="calendar_date",
-                start=short_start, end=short_end, denominator_days=7,
+                start=short_start, end=short_end,
+                extra_condition=extra_condition, denominator_days=days["short"],
             ),
             "short_baseline": _rate(
                 conn, table="fact_daily_wellness", field=field,
                 athlete_id=athlete_id, date_field="calendar_date",
-                start=short_base_start, end=short_base_end, denominator_days=30,
+                start=short_base_start, end=short_base_end,
+                extra_condition=extra_condition,
+                denominator_days=days["short_baseline"],
             ),
             "calendar_days": 30,
+            **row_extra,
         })
 
-    activity_columns = table_columns(conn, "fact_activity")
-    deleted_filter = " AND deleted_at IS NULL" if "deleted_at" in activity_columns else ""
     for field in ACTIVITY_FIELDS:
         if field not in activity_columns:
             continue
+        activity_filter = deleted_filter
+        rule = ACTIVITY_FIELD_APPLICABILITY.get(field)
+        if rule and set(rule[0]) <= activity_columns:
+            activity_filter += f" AND {rule[1]}"
         rows.append({
             "table": "activity",
             "field": field,
@@ -378,25 +425,25 @@ def coverage_for_athlete(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
                 start=recent_start, end=recent_end,
-                extra_condition=deleted_filter, normalize_date=True,
+                extra_condition=activity_filter, normalize_date=True,
             ),
             "prior": _rate(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
                 start=prior_start, end=prior_end,
-                extra_condition=deleted_filter, normalize_date=True,
+                extra_condition=activity_filter, normalize_date=True,
             ),
             "short": _rate(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
                 start=short_start, end=short_end,
-                extra_condition=deleted_filter, normalize_date=True,
+                extra_condition=activity_filter, normalize_date=True,
             ),
             "short_baseline": _rate(
                 conn, table="fact_activity", field=field,
                 athlete_id=athlete_id, date_field="start_time_local",
                 start=short_base_start, end=short_base_end,
-                extra_condition=deleted_filter, normalize_date=True,
+                extra_condition=activity_filter, normalize_date=True,
             ),
             "calendar_days": 30,
         })

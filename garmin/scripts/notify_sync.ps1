@@ -245,10 +245,15 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
             "network" { "เน็ต/เซิร์ฟเวอร์มีปัญหา (รอบหน้าลองใหม่เอง)" }
             "timeout" { "ค้างเกินเวลาที่ให้ต่อคน" }
             "payload" { "Garmin payload ผิดรูปแบบ/ข้อมูลตอบกลับเสีย -> ดู log" }
+            "drift"   { "พบข้อมูลน่าสงสัยหรือ schema drift -> ดู deepsync log" }
             default   { "ล้มเหลว -> ดู log" }
         }
         $safeReason = if ($f.reason -match '^[a-zA-Z0-9_-]+$') { $f.reason } else { "error" }
-        Add-Condition $scope "athlete-$($f.slug)-$safeReason" `
+        # slug is free text ("data quality/schema drift" from check_drift): one invalid
+        # key makes notification_policy reject the whole round, so no toast at all.
+        # Keep the policy's own character set so athlete keys already stored stay stable.
+        $safeSlug = ([string]$f.slug) -replace "[^a-zA-Z0-9_.:'-]", '_'
+        Add-Condition $scope "athlete-$safeSlug-$safeReason" `
             "Garmin sync ล้มเหลว" "$($f.slug): $why"
     }
     foreach ($w in $warned) {
