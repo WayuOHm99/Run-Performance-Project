@@ -183,6 +183,7 @@ page = st.navigation(
         st.Page("app_pages/estimates.py", title="ค่าประเมิน Garmin",
                 icon=":material/insights:"),
         st.Page("app_pages/session.py", title="เซสชัน", icon=":material/timer:"),
+        st.Page("app_pages/system.py", title="สถานะระบบ", icon=":material/monitor_heart:"),
     ],
     position="top",
 )

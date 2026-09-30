@@ -16,6 +16,7 @@ from dashboard_tab_harness import (  # noqa: E402
     ESTIMATES_PAGE,
     LAST_DAY,
     SESSION_PAGE,
+    SYSTEM_PAGE,
     TEAM_PAGE,
     TRAINING_PAGE,
     page_text,
@@ -212,6 +213,15 @@ class BodyPageTests(unittest.TestCase):
         self.assertEqual(metrics["RHR"][0], "50 bpm")
         self.assertEqual(metrics["RHR"][1],
                          (TODAY - datetime.timedelta(days=2)).strftime("%d/%m"))
+
+
+class SystemPageTests(unittest.TestCase):
+    def test_system_status_renders_without_leaking_errors_to_the_page(self):
+        # ตัวตรวจเรียก schtasks — บน CI (Linux) ไม่มี ต้องขึ้นเป็นผลตรวจ ไม่ใช่ exception
+        main, _ = render_page(SYSTEM_PAGE, seed_team)
+        text = page_text(main)
+        self.assertIn("sync ล่าสุดรายคน", text)
+        self.assertNotIn("Traceback", text)
 
 
 if __name__ == "__main__":

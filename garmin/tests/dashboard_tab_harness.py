@@ -27,6 +27,7 @@ BODY_PAGE = "app_pages/body.py"
 TRAINING_PAGE = "app_pages/training.py"
 ESTIMATES_PAGE = "app_pages/estimates.py"
 SESSION_PAGE = "app_pages/session.py"
+SYSTEM_PAGE = "app_pages/system.py"
 ALL_PAGES = (TEAM_PAGE, BODY_PAGE, TRAINING_PAGE, ESTIMATES_PAGE, SESSION_PAGE)
 
 
