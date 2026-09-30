@@ -12,14 +12,17 @@ import datetime
 import pandas as pd
 import streamlit as st
 
+from dashboard_charts import intraday_chart
 from dashboard_context import focus_athlete, page_context
 from dashboard_data import (
     athlete_has_training_readiness,
     load_athlete_devices,
+    load_intraday,
     load_team_activities,
     load_wellness_data,
 )
 from dashboard_domain import (
+    INTRADAY_METRICS,
     activity_rows,
     activity_title,
     day_row,
@@ -31,6 +34,7 @@ from dashboard_domain import (
     fmt_recovery_time,
     fmt_sec,
     garmin_label,
+    intraday_series,
     last_before,
     to_bangkok_timestamp,
     value_of,
@@ -176,6 +180,24 @@ for row_start in range(0, len(athletes), 3):
             columns, enumerate(athletes[row_start:row_start + 3], start=row_start)):
         with column:
             athlete_card(athlete, order)
+
+st.subheader("เทียบระหว่างวันทั้งทีม", anchor=False)
+intraday = load_intraday(day)
+if intraday.empty:
+    st.caption("ยังไม่มีข้อมูลระหว่างวันของวันนี้")
+else:
+    labels = {key: label for key, (label, _) in INTRADAY_METRICS.items()}
+    chosen = st.segmented_control("ค่า", options=list(labels), format_func=labels.get,
+                                  default="heart_rate", required=True, key="team_intraday_metric",
+                                  label_visibility="collapsed")
+    names = dict(zip(ctx.athletes_df["athlete_id"], ctx.athletes_df["display_name"]))
+    series = intraday_series(intraday, chosen)
+    if series["ค่า"].notna().any():
+        st.altair_chart(intraday_chart(series, day, y_title=INTRADAY_METRICS[chosen][1],
+                                       names=names, height=240), width="stretch")
+        st.caption("แกนเวลาเดียวกัน 00:00–24:00 · เส้นขาด = ช่วงที่ไม่มีข้อมูลจากนาฬิกา")
+    else:
+        st.caption(f"ไม่มีข้อมูล {labels[chosen]} ระหว่างวันของวันนี้")
 
 st.subheader("กิจกรรมของทีมในวันนี้", anchor=False)
 if day_activities.empty:

@@ -369,3 +369,32 @@ def load_latest_fetch(athlete_id=None):
     stamps = [pd.to_datetime(value, errors="coerce", utc=True) for value in (activity, wellness)]
     stamps = [stamp for stamp in stamps if pd.notna(stamp)]
     return max(stamps) if stamps else None
+
+
+@st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
+def load_intraday(day, athlete_ids=None):
+    """จุดข้อมูลระหว่างวัน (HR/stress/body battery) ของวันปฏิทิน Garmin วันเดียว
+
+    คืน DataFrame ว่างถ้าฐานยังไม่มีตาราง (ยังไม่ได้รัน 02_init_schema.py รุ่นใหม่)
+    เวลาแปลงเป็นเวลาไทยสำหรับแสดงผล ค่า NULL คงเป็น NULL (ช่วงที่วัดไม่ได้)
+    """
+    conn = connect_db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fact_wellness_intraday'"
+        ).fetchone()
+        if not exists:
+            return pd.DataFrame(columns=["athlete_id", "metric", "ts", "value"])
+        params = [str(day)]
+        where = ""
+        if athlete_ids:
+            where = f" AND athlete_id IN ({','.join('?' for _ in athlete_ids)})"
+            params += [int(athlete) for athlete in athlete_ids]
+        df = pd.read_sql_query(
+            "SELECT athlete_id, metric, ts_utc, value FROM fact_wellness_intraday "
+            f"WHERE calendar_date = ?{where} ORDER BY ts_utc", conn, params=params)
+    finally:
+        conn.close()
+    df["ts"] = pd.to_datetime(df["ts_utc"], utc=True).dt.tz_convert("Asia/Bangkok").dt.tz_localize(None)
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    return df.drop(columns="ts_utc")

@@ -269,3 +269,24 @@ class PersonalRecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntradaySeriesTests(unittest.TestCase):
+    def test_a_long_gap_breaks_the_line_instead_of_bridging_it(self):
+        points = pd.DataFrame({
+            "athlete_id": [1, 1, 1],
+            "metric": ["heart_rate"] * 3,
+            "ts": pd.to_datetime(["2026-09-30 06:00", "2026-09-30 06:02", "2026-09-30 09:00"]),
+            "value": [60.0, 62.0, 70.0],
+        })
+        series = HELPERS["intraday_series"](points, "heart_rate")
+        self.assertEqual(len(series), 4)                  # สามจุดจริง + หนึ่งช่องว่าง
+        self.assertTrue(pd.isna(series["ค่า"].iloc[2]))
+        self.assertEqual(series["ค่า"].dropna().tolist(), [60.0, 62.0, 70.0])  # ไม่มีจุดปลอม
+
+    def test_unmeasured_points_stay_empty_not_zero(self):
+        points = pd.DataFrame({"athlete_id": [1, 1], "metric": ["stress", "stress"],
+                               "ts": pd.to_datetime(["2026-09-30 06:00", "2026-09-30 06:03"]),
+                               "value": [30.0, None]})
+        series = HELPERS["intraday_series"](points, "stress")
+        self.assertTrue(pd.isna(series["ค่า"].iloc[1]))

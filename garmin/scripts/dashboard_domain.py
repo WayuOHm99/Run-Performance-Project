@@ -448,3 +448,31 @@ def activity_rows(activity_df):
         "Training Effect": pd.to_numeric(frame.get("training_effect_aerobic"), errors="coerce"),
         "Training Load": pd.to_numeric(frame.get("training_load"), errors="coerce"),
     }).reset_index(drop=True)
+
+
+INTRADAY_METRICS = {"heart_rate": ("HR", "bpm"), "stress": ("Stress", ""),
+                    "body_battery": ("Body Battery", "")}
+INTRADAY_GAP_MINUTES = 15  # จุดห่างกว่านี้ถือว่าข้อมูลขาด (ต้นทางส่งทุก 2–3 นาที)
+
+
+def intraday_series(points, metric):
+    """จุดของ metric เดียวเรียงตามเวลา พร้อมแทรกแถวว่างตรงช่วงที่ข้อมูลขาด
+
+    ไม่สร้างจุดใหม่จากค่าเฉลี่ย — แค่เติม NaN ระหว่างสองจุดที่ห่างเกิน 15 นาที
+    เพื่อให้เส้นกราฟขาดตรงนั้นแทนการลากเชื่อมข้ามเหมือนมีข้อมูล
+    คืนคอลัมน์ ``athlete_id, เวลา, ค่า`` บนแกน 00:00–24:00 ของวันนั้น
+    """
+    columns = ["athlete_id", "เวลา", "ค่า"]
+    if points is None or points.empty:
+        return pd.DataFrame(columns=columns)
+    frame = points[points["metric"] == metric].sort_values(["athlete_id", "ts"])
+    rows = []
+    gap = pd.Timedelta(minutes=INTRADAY_GAP_MINUTES)
+    for athlete_id, group in frame.groupby("athlete_id"):
+        previous = None
+        for ts, value in zip(group["ts"], group["value"]):
+            if previous is not None and ts - previous > gap:
+                rows.append((athlete_id, previous + gap / 2, float("nan")))
+            rows.append((athlete_id, ts, value))
+            previous = ts
+    return pd.DataFrame(rows, columns=columns)

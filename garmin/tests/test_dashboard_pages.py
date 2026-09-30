@@ -92,6 +92,16 @@ def seed_team(conn):
         (YESTERDAY.isoformat(),))
 
 
+def seed_team_with_intraday(conn):
+    seed_team(conn)
+    base = datetime.datetime.combine(TODAY, datetime.time(6, 0)) - datetime.timedelta(hours=7)
+    conn.executemany(
+        "INSERT INTO fact_wellness_intraday (athlete_id, calendar_date, metric, ts_utc, value)"
+        " VALUES (1, ?, 'heart_rate', ?, ?)",
+        [(TODAY.isoformat(), (base + datetime.timedelta(minutes=2 * i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          60 + i) for i in range(10)])
+
+
 def seed_nothing_for_tong(conn):
     conn.execute("INSERT INTO dim_athlete (athlete_id, slug, display_name) "
                  "VALUES (1, 'tong', 'Tong')")
@@ -170,6 +180,35 @@ class TeamPageTests(unittest.TestCase):
         labels = [button.label for button in self.main.get("button")]
         for name in ("Tong", "Dan", "P'kao"):
             self.assertIn(f"ดูข้อมูลของ {name}", labels)
+
+
+def element_types(block):
+    """ชนิด element ทั้งหมดในหน้า — กราฟ altair มาถึง AppTest เป็น UnknownElement"""
+    found = set()
+
+    def walk(node):
+        children = getattr(node, "children", None)
+        if isinstance(children, dict):
+            children = list(children.values())
+        for child in children or []:
+            found.add(getattr(child, "type", type(child).__name__))
+            walk(child)
+
+    walk(block)
+    return found
+
+
+class IntradayOnScreenTests(unittest.TestCase):
+    def test_team_and_body_pages_draw_the_days_intraday_points(self):
+        for page in (TEAM_PAGE, BODY_PAGE):
+            with self.subTest(page=page):
+                main, _ = render_page(page, seed_team_with_intraday)
+                self.assertIn("vega_lite_chart", element_types(main),
+                              f"{page} ไม่มีกราฟระหว่างวัน")
+
+    def test_without_intraday_rows_the_page_says_so(self):
+        main, _ = render_page(TEAM_PAGE, seed_team)
+        self.assertIn("ยังไม่มีข้อมูลระหว่างวัน", page_text(main))
 
 
 class SessionPageTests(unittest.TestCase):

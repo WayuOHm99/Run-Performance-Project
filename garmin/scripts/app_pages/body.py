@@ -7,8 +7,12 @@
 import pandas as pd
 import streamlit as st
 
+from dashboard_charts import intraday_chart
 from dashboard_context import page_context
+from dashboard_data import load_intraday
 from dashboard_domain import (
+    INTRADAY_METRICS,
+    intraday_series,
     calendar_aligned_frame,
     field_when,
     fmt_hours,
@@ -131,6 +135,25 @@ with right:
              ["stress_avg", "max_stress"], ["เฉลี่ย", "สูงสุด"], "")
     if has("training_readiness"):
         line(chart_card("Training Readiness"), ["training_readiness"], ["Readiness"], "คะแนน")
+
+st.subheader("ระหว่างวัน", anchor=False)
+intraday_day = st.date_input("วันที่", value=today, max_value=today, format="DD/MM/YYYY",
+                             key="body_intraday_day", width=170)
+points = load_intraday(intraday_day, [ctx.athlete_id])
+if points.empty:
+    st.caption("ยังไม่มีข้อมูลระหว่างวันของวันนี้ — ระบบเริ่มเก็บ HR/Stress/Body Battery รายจุด"
+               "ตั้งแต่ 30 ก.ย. 69 และเก็บย้อนหลัง 180 วัน")
+else:
+    st.caption("จุดละ 2–3 นาทีตามที่นาฬิกาส่งมา · เส้นขาด = ช่วงที่ไม่มีข้อมูล "
+               "(ไม่ได้ใส่นาฬิกา / Stress วัดไม่ได้ระหว่างออกกำลังกาย)")
+    for metric, (label, unit) in INTRADAY_METRICS.items():
+        series = intraday_series(points, metric)
+        if series["ค่า"].notna().any():
+            with st.container(border=True):
+                st.markdown(f"**{label}**")
+                st.altair_chart(intraday_chart(series, intraday_day, y_title=unit,
+                                               names={ctx.athlete_id: ctx.selected_name}),
+                                width="stretch")
 
 with st.expander("ตารางค่ารายวันทั้งหมด", icon=":material/table_view:"):
     table = wellness.sort_values("calendar_date", ascending=False)
