@@ -30,6 +30,13 @@ DB_PATH = DATA_DIR / "garmin.db"
 STATUS_DIR = DATA_DIR / "sync_status"
 UTC_NOW_SQL = "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
 PREVIOUS_DAY_REPAIR_COOLDOWN_HOURS = 6
+# Settle review: ตรวจทานเมื่อวานซ้ำแม้ข้อมูลครบ เพื่อรับค่าที่ Garmin แก้ย้อนหลัง
+# (steps/stress/BB ของวันที่จบแล้วยังขยับได้หลังนาฬิกา sync ทีหลัง) — ทำเฉพาะช่วง
+# SETTLE_REVIEW_WINDOW_HOURS หลังวัน (เวลา Bangkok) จบ และห่างกันอย่างน้อย INTERVAL ชม.
+# ต้นทุน: 36/3 = สูงสุด 12 รอบ × 5 endpoint = 60 call ต่อคนต่อวัน (ราว 3-4 รอบต่อ
+# การ sync ที่ตื่นสาย) — ปรับสองค่านี้ได้ที่เดียว
+SETTLE_REVIEW_INTERVAL_HOURS = 3
+SETTLE_REVIEW_WINDOW_HOURS = 36
 BANGKOK_TZ = timezone(timedelta(hours=7))
 SQLITE_MAX_INTEGER = 2**63 - 1
 
@@ -1250,26 +1257,8 @@ def _previous_day_repair_due(conn, athlete_id, repair_date, *, now_utc=None):
     return bool(reasons), reasons
 
 
-def fetch_and_repair_previous_day_wellness(
-    garmin, conn, athlete_id, repair_date, *, now_utc=None,
-    endpoint_failures=None, terminal_errors=None,
-):
-    """Repair a partial yesterday snapshot without doubling every fast poll.
-
-    Only a partial/invalid row that is outside the cooldown triggers calls.  The
-    extra respiration endpoint is included because overnight values commonly
-    arrive after the first post-wakeup sync.  Every write is NULL-safe.
-    """
-    due, reasons = _previous_day_repair_due(
-        conn, athlete_id, repair_date, now_utc=now_utc)
-    if not due:
-        if reasons != ["cooldown"]:
-            print(f"   ℹ️  ข้ามซ่อม {repair_date}: ข้อมูลเมื่อวานครบหรือ schema ยังไม่พร้อม")
-        return 0
-
-    date_str = str(repair_date)
-    print(f"\n🩹 ซ่อม wellness เมื่อวาน {date_str} ({', '.join(reasons)})...")
-    failures = []
+def _fetch_previous_day_values(garmin, date_str, failures):
+    """ดึง 5 endpoint ของวันที่จบแล้ว (stats/HRV/sleep/respiration/readiness) → dict ค่าที่ parse แล้ว"""
     stats = _call_wellness_endpoint(garmin, "get_stats", date_str, failures)
     time.sleep(0.3)
     hrv = _call_wellness_endpoint(garmin, "get_hrv_data", date_str, failures)
@@ -1283,9 +1272,6 @@ def fetch_and_repair_previous_day_wellness(
     readiness = _call_wellness_endpoint(
         garmin, "get_training_readiness", date_str, failures
     )
-    if endpoint_failures is not None:
-        endpoint_failures.extend(failures)
-
     values = {
         **_parse_stats(stats),
         **_parse_hrv(hrv),
@@ -1293,6 +1279,117 @@ def fetch_and_repair_previous_day_wellness(
         **_parse_readiness(readiness),
     }
     _fill_missing(values, _parse_respiration(respiration))
+    return values
+
+
+def _settle_review_due(conn, athlete_id, review_date, *, now_utc=None):
+    """True เมื่อเมื่อวาน (Bangkok) ยังอยู่ในหน้าต่าง 36 ชม. หลังวันจบ และเลย interval แล้ว.
+    แถวที่ยังไม่มีเป็นเรื่องของสาย repair ไม่ใช่ review"""
+    cur = conn.cursor()
+    if "settle_reviewed_at_utc" not in _wellness_columns(cur):
+        return False
+    row = cur.execute(
+        "SELECT settle_reviewed_at_utc FROM fact_daily_wellness "
+        "WHERE athlete_id = ? AND calendar_date = ?",
+        (athlete_id, str(review_date)),
+    ).fetchone()
+    if row is None:
+        return False
+    now_utc = _api_datetime(now_utc or datetime.now(timezone.utc))
+    day_end = datetime.combine(
+        date.fromisoformat(str(review_date)) + timedelta(days=1), datetime.min.time(), tzinfo=BANGKOK_TZ
+    ).astimezone(timezone.utc)
+    age = now_utc - day_end
+    if not timedelta(0) <= age < timedelta(hours=SETTLE_REVIEW_WINDOW_HOURS):
+        return False
+    reviewed = _api_datetime(row[0])
+    if reviewed is not None:
+        elapsed = now_utc - reviewed
+        if timedelta(0) <= elapsed < timedelta(hours=SETTLE_REVIEW_INTERVAL_HOURS):
+            return False
+    return True
+
+
+def fetch_and_settle_review_previous_day_wellness(
+    garmin, conn, athlete_id, review_date, *, now_utc=None,
+    endpoint_failures=None, terminal_errors=None,
+):
+    """ตรวจทานเมื่อวานที่ข้อมูล "ครบแล้ว" เพื่อรับค่าที่ Garmin แก้ย้อนหลัง (คนละเรื่องกับ repair)
+
+    ใช้ endpoint ชุดเดียวกับ repair + merge แบบ NULL-safe; เลื่อน fetched_at เฉพาะเมื่อมีค่า
+    เปลี่ยนจริง (รอบที่ค่าเท่าเดิมไม่ทำให้ dashboard คิดว่าข้อมูลสดขึ้น) — log เฉพาะจำนวนฟิลด์
+    """
+    if not _settle_review_due(conn, athlete_id, review_date, now_utc=now_utc):
+        return 0
+    date_str = str(review_date)
+    failures = []
+    values = _fetch_previous_day_values(garmin, date_str, failures)
+    if endpoint_failures is not None:
+        endpoint_failures.extend(failures)
+    error = _core_wellness_error(failures)
+    if error is not None:
+        # ไม่ประทับเวลา review — รอบถัดไปลองใหม่ (เหมือน repair)
+        print("   ⚠️  ตรวจทานเมื่อวานไม่สำเร็จ (endpoint หลักล้มทั้งหมด)")
+        if terminal_errors is None:
+            raise error
+        terminal_errors.append(error)
+        return 0
+
+    cur = conn.cursor()
+    key = "WHERE athlete_id = ? AND calendar_date = ?"
+    before = cur.execute(
+        f"SELECT * FROM fact_daily_wellness {key}", (athlete_id, date_str)).fetchone()
+    columns = [d[0] for d in cur.description]
+    _update_wellness_fields(cur, athlete_id, date_str, values)
+    after = cur.execute(
+        f"SELECT * FROM fact_daily_wellness {key}", (athlete_id, date_str)).fetchone()
+    changed = sum(
+        1 for name, old, new in zip(columns, before, after)
+        if name != "fetched_at" and old != new
+    )
+    if not changed:
+        cur.execute(
+            f"UPDATE fact_daily_wellness SET fetched_at = ? {key}",
+            (before[columns.index("fetched_at")], athlete_id, date_str))
+    reviewed_at = _utc_timestamp_text(now_utc or datetime.now(timezone.utc))
+    cur.execute(
+        f"UPDATE fact_daily_wellness SET settle_reviewed_at_utc = ? {key}",
+        (reviewed_at, athlete_id, date_str))
+    conn.commit()
+    print(f"   🔍 ตรวจทานเมื่อวาน {date_str}: เปลี่ยน {changed} ฟิลด์")
+    return int(changed > 0)
+
+
+def fetch_and_repair_previous_day_wellness(
+    garmin, conn, athlete_id, repair_date, *, now_utc=None,
+    endpoint_failures=None, terminal_errors=None,
+):
+    """Repair a partial yesterday snapshot without doubling every fast poll.
+
+    Only a partial/invalid row that is outside the cooldown triggers calls.  The
+    extra respiration endpoint is included because overnight values commonly
+    arrive after the first post-wakeup sync.  Every write is NULL-safe.
+    """
+    due, reasons = _previous_day_repair_due(
+        conn, athlete_id, repair_date, now_utc=now_utc)
+    if not due:
+        if reasons == []:
+            # แถวครบ = ไม่ต้องซ่อม แต่ยังอาจมีค่าที่ Garmin แก้ย้อนหลัง → settle review
+            return fetch_and_settle_review_previous_day_wellness(
+                garmin, conn, athlete_id, repair_date, now_utc=now_utc,
+                endpoint_failures=endpoint_failures, terminal_errors=terminal_errors,
+            )
+        if reasons != ["cooldown"]:
+            print(f"   ℹ️  ข้ามซ่อม {repair_date}: ข้อมูลเมื่อวานครบหรือ schema ยังไม่พร้อม")
+        return 0
+
+    date_str = str(repair_date)
+    print(f"\n🩹 ซ่อม wellness เมื่อวาน {date_str} ({', '.join(reasons)})...")
+    failures = []
+    values = _fetch_previous_day_values(garmin, date_str, failures)
+    if endpoint_failures is not None:
+        endpoint_failures.extend(failures)
+
     cur = conn.cursor()
     n_fields = _update_wellness_fields(cur, athlete_id, date_str, values)
     conn.commit()

@@ -114,6 +114,7 @@ WELLNESS_FIELD_ACTIVITY_DAYS = {
 
 WELLNESS_METADATA_FIELDS = {
     "athlete_id", "calendar_date", "fetched_at", "repair_attempted_at_utc",
+    "settle_reviewed_at_utc",
     # Internal Garmin identifier retained for correlation only; it is not a
     # physiological metric and must never appear in field-coverage reports.
     "readiness_device_id",

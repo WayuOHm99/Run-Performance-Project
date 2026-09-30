@@ -188,6 +188,8 @@ WELLNESS_COLUMNS = [
     # Throttle metadata for the fast lane's conditional previous-day repair.
     # It records an attempt, not proof that every metric was returned.
     ("repair_attempted_at_utc", "TEXT"),
+    # เวลาที่ตรวจทานวันที่จบแล้วรอบล่าสุด (settle review) — รับค่าที่ Garmin แก้ย้อนหลัง
+    ("settle_reviewed_at_utc", "TEXT"),
     ("fetched_at", UTC_NOW_DEFAULT),
 ]
 

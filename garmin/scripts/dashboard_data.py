@@ -52,7 +52,7 @@ def load_athletes():
 _WELLNESS_TEXT = {
     "calendar_date", "hrv_status", "training_status", "readiness_level",
     "readiness_feedback", "readiness_feedback_long", "fetched_at",
-    "repair_attempted_at_utc",
+    "repair_attempted_at_utc", "settle_reviewed_at_utc",
     "readiness_timestamp_utc", "readiness_timestamp_local",
     "readiness_input_context", "readiness_device_id",
     "readiness_sleep_factor_feedback", "recovery_time_factor_feedback",
