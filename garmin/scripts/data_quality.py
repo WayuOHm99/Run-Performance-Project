@@ -114,6 +114,7 @@ WELLNESS_FIELD_ACTIVITY_DAYS = {
 
 WELLNESS_METADATA_FIELDS = {
     "athlete_id", "calendar_date", "fetched_at", "repair_attempted_at_utc",
+    "settle_reviewed_at_utc",
     # Internal Garmin identifier retained for correlation only; it is not a
     # physiological metric and must never appear in field-coverage reports.
     "readiness_device_id",
@@ -497,7 +498,36 @@ def drift_findings(coverage: list[dict]) -> list[dict]:
             findings.append(short)
         elif monthly:
             findings.append(monthly)
-    return findings
+    return _merge_same_endpoint_drift(findings)
+
+
+# ช่องที่ Garmin ส่งมาใน payload เดียวกัน — หายพร้อมกันเสมอ จึงรายงานเป็นเหตุการณ์เดียว
+# (30 ก.ย. 69 hill score สามช่องของ P'kao ขึ้นเตือนสามบรรทัดของเรื่องเดียว)
+# ระบุชื่อเองแทนการเดาจาก prefix — ช่องที่แค่บังเอิญตัวเลขเท่ากันต้องแยกกันต่อไป
+DRIFT_ENDPOINT_GROUPS = {
+    "hill_score_overall": "hill_score",
+    "hill_score_strength": "hill_score",
+    "hill_score_endurance": "hill_score",
+}
+
+
+def _merge_same_endpoint_drift(findings: list[dict]) -> list[dict]:
+    merged, groups = [], {}
+    for finding in findings:
+        group = DRIFT_ENDPOINT_GROUPS.get(finding["field"])
+        if group is None:
+            merged.append(finding)
+            continue
+        key = (finding["table"], group, finding["horizon_days"],
+               finding["recent"], finding["prior"])
+        if key in groups:
+            groups[key]["field"] += f", {finding['field']}"
+            if finding["level"] == "ERROR":
+                groups[key]["level"] = "ERROR"
+            continue
+        groups[key] = dict(finding)
+        merged.append(groups[key])
+    return merged
 
 
 def partial_snapshot_findings(

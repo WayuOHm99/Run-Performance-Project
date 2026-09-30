@@ -112,7 +112,7 @@ class NumbersUseMonoTests(unittest.TestCase):
                 continue
             call = node.value
             func = call.func
-            if not (isinstance(func, ast.Attribute) and func.attr == "markdown"):
+            if not (isinstance(func, ast.Attribute) and func.attr in ("markdown", "html")):
                 continue
             for arg in call.args:
                 if isinstance(arg, ast.Name):

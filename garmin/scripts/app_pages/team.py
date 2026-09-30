@@ -1,153 +1,227 @@
-"""หน้า "ทีม" ของ Coach Dashboard"""
+"""หน้าแรก "ภาพรวมสุขภาพทีม — วันที่เลือก"
+
+ทุกตัวเลขบนหน้านี้ผูกกับ **วันที่เลือกวันเดียว** (ค่าเริ่มต้นคือวันนี้ตามเวลาไทย)
+ไม่หยิบค่าล่าสุดของแต่ละช่องจากคนละวันมาประกอบการ์ดเดียว และไม่ใช้ยอดรวม 7 วัน
+ถ้าวันที่เลือกไม่มีค่าช่องไหน จะบอกว่า "ไม่มี" แล้วแสดงค่าครั้งก่อนแยกพร้อมวันที่ของมัน
+
+ไม่มีสถานะหรือธงที่ระบบตัดสินเอง — คำของ Garmin (เช่น HRV "Balanced") แสดงตามจริง
+"""
 
 import datetime
-import math
 
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
 
+from dashboard_charts import intraday_chart
+from dashboard_context import focus_athlete, page_context
+from dashboard_data import (
+    athlete_has_training_readiness,
+    load_intraday,
+    load_team_activities,
+    load_wellness_data,
+)
 from dashboard_domain import (
-    status_parts,
-    team_urgency_rank,
+    INTRADAY_METRICS,
+    activity_rows,
+    activity_title,
+    day_row,
+    day_status,
+    duplicate_suspects,
+    fmt_hours,
+    fmt_num,
+    fmt_pace,
+    fmt_recovery_time,
+    fmt_sec,
+    garmin_label,
+    intraday_series,
+    last_before,
+    to_bangkok_timestamp,
+    value_of,
 )
 
-from dashboard_view import (
-    TEAM_CARD_CSS,
-    css_key,
-    render_team_card,
-    status_shape_svg,
-)
+ctx = page_context()
+today = ctx.today
+DAY_KEY = "team_day"
+FALLBACK_DAYS = 30  # ค่าครั้งก่อนที่ยอมย้อนไปหา เมื่อวันที่เลือกไม่มีค่านั้น
 
-from dashboard_context import page_context
-
-_ctx = page_context()
-athletes_df = _ctx.athletes_df
-today = _ctx.today
-
-from dashboard_context import focus_athlete
-from dashboard_team import team_snapshot
-
-team_df, TEAM_INTERNAL_COLUMNS = team_snapshot(athletes_df, today)
-team_rows = team_df.to_dict("records")
+if DAY_KEY not in st.session_state or st.session_state[DAY_KEY] > today:
+    st.session_state[DAY_KEY] = today
 
 
-st.header("สัญญาณทีมวันนี้")
+def shift_day(days):
+    st.session_state[DAY_KEY] = min(today, st.session_state[DAY_KEY]
+                                    + datetime.timedelta(days=days))
+
+
+def go_today():
+    st.session_state[DAY_KEY] = today
+
+
+st.title("ภาพรวมสุขภาพทีม")
+with st.container(horizontal=True, vertical_alignment="bottom"):
+    st.button("วันก่อนหน้า", icon=":material/chevron_left:", on_click=shift_day, args=(-1,),
+              key="team-prev-day")
+    st.date_input("วันที่", key=DAY_KEY, max_value=today, format="DD/MM/YYYY", width=170)
+    st.button("วันถัดไป", icon=":material/chevron_right:", on_click=shift_day, args=(1,),
+              key="team-next-day", disabled=st.session_state[DAY_KEY] >= today)
+    st.button("วันนี้", icon=":material/today:", on_click=go_today, key="team-today",
+              disabled=st.session_state[DAY_KEY] == today)
+day = st.session_state[DAY_KEY]
 st.caption(
-    f"ข้อมูล ณ {today.isoformat()} — สรุปสิ่งที่อุปกรณ์ตรวจพบ ไม่ใช่คำสั่งพร้อมซ้อม/ต้องพัก · "
-    "pace–HR และโหลดเป็นแนวโน้มประกอบ ต้องคุยอาการเจ็บ ป่วย ความล้า และบริบทกับนักกีฬา"
-)
+    f"ข้อมูลของวันที่ {day.strftime('%d/%m/%Y')} ตามปฏิทินของ Garmin (เวลาไทย) · "
+    "Sleep/HRV คือคืนที่ตื่นเช้าวันนี้ · ค่าที่ไม่มีของวันนี้จะบอกค่าครั้งก่อนแยกพร้อมวันที่")
+
+day_activities = load_team_activities(day.isoformat(), day.isoformat())
+suspects = duplicate_suspects(day_activities)
 
 
-# การ์ดต่อคนแทนตารางสรุป 10 คอลัมน์ที่กว้างเกินจอ — คอลัมน์ท้าย ๆ เคยถูกมองข้าม
-# ทั้งที่มีข้อมูล แค่ต้องเลื่อนดู. เรียงตามความเร่งด่วน เพราะคำถามแรกของเช้าคือ
-# "ใครต้องดูก่อน" ไม่ใช่ "เรียงตามชื่อแล้วใครอยู่บนสุด"
-st.markdown(TEAM_CARD_CSS, unsafe_allow_html=True)
-ordered_team = sorted(team_rows, key=lambda item: team_urgency_rank(item["สถานะ"]))
-for order, row in enumerate(ordered_team):
-    # การ์ดทั้งใบเป็นปุ่ม: ปุ่มจริงถูกวางทับทั้งใบแบบโปร่งใสด้วย CSS ที่เจาะจงผ่าน
-    # คลาส st-key-* ซึ่ง Streamlit ติดให้ทุก container/widget ที่มี key
-    # ถ้า CSS ไม่ทำงาน ปุ่มจะกลับไปอยู่ใต้การ์ดตามเดิม — เสียหน้าตา แต่ยังกดได้
-    # ต่อลำดับท้ายคีย์เสมอ เพราะชื่อไทยสองชื่อที่ต่างกันแค่วรรณยุกต์จะถูกล้างเหลือ
-    # สลักเดียวกัน แล้ว Streamlit จะโยน StreamlitDuplicateElementKey ทั้งหน้า
-    slug = f"{css_key(row['นักกีฬา'])}-{order}"
-    with st.container(key=f"teamcard-{slug}"):
-        st.markdown(render_team_card(row), unsafe_allow_html=True)
-        st.button(
-            f"ดูรายละเอียดของ {row['นักกีฬา']}",
-            key=f"open-athlete-{slug}",
-            on_click=focus_athlete,
-            args=(row["นักกีฬา"],),
-            width="stretch",
-        )
+def metric(label, value, note=None):
+    # กว้างคงที่ให้วางได้สองใบต่อแถวในการ์ดสามคอลัมน์ บนมือถือเรียงลงเป็นแถวเดียว
+    st.metric(label, value, note, delta_color="off", delta_arrow="off", width=125)
 
-with st.expander("ดูตัวเลขทีมทั้งหมด", icon=":material/table_view:"):
+
+def missing_note(wellness, column, unit=""):
+    """ค่าของวันนี้ไม่มี → บอกค่าครั้งก่อนพร้อมวันที่ ให้เห็นว่าเป็นคนละวันชัด ๆ"""
+    previous = last_before(wellness, column, day)
+    if not previous:
+        return "ไม่มีของวันนี้"
+    return f"ไม่มีของวันนี้ · ครั้งก่อน {fmt_num(previous['value'], unit)} ({previous['date']:%d/%m})"
+
+
+def athlete_card(athlete, order):
+    aid, name = athlete["athlete_id"], athlete["display_name"]
+    wellness = load_wellness_data(
+        aid, (day - datetime.timedelta(days=FALLBACK_DAYS)).isoformat(), day.isoformat())
+    row = day_row(wellness, day)
+    status_key, status_text = day_status(row, day, today)
+
+    def show(label, column, unit="", note=None, digits=None):
+        value = value_of(row, column)
+        if value is None:
+            metric(label, "–", missing_note(wellness, column, unit))
+        else:
+            metric(label, fmt_num(value, unit, digits), note)
+
+    with st.container(border=True, key=f"team-card-{order}"):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.subheader(name, anchor=False)
+            st.badge(status_text,
+                     icon={"complete_day": ":material/check:",
+                           "partial_today": ":material/schedule:"}.get(
+                               status_key, ":material/cloud_off:"),
+                     color={"complete_day": "green", "partial_today": "blue"}.get(
+                         status_key, "orange"))
+        # ไม่โชว์ชื่ออุปกรณ์บนการ์ด — ทะเบียนอุปกรณ์ของ Garmin ไม่บอกว่าตัวไหนเป็นนาฬิกาหลัก
+        # (is_primary_* เป็น NULL ทุกแถว) การ์ดของ P'kao จึงขึ้น "HRM 600" สายคาดอกแทน fenix 8
+        # รายชื่ออุปกรณ์ทั้งหมดยังดูได้ใน "ข้อมูลที่ Garmin ส่งมา" บน sidebar
+        fetched = to_bangkok_timestamp(value_of(row, "fetched_at"))
+        if pd.notna(fetched):
+            st.caption(f"แถวนี้ดึงจาก Garmin ล่าสุด {fetched:%d/%m %H:%M} น.")
+
+        with st.container(horizontal=True, gap="small"):
+            show("Sleep score", "sleep_score",
+                 note=fmt_hours(value_of(row, "sleep_duration_sec"))
+                 if value_of(row, "sleep_duration_sec") is not None else None)
+            # สถานะของ Garmin อย่างเดียว — ค่าเฉลี่ย 7 วันอยู่ในกราฟหน้า "ร่างกาย"
+            # ใส่ทั้งสองอย่างแล้วถูกตัดท้ายบนจอมือถือ 375 px จนอ่านสถานะไม่ครบ
+            show("HRV เมื่อคืน", "hrv_last_night", " ms",
+                 note=garmin_label(value_of(row, "hrv_status")) or None)
+            show("RHR", "resting_hr", " bpm")
+            high, low = value_of(row, "body_battery_high"), value_of(row, "body_battery_low")
+            show("Body Battery ล่าสุด", "bb_most_recent",
+                 note=f"สูง {fmt_num(high)} · ต่ำ {fmt_num(low)}"
+                 if high is not None or low is not None else None)
+            show("Stress เฉลี่ย", "stress_avg",
+                 note=f"สูงสุด {fmt_num(value_of(row, 'max_stress'))}"
+                 if value_of(row, "max_stress") is not None else None)
+            if athlete_has_training_readiness(aid):
+                show("Training Readiness", "training_readiness",
+                     note=garmin_label(value_of(row, "readiness_level")) or None)
+
+        garmin_words = []
+        if value_of(row, "training_status") is not None:
+            garmin_words.append(f"Training Status **{garmin_label(row['training_status'])}**")
+        if value_of(row, "recovery_time_min") is not None:
+            garmin_words.append(f"Recovery Time **{fmt_recovery_time(row['recovery_time_min'])}**")
+        if value_of(row, "steps") is not None:
+            garmin_words.append(f"ก้าว **{row['steps']:,.0f}**")
+        if garmin_words:
+            st.markdown(" · ".join(garmin_words))
+
+        mine = day_activities[day_activities["athlete_id"] == aid] if not day_activities.empty \
+            else day_activities
+        if mine.empty:
+            st.caption(":material/directions_run: ไม่มีกิจกรรมในวันนี้")
+        for _, activity in mine.sort_values("start_time_local").iterrows():
+            distance = activity.get("distance_m")
+            parts = [
+                pd.to_datetime(activity["start_time_local"]).strftime("%H:%M"),
+                activity_title(activity),
+                f"{distance / 1000:.2f} km" if pd.notna(distance) and distance > 0 else None,
+                fmt_sec(activity.get("duration_sec")),
+                (fmt_pace(activity.get("avg_pace_min_per_km")) + " /km")
+                if pd.notna(distance) and distance > 0 else None,
+                f"HR {activity['avg_hr']:.0f}" if pd.notna(activity.get("avg_hr")) else None,
+                "⚠ อาจซ้ำ" if int(activity["activity_id"]) in suspects else None,
+            ]
+            st.markdown(":material/directions_run: "
+                        + " · ".join(part for part in parts if part and part != "–"))
+
+        st.button(f"ดูข้อมูลของ {name}", key=f"open-athlete-{order}",
+                  on_click=focus_athlete, args=(name,), icon=":material/arrow_forward:",
+                  type="tertiary")
+
+
+athletes = ctx.athletes_df.to_dict("records")
+for row_start in range(0, len(athletes), 3):
+    columns = st.columns(3)
+    for column, (order, athlete) in zip(
+            columns, enumerate(athletes[row_start:row_start + 3], start=row_start)):
+        with column:
+            athlete_card(athlete, order)
+
+st.subheader("เทียบระหว่างวันทั้งทีม", anchor=False)
+intraday = load_intraday(day)
+if intraday.empty:
+    st.caption("ยังไม่มีข้อมูลระหว่างวันของวันนี้")
+else:
+    labels = {key: label for key, (label, _) in INTRADAY_METRICS.items()}
+    chosen = st.segmented_control("ค่า", options=list(labels), format_func=labels.get,
+                                  default="heart_rate", required=True, key="team_intraday_metric",
+                                  label_visibility="collapsed")
+    names = dict(zip(ctx.athletes_df["athlete_id"], ctx.athletes_df["display_name"]))
+    series = intraday_series(intraday, chosen)
+    if series["ค่า"].notna().any():
+        st.altair_chart(intraday_chart(series, day, y_title=INTRADAY_METRICS[chosen][1],
+                                       names=names, height=240), width="stretch")
+        st.caption("แกนเวลาเดียวกัน 00:00–24:00 · เส้นขาด = ช่วงที่ไม่มีข้อมูลจากนาฬิกา")
+    else:
+        st.caption(f"ไม่มีข้อมูล {labels[chosen]} ระหว่างวันของวันนี้")
+
+st.subheader("กิจกรรมของทีมในวันนี้", anchor=False)
+if day_activities.empty:
+    st.caption("ไม่มีกิจกรรมที่ Garmin บันทึกในวันนี้")
+else:
+    ordered = day_activities.sort_values("start_time_local", ascending=False)
+    table = activity_rows(ordered)
+    table.insert(1, "นักกีฬา", ordered["display_name"].reset_index(drop=True))
+    table["ตรวจสอบ"] = ["อาจซ้ำ" if int(aid) in suspects else ""
+                        for aid in ordered["activity_id"]]
     st.dataframe(
-        # "สถานะ" กับ "สถานะ pace–HR" เก็บอีโมจิไว้เป็น *คีย์* ให้การ์ดแปลงเป็นรูปทรง
-        # (การ์ดอ่านจาก `team_df` ก่อนบรรทัดนี้ จึงยังได้คีย์ครบ) — ตารางนี้เป็น
-        # ข้อความล้วนที่คนอ่าน จึงต้องถอดคีย์ออกก่อน ไม่งั้นอีโมจิถึงตาโค้ชตรง ๆ
-        team_df.drop(columns=TEAM_INTERNAL_COLUMNS).assign(
-            **{
-                column: (lambda frame, name=column: frame[name].map(
-                    lambda value: status_parts(value)[1]))
-                for column in ("สถานะ", "สถานะ pace–HR")
-            }
-        ),
-        hide_index=True,
+        table, hide_index=True, width="stretch",
         column_config={
-            "นักกีฬา": st.column_config.TextColumn("นักกีฬา", pinned=True),
-            "pace–HR trend": st.column_config.TextColumn(
-                "แนวโน้ม pace–HR รันเบา"),
-            "Body Battery ตอนนี้/ล่าสุด": st.column_config.NumberColumn(
-                "Body Battery ตอนนี้/ล่าสุด", format="%.0f"),
-            "Sleep": st.column_config.NumberColumn("Sleep", format="%.0f"),
-            "RHR": st.column_config.NumberColumn("RHR", format="%.0f"),
-            "Readiness": st.column_config.NumberColumn("Readiness", format="%.0f"),
-            "สถานะซ้อม (Garmin)": st.column_config.TextColumn(
-                "สถานะซ้อม (Garmin)",
-                help="สถานะที่ Garmin คำนวณเองและขึ้นกับรุ่นนาฬิกา"),
-            "โหลด 7 วัน": st.column_config.TextColumn(
-                "โหลด 7 วัน",
-                help="ปริมาณดิบพร้อมหน่วยของตัวเอง — TL จาก Garmin ถ้านาฬิกาให้ "
-                     "ไม่งั้นเป็นระยะวิ่ง (km) เทียบข้ามคนไม่ได้"),
-            "ค่าเฉลี่ยโหลด 28 วัน": st.column_config.TextColumn(
-                "ค่าเฉลี่ยโหลด 28 วัน",
-                help="แสดงแยกจากโหลด 7 วัน ไม่หารเป็น ACWR และไม่ใช้เป็นเส้นเสี่ยง"),
-            "เซสชัน 7 วัน": st.column_config.NumberColumn(
-                "เซสชัน 7 วัน", format="%d",
-                help="คนที่โหลดมาจาก TL นับทุกกิจกรรม "
-                     "ส่วนคนที่ใช้ระยะวิ่งนับเฉพาะการวิ่ง"),
+            "ระยะ (km)": st.column_config.NumberColumn(format="%.2f"),
+            "HR เฉลี่ย": st.column_config.NumberColumn(format="%d"),
+            "HR สูงสุด": st.column_config.NumberColumn(format="%d"),
+            "Training Effect": st.column_config.NumberColumn(format="%.1f"),
+            "Training Load": st.column_config.NumberColumn(format="%d"),
+            "ตรวจสอบ": st.column_config.TextColumn(
+                help="คนเดียวกัน เริ่มเวลาเดียวกัน ชนิดเดียวกัน แต่ Garmin เก็บเป็นคนละรายการ "
+                     "(เช่นบันทึกจากสองอุปกรณ์) ระบบไม่ลบหรือรวมเอง — ตรวจใน Garmin Connect"),
         },
     )
+    if suspects:
+        st.caption(f"มี {len(suspects)} รายการที่อาจซ้ำ — ยังนับรวมอยู่ในยอดทุกหน้า "
+                   "จนกว่าจะลบรายการที่ซ้ำใน Garmin Connect")
 
-with st.expander("เกณฑ์ที่ใช้ประเมิน", icon=":material/info:"):
-    # คำอธิบายต้องใช้สัญลักษณ์เดียวกับที่การ์ดวาดจริง — เดิมเป็นอีโมจิ
-    # ทั้งที่การ์ดเป็นรูปทรงวาดมาตั้งแต่ PR #32 โค้ชจึงเห็นคนละภาษาในหน้าเดียว
-    # และบนกระดาษขาวดำคำอธิบายเหลือช่องว่างส่วนการ์ดยังอ่านได้
-    def _legend_mark(key):
-        return status_shape_svg(key, 11)
-
-    st.markdown(
-        "**สรุปสัญญาณจากอุปกรณ์:** "
-        + _legend_mark("watch") + " ควรทบทวนก่อนซ้อม = มี Garmin signal อย่างน้อย 1 ข้อ · "
-        + _legend_mark("ready")
-        + " ไม่พบสัญญาณเตือนจากอุปกรณ์ = ไม่มี signal ในข้อมูลที่มี (ไม่ใช่ training clearance) · "
-        + _legend_mark("unknown")
-        + " ข้อมูลไม่พอ = ยังไม่มีข้อมูลซ้อม หรือ wellness สดน้อยกว่า 3/4 ค่า · "
-        + _legend_mark("unknown")
-        + " ไม่มีข้อมูล = ยังไม่มีทั้ง workload และ wellness",
-        unsafe_allow_html=True,
-    )
-    # หน่วยของโหลดขึ้นกับรุ่นนาฬิกา ทีมนี้จึงมีทั้ง TL และ km พร้อมกัน
-    # (วัดจริง 27 ส.ค. 69: 32.7 km · 92.6 km · 323 TL) — ถ้าไม่บอกไว้ตรงนี้
-    # ตัวเลขดิบที่วางเรียงกันจะถูกอ่านว่าเทียบกันได้
-    st.markdown(
-        "**โหลด 7 วัน:** หน่วยขึ้นกับ**รุ่นนาฬิกา** — ได้ Garmin Training Load (TL) "
-        "ถ้านาฬิกาส่งมา ไม่งั้นคิดจากระยะวิ่ง (km) **ตัวเลขดิบจึงเทียบข้ามคนไม่ได้** "
-        "ระบบแสดงโหลด 7 วันกับค่าเฉลี่ย 28 วันแยกกันและไม่หารเป็น ACWR · "
-        "จำนวนเซสชันก็คนละนิยาม: โหลดจาก TL นับทุกกิจกรรม ส่วนโหลดจากระยะวิ่งนับเฉพาะการวิ่ง"
-    )
-    st.markdown(r"""
-
-**นโยบาย Garmin-only:** ไม่มีแบบฟอร์มและไม่รวมค่าเป็นคะแนนความสดใหม่ของระบบ
-ก่อนซ้อมต้องถามปากเปล่าเรื่องอาการเจ็บ ป่วย และความล้าผิดปกติ
-
-**Garmin signals ที่แสดงให้ทบทวน:** Sleep อยู่หมวด Poor · HRV LOW/UNBALANCED ·
-Training Readiness LOW/POOR · Training Status Strained/Overreaching/Unproductive
-ค่ากลุ่มนี้สัมพันธ์และซ้อนองค์ประกอบกัน จึงไม่นับจำนวนเป็นคะแนนโหวต
-
-**แนวโน้ม pace–HR รันเบา** = ความเร็ว (ม./นาที) ÷ HR เฉลี่ย นับเฉพาะข้อมูลวิ่ง easy
-(HR ≤ 89% LTHR, ระยะรวม ≥ 3 กม.) โดยรวมหลาย activity ในวันเดียวเป็นหนึ่งค่ารายวัน
-แล้วเทียบ median 3 วันล่าสุดกับฐาน 28 วันก่อนหน้าที่ไม่ซ้อนกัน
-ค่านี้ไวต่อเพซ เส้นทาง ความชัน อากาศ การหยุด และ HR sensor จึงเป็นบริบทเท่านั้น
-ไม่ใช่ running economy หรือความสด และไม่มีเกณฑ์สั่งพัก/เพิ่มโหลด
-
-**ก่อนเปลี่ยนตาราง:** ต้องถามอาการเจ็บเฉพาะจุด/วิ่งเสียฟอร์ม อาการป่วย ไข้ เจ็บหน้าอก
-เวียนหัว ความล้า/ปวดกล้ามเนื้อ คุณภาพการนอน ความเครียด และเป้าหมายของเซสชัน
-หากมีอาการทางการแพทย์หรืออาการเจ็บที่เปลี่ยนการวิ่ง ให้หยุดประเมินโดยโค้ชอย่างเดียว
-และส่งต่อผู้เชี่ยวชาญที่เหมาะสม
-
-_โหลด 7 วันและค่าเฉลี่ย 28 วันเป็นบริบทแยกกัน ไม่ดันสถานะและไม่สร้าง ACWR ในชื่อใหม่_
-""")
+st.caption("ข้อมูลทั้งหมดมาจาก Garmin · ก่อนซ้อมต้องถามอาการเจ็บ ป่วย และความล้าจากนักกีฬาเอง")

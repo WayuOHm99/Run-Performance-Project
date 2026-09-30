@@ -96,7 +96,14 @@ def validate(
     now: datetime | str | None = None,
     max_age_days: int = DEFAULT_MAX_AGE_DAYS,
     dashboard_probe: bool = False,
+    require_fresh: bool = False,
 ) -> dict:
+    """Validate backup integrity; report data freshness separately.
+
+    `ok` answers "is this backup intact and restorable". Old data (athletes not
+    recording for a while) is not corruption, so it only sets `data_stale` unless
+    the caller asks for `require_fresh`, which turns staleness into a failure.
+    """
     database = Path(path)
     result = _base(database)
     if not database.is_file():
@@ -200,11 +207,12 @@ def validate(
         latest_activity_date=latest_activity.isoformat(),
         latest_wellness_date=latest_wellness.isoformat(),
         data_age_days=max(activity_age_days, wellness_age_days),
+        data_stale=max(activity_age_days, wellness_age_days) > max_age_days,
     )
     if min(activity_age_days, wellness_age_days) < -1:
         result["reason"] = "data_future"
         return result
-    if max(activity_age_days, wellness_age_days) > max_age_days:
+    if require_fresh and result["data_stale"]:
         result["reason"] = "data_stale"
         return result
 
@@ -225,6 +233,10 @@ def main(argv=None) -> int:
     parser.add_argument("--now", help="aware ISO timestamp (test/recovery seam)")
     parser.add_argument("--max-age-days", type=int, default=DEFAULT_MAX_AGE_DAYS)
     parser.add_argument("--dashboard-probe", action="store_true")
+    parser.add_argument(
+        "--require-fresh", action="store_true",
+        help="treat stale data as a failure (default: only warn via data_stale)",
+    )
     parser.add_argument("database", type=Path)
     args = parser.parse_args(argv)
 
@@ -233,14 +245,20 @@ def main(argv=None) -> int:
         now=args.now,
         max_age_days=args.max_age_days,
         dashboard_probe=args.dashboard_probe,
+        require_fresh=args.require_fresh,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     elif result["ok"]:
         print(
-            "OK: Garmin schema/content/freshness/dashboard recovery proof passed "
+            "OK: Garmin schema/content/dashboard recovery proof passed "
             f"({result['size_bytes']} bytes)"
         )
+        if result.get("data_stale"):
+            print(
+                "WARNING: data_stale - newest data is "
+                f"{result['data_age_days']} days old (backup itself is intact)"
+            )
     else:
         print(f"ERROR: {result['reason']} ({result['quick_check']})")
     return 0 if result["ok"] else 1

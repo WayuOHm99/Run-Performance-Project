@@ -76,7 +76,7 @@ NAV_ITEMS = ("""(() => {
   return links.map(a => a.innerText.trim()).filter(Boolean);
 })()""")
 
-SUBHEADS = ("""[...document.querySelectorAll('[data-testid=stMain] h2, [data-testid=stMain] h3')]
+SUBHEADS = ("""[...document.querySelectorAll('[data-testid=stMain] h1, [data-testid=stMain] h2, [data-testid=stMain] h3')]
   .map(h => h.innerText.trim()).filter(Boolean)""")
 
 HEADING = ("(document.querySelector('[data-testid=stMain] h1, "
@@ -112,7 +112,7 @@ async def main():
             await tab.send("Page.navigate", url=f"http://127.0.0.1:{APP_PORT}")
 
             await settle(tab, HEADING, lambda v: bool(v and v.strip()))
-            names = await settle(tab, NAV_ITEMS, lambda v: v and len(v) >= 6)
+            names = await settle(tab, NAV_ITEMS, lambda v: v and len(v) >= 5)
             print("แถบ navigation:", " | ".join(n.replace(chr(10), " ") for n in names))
 
             print("หน้าเริ่มต้น: path =", await tab.js("location.pathname"),
@@ -151,7 +151,7 @@ async def main():
             await tab.js("""(() => {
               const links = [...document.querySelectorAll('a[data-testid="stTopNavLink"], '
                 + '[data-testid="stNavLink"], nav a')].filter(a => a.innerText.trim());
-              const team = links.find(a => a.getAttribute('href')?.includes('team'));
+              const team = links.find(a => a.innerText.trim().endsWith('ทีม'));
               if (team) team.click();
             })()""")
             await settle(tab, SUBHEADS, lambda v: bool(v) and "ทีม" in v[0], timeout=45)
@@ -172,13 +172,13 @@ async def main():
               return label;
             })()""")
             if picked:
-                path = await settle(tab, "location.pathname", lambda v: v == "/", timeout=45)
+                path = await settle(tab, "location.pathname", lambda v: v == "/body", timeout=45)
                 chosen = await tab.js(
                     "(document.querySelector('[data-testid=stSelectbox]') || {})"
                     ".innerText || ''") or ""
                 # รอให้หน้าใหม่วาดหัวข้อของตัวเองก่อน ไม่งั้นอ่านได้ค่าว่างของจังหวะกลางทาง
                 subhead = (await settle(tab, SUBHEADS,
-                                        lambda v: bool(v) and "วันนี้ของ" in v[0],
+                                        lambda v: bool(v) and "ร่างกาย" in v[0],
                                         timeout=45))[0]
                 print(f"ปุ่มบนการ์ด {picked!r} -> path {path} · หัวข้อ {subhead[:40]} · sidebar {chosen.strip().splitlines()[-1][:20] if chosen.strip() else "?"}")
             else:

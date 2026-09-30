@@ -405,8 +405,9 @@ class PreviousDayRepairTests(unittest.TestCase):
             """INSERT INTO fact_daily_wellness
                (athlete_id, calendar_date, resting_hr, stress_avg, steps,
                 body_battery_high, body_battery_low, sleep_score,
-                hrv_last_night, avg_sleep_respiration)
-               VALUES (1, ?, 40, 43, 10318, 48, 5, 57, 82, 14)""",
+                hrv_last_night, avg_sleep_respiration, settle_reviewed_at_utc)
+               VALUES (1, ?, 40, 43, 10318, 48, 5, 57, 82, 14,
+                       '2026-08-09T03:30:00Z')""",  # เพิ่งตรวจทาน (ภายใน interval)
             (self.DAY,),
         )
         self.conn.commit()

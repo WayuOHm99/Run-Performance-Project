@@ -130,8 +130,8 @@ class SqliteBackupValidationTests(unittest.TestCase):
             connection.close()
 
             fresh_result = validator.validate(fresh, now=now)
-            stale_result = validator.validate(stale, now=now)
-            mixed_result = validator.validate(mixed, now=now)
+            stale_result = validator.validate(stale, now=now, require_fresh=True)
+            mixed_result = validator.validate(mixed, now=now, require_fresh=True)
             orphaned_result = validator.validate(orphaned, now=now)
 
         self.assertTrue(fresh_result["ok"])
@@ -146,6 +146,51 @@ class SqliteBackupValidationTests(unittest.TestCase):
         self.assertEqual(mixed_result["reason"], "data_stale")
         self.assertFalse(orphaned_result["ok"])
         self.assertEqual(orphaned_result["reason"], "content_empty")
+
+    def test_stale_but_intact_backup_is_valid_and_flags_staleness(self):
+        validator = load_validator()
+        now = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory(prefix="offsite-db-stale-ok-") as raw:
+            database = Path(raw) / "garmin-20260807.db"
+            create_minimal_garmin_database(database, "2026-08-07")
+
+            result = validator.validate(database, now=now)
+            strict = validator.validate(database, now=now, require_fresh=True)
+
+        self.assertTrue(result["ok"], msg=result)
+        self.assertTrue(result["data_stale"])
+        self.assertEqual(result["data_age_days"], 10)
+        self.assertFalse(strict["ok"])
+        self.assertEqual(strict["reason"], "data_stale")
+
+    def test_fresh_backup_is_not_flagged_stale(self):
+        validator = load_validator()
+        with tempfile.TemporaryDirectory(prefix="offsite-db-fresh-") as raw:
+            database = Path(raw) / "garmin.db"
+            create_minimal_garmin_database(database, "2026-08-17")
+            result = validator.validate(
+                database, now=datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+            )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["data_stale"])
+
+    def test_cli_require_fresh_flag_restores_strict_exit_code(self):
+        with tempfile.TemporaryDirectory(prefix="offsite-db-cli-stale-") as raw:
+            database = Path(raw) / "garmin.db"
+            create_minimal_garmin_database(database, "2026-08-01")
+            base = [
+                sys.executable, str(SCRIPT), "--json",
+                "--now", "2026-08-17T12:00:00+00:00",
+            ]
+            kwargs = dict(
+                cwd=PROJECT_ROOT / "garmin", capture_output=True, text=True,
+                timeout=SUBPROCESS_TIMEOUT_SEC, check=False,
+            )
+            lenient = subprocess.run(base + [str(database)], **kwargs)
+            strict = subprocess.run(base + ["--require-fresh", str(database)], **kwargs)
+        self.assertEqual(lenient.returncode, 0, msg=lenient.stderr)
+        self.assertTrue(json.loads(lenient.stdout)["data_stale"])
+        self.assertEqual(strict.returncode, 1)
 
     def test_dashboard_probe_uses_isolated_copy_and_preserves_source(self):
         validator = load_validator()
@@ -234,6 +279,56 @@ class SqliteBackupValidationTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertTrue(json.loads(completed.stdout)["ok"])
+
+
+class StaleDataDoesNotBlockBackupTests(unittest.TestCase):
+    def test_offsite_backup_uploads_when_athletes_have_not_recorded_for_days(self):
+        offsite = load_offsite_backup()
+        with tempfile.TemporaryDirectory(prefix="offsite-stale-run-") as raw:
+            daily = Path(raw) / "daily"
+            daily.mkdir()
+            database = daily / "garmin-20200101.db"
+            create_minimal_garmin_database(database, "2020-01-01")
+            calls = []
+
+            def fake_run(command, **_kwargs):
+                calls.append(list(command))
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            repo = Path(raw) / "repo"
+            (repo).mkdir()
+            (repo / "config").write_text("x")
+            with (
+                mock.patch.object(offsite, "SOURCES", [daily]),
+                mock.patch.object(offsite, "LOCAL_REPOSITORY", repo),
+                mock.patch.object(offsite, "_get_password", return_value="x" * 32),
+                mock.patch.object(offsite, "_find_executable", side_effect=lambda n: n),
+                mock.patch.object(offsite, "_run", side_effect=fake_run),
+                mock.patch.object(offsite, "_repository_name", return_value="o/r"),
+                mock.patch.object(
+                    offsite, "_archive_repository",
+                    return_value=(Path(raw) / "a.zip", "d"),
+                ),
+                mock.patch.object(offsite, "_upload_and_rotate_assets"),
+                mock.patch.object(offsite, "_write_status"),
+            ):
+                (Path(raw) / "a.zip").write_bytes(b"z")
+                result = offsite.run_backup()
+
+        self.assertTrue(result["ok"], msg=result)
+        self.assertTrue(result["data_stale"])
+        self.assertTrue(any(c[1:2] == ["backup"] for c in calls), msg=calls)
+
+    def test_corrupt_daily_backup_still_blocks_upload(self):
+        offsite = load_offsite_backup()
+        with tempfile.TemporaryDirectory(prefix="offsite-corrupt-run-") as raw:
+            daily = Path(raw) / "daily"
+            daily.mkdir()
+            (daily / "garmin-20260101.db").write_bytes(b"not a sqlite database")
+            with mock.patch.object(offsite, "SOURCES", [daily]):
+                with self.assertRaises(offsite.OffsiteBackupError) as ctx:
+                    offsite._latest_verified_daily_database()
+        self.assertEqual(str(ctx.exception), "daily_backup_invalid")
 
 
 class OffsiteBackupCliTests(unittest.TestCase):

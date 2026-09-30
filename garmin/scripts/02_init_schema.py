@@ -188,6 +188,8 @@ WELLNESS_COLUMNS = [
     # Throttle metadata for the fast lane's conditional previous-day repair.
     # It records an attempt, not proof that every metric was returned.
     ("repair_attempted_at_utc", "TEXT"),
+    # เวลาที่ตรวจทานวันที่จบแล้วรอบล่าสุด (settle review) — รับค่าที่ Garmin แก้ย้อนหลัง
+    ("settle_reviewed_at_utc", "TEXT"),
     ("fetched_at", UTC_NOW_DEFAULT),
 ]
 
@@ -244,6 +246,18 @@ BODY_COMPOSITION_COLUMNS = [
     ("weight_kg", "REAL"),
     ("bmi", "REAL"),
     ("body_fat_pct", "REAL"),
+    ("fetched_at", UTC_NOW_DEFAULT),
+]
+
+
+# จุด intraday (HR/stress/body battery ทุก 2-3 นาที) — เก็บ 180 วัน ดู scripts/intraday.py
+WELLNESS_INTRADAY_COLUMNS = [
+    ("athlete_id", "INTEGER NOT NULL REFERENCES dim_athlete(athlete_id)"),
+    ("calendar_date", "TEXT NOT NULL"),
+    ("metric", "TEXT NOT NULL"),
+    ("ts_utc", "TEXT NOT NULL"),
+    ("value", "REAL"),
+    ("source_code", "INTEGER"),
     ("fetched_at", UTC_NOW_DEFAULT),
 ]
 
@@ -320,6 +334,8 @@ def init_schema(db_path: Path | None = None):
             ",\n        PRIMARY KEY (activity_id, split_num) ON CONFLICT REPLACE")
     _create(cur, "fact_daily_wellness", WELLNESS_COLUMNS,
             ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
+    _create(cur, "fact_wellness_intraday", WELLNESS_INTRADAY_COLUMNS,
+            ",\n        PRIMARY KEY (athlete_id, metric, ts_utc)")
     _create(cur, "fact_race_prediction", RACE_PREDICTION_COLUMNS,
             ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
     _create(cur, "fact_personal_record", PERSONAL_RECORD_COLUMNS,
@@ -343,6 +359,7 @@ def init_schema(db_path: Path | None = None):
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date ON fact_wellness_intraday(athlete_id, calendar_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_device_athlete ON dim_athlete_device(athlete_id)")
 
     conn.commit()

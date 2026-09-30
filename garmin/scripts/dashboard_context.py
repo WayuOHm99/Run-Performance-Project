@@ -11,7 +11,7 @@ import streamlit as st
 
 CONTEXT_KEY = "_dashboard_context"
 ATHLETE_STATE_KEY = "selected_athlete"  # ต้องตรงกับ key ของ selectbox ใน sidebar
-TODAY_PAGE = "app_pages/today.py"
+ATHLETE_PAGE = "app_pages/body.py"
 PENDING_PAGE_KEY = "_dashboard_pending_page"
 
 
@@ -34,7 +34,7 @@ def page_context():
 
 
 def focus_athlete(name):
-    """ปุ่มบนการ์ดทีม: เลือกนักกีฬาคนนั้นแล้วพาไปหน้า "วันนี้" ในคลิกเดียว
+    """ปุ่มบนการ์ดทีม: เลือกนักกีฬาคนนั้นแล้วพาไปหน้า "ร่างกาย" ของคนนั้นในคลิกเดียว
 
     ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างหน้าเดิม ตั้งแค่หน้าจะย้ายหน้าแต่ยังเป็นคนเดิม
     ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน จึงต้องทำครบทั้งคู่
@@ -46,7 +46,7 @@ def focus_athlete(name):
     เท่านั้น — ทั้งเทสและ AppTest มองไม่เห็น) จึงฝากคำขอไว้ให้หน้าเปลือกทำแทน
     """
     st.session_state[ATHLETE_STATE_KEY] = name
-    st.session_state[PENDING_PAGE_KEY] = TODAY_PAGE
+    st.session_state[PENDING_PAGE_KEY] = ATHLETE_PAGE
 
 
 def honour_pending_page():
