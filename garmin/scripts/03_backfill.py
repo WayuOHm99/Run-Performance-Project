@@ -1552,7 +1552,9 @@ def fetch_and_upsert_devices(garmin, conn, athlete_id):
     return len(seen)
 
 
-def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
+def fetch_and_insert_extras(
+    garmin, conn, athlete_id, start_date, end_date, *, endpoint_failures=None,
+):
     """ข้อมูลเสริมที่ API ให้แบบ range/snapshot (ไม่ต้องวนรายวัน — ประหยัด request):
     lactate threshold ล่าสุดจากนาฬิกา, race predictions รายวันทั้งช่วง,
     body composition (น้ำหนัก/BMI/ไขมัน), personal records, gear (รองเท้า)"""
@@ -1681,45 +1683,64 @@ def fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date):
     conn.commit()
     time.sleep(0.3)
 
-    # ── Personal records (snapshot ทั้งบัญชี — ทับของเก่าด้วยค่าปัจจุบันเสมอ) ──
-    prs = safe_call(garmin.get_personal_record)
+    # ── Personal records (snapshot ทั้งบัญชี — แทนที่ของเดิมทั้งชุดเมื่อดึงสำเร็จเท่านั้น) ──
+    # PR คือ snapshot ที่ Garmin คำนวณเอง (ไม่ใช่ข้อมูลสุขภาพดิบ) — PR ที่นักกีฬาลบใน Connect
+    # (เช่น GPS เพี้ยน 1 กม. 83 วิ) ต้องหายจากเรา ไม่งั้นค้างบน dashboard ตลอดไป
+    # safe_call คืน None ทั้งตอน API พังและตอน 404/204 จึงแยก "พัง" กับ "ไม่มี" ไม่ได้ →
+    # ไม่ใช่ list/dict ที่คาดไว้ = ไม่แตะอะไรเลย
+    prs = safe_call(garmin.get_personal_record, _failures=endpoint_failures,
+                    _endpoint="get_personal_record")
     if isinstance(prs, dict):
-        prs = prs.get("personalRecords") or []
+        prs = prs.get("personalRecords")
+    records = {}
+    if isinstance(prs, list):
+        for pr in prs:
+            if not isinstance(pr, dict):
+                continue
+            record_type_id = _bounded_number(pr.get("typeId"), 1, 1_000_000)
+            value = _bounded_number(pr.get("value"), 0, 1_000_000_000)
+            if record_type_id is None or value is None:
+                continue
+            achieved = _first_not_none(
+                pr.get("prStartTimeGmtFormatted"), pr.get("prStartTimeGmt"))
+            if isinstance(achieved, (int, float)):
+                try:
+                    achieved = datetime.fromtimestamp(
+                        achieved / 1000, tz=timezone.utc).date().isoformat()
+                except (OverflowError, OSError, ValueError):
+                    achieved = None
+            else:
+                achieved = _calendar_date(achieved)
+            records[record_type_id] = (
+                PR_LABELS.get(record_type_id), value,
+                _bounded_number(pr.get("activityId"), 1, None), achieved)
+    elif prs is not None and endpoint_failures is not None:
+        endpoint_failures.append(
+            {"endpoint": "get_personal_record", "reason": "payload"})
+    # list ว่าง (หรือไม่มีแถวใดอ่านได้) ไม่ถือเป็น snapshot ที่ล้างตารางได้: response ว่างแยกไม่ออก
+    # จาก Garmin ตอบว่างชั่วคราว แต่การที่นักกีฬาลบ PR "ทุกอัน" แทบไม่เกิด — ยอมค้างของเก่าดีกว่า
+    # เสี่ยงล้างทั้งชุดจาก response เสีย (ลบทีละอันยังได้ผลตามปกติ เพราะ list ยังไม่ว่าง)
     n_pr = 0
-    for pr in prs if isinstance(prs, list) else []:
-        if not isinstance(pr, dict):
-            continue
-        record_type_id = _bounded_number(pr.get("typeId"), 1, 1_000_000)
-        value = _bounded_number(pr.get("value"), 0, 1_000_000_000)
-        if record_type_id is None or value is None:
-            continue
-        achieved = _first_not_none(
-            pr.get("prStartTimeGmtFormatted"), pr.get("prStartTimeGmt"))
-        if isinstance(achieved, (int, float)):
-            try:
-                achieved = datetime.fromtimestamp(
-                    achieved / 1000, tz=timezone.utc).date().isoformat()
-            except (OverflowError, OSError, ValueError):
-                achieved = None
-        else:
-            achieved = _calendar_date(achieved)
-        activity_id = _bounded_number(pr.get("activityId"), 1, None)
-        cur.execute(f"""INSERT INTO fact_personal_record
-            (athlete_id, record_type_id, record_label, value, activity_id,
-             achieved_date, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, {UTC_NOW_SQL})
-            ON CONFLICT(athlete_id, record_type_id) DO UPDATE SET
-                record_label = COALESCE(
-                    excluded.record_label, fact_personal_record.record_label),
-                value = COALESCE(excluded.value, fact_personal_record.value),
-                activity_id = COALESCE(
-                    excluded.activity_id, fact_personal_record.activity_id),
-                achieved_date = COALESCE(
-                    excluded.achieved_date, fact_personal_record.achieved_date),
-                fetched_at = excluded.fetched_at""",
-            (athlete_id, record_type_id, PR_LABELS.get(record_type_id), value,
-             activity_id, achieved))
-        n_pr += 1
+    if records:
+        placeholders = ", ".join("?" for _ in records)
+        cur.execute(
+            "DELETE FROM fact_personal_record "
+            f"WHERE athlete_id = ? AND record_type_id NOT IN ({placeholders})",
+            (athlete_id, *records))
+        for record_type_id, (label, value, activity_id, achieved) in records.items():
+            # ทับด้วยค่าปัจจุบันทั้งแถว (ไม่ COALESCE กับของเก่า) — ค่าที่ Garmin แก้ต้องแทนที่จริง
+            cur.execute(f"""INSERT INTO fact_personal_record
+                (athlete_id, record_type_id, record_label, value, activity_id,
+                 achieved_date, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, {UTC_NOW_SQL})
+                ON CONFLICT(athlete_id, record_type_id) DO UPDATE SET
+                    record_label = excluded.record_label,
+                    value = excluded.value,
+                    activity_id = excluded.activity_id,
+                    achieved_date = excluded.achieved_date,
+                    fetched_at = excluded.fetched_at""",
+                (athlete_id, record_type_id, label, value, activity_id, achieved))
+            n_pr += 1
     if n_pr:
         print(f"   ✅ Personal records: {n_pr} รายการ")
     conn.commit()
@@ -2059,7 +2080,10 @@ def main():
                 endpoint_failures=wellness_endpoint_failures,
                 terminal_errors=wellness_terminal_errors,
             )
-            fetch_and_insert_extras(garmin, conn, athlete_id, start_date, end_date)
+            fetch_and_insert_extras(
+                garmin, conn, athlete_id, start_date, end_date,
+                endpoint_failures=wellness_endpoint_failures,
+            )
         if wellness_terminal_errors:
             raise CoreWellnessUnavailableError(
                 failure
