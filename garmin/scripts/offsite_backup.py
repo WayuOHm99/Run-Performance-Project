@@ -172,7 +172,7 @@ def _get_password() -> str:
     return password
 
 
-def _latest_verified_daily_database() -> Path:
+def _latest_verified_daily_database() -> tuple[Path, dict]:
     candidates = sorted(SOURCES[0].glob("garmin-*.db"))
     if not candidates:
         raise OffsiteBackupError("daily_backup_missing")
@@ -180,7 +180,7 @@ def _latest_verified_daily_database() -> Path:
     result = validate_sqlite(latest)
     if not result["ok"]:
         raise OffsiteBackupError("daily_backup_invalid")
-    return latest
+    return latest, result
 
 
 def _ensure_release(gh: str, repo: str) -> None:
@@ -291,7 +291,7 @@ def run_backup() -> dict:
         for source in SOURCES:
             if not source.is_dir():
                 raise OffsiteBackupError(f"source_missing:{source.name}")
-        verified_database = _latest_verified_daily_database()
+        verified_database, verified = _latest_verified_daily_database()
         environment = _restic_environment(password)
         backup_command = [
             restic, "backup", *map(str, SOURCES), "--host", platform.node(), "--tag", "run-performance",
@@ -326,6 +326,8 @@ def run_backup() -> dict:
             "archive_sha256": digest,
             "archive_size_bytes": size_bytes,
             "verified_database": verified_database.name,
+            "data_stale": bool(verified.get("data_stale")),
+            "data_age_days": verified.get("data_age_days"),
         }
     except (OffsiteBackupError, OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError) as exc:
         reason = str(exc) or exc.__class__.__name__
@@ -411,6 +413,7 @@ def run_restore_drill() -> dict:
             "active_activity_count": validation["active_activity_count"],
             "wellness_count": validation["wellness_count"],
             "dashboard_probe": validation["dashboard_probe"],
+            "data_stale": bool(validation.get("data_stale")),
         }
     except (OffsiteBackupError, OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
         reason = str(exc) or exc.__class__.__name__
