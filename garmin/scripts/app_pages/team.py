@@ -119,11 +119,10 @@ def athlete_card(athlete, order):
             show("Sleep score", "sleep_score",
                  note=fmt_hours(value_of(row, "sleep_duration_sec"))
                  if value_of(row, "sleep_duration_sec") is not None else None)
+            # สถานะของ Garmin อย่างเดียว — ค่าเฉลี่ย 7 วันอยู่ในกราฟหน้า "ร่างกาย"
+            # ใส่ทั้งสองอย่างแล้วถูกตัดท้ายบนจอมือถือ 375 px จนอ่านสถานะไม่ครบ
             show("HRV เมื่อคืน", "hrv_last_night", " ms",
-                 note=" · ".join(filter(None, [
-                     garmin_label(value_of(row, "hrv_status")),
-                     f"เฉลี่ย 7 วัน {fmt_num(value_of(row, 'hrv_weekly_avg'))}"
-                     if value_of(row, "hrv_weekly_avg") is not None else None])) or None)
+                 note=garmin_label(value_of(row, "hrv_status")) or None)
             show("RHR", "resting_hr", " bpm")
             high, low = value_of(row, "body_battery_high"), value_of(row, "body_battery_low")
             show("Body Battery ล่าสุด", "bb_most_recent",
