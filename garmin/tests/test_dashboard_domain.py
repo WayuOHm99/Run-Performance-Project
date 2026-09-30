@@ -51,54 +51,57 @@ class LatestPerFieldTests(unittest.TestCase):
         self.assertEqual(latest["value"], 78)
         self.assertIn("11:30", HELPERS["readiness_when"](latest, date(2026, 8, 9)))
 
-    def test_body_battery_today_is_the_intraday_level(self):
-        frame = pd.DataFrame({
-            "calendar_date": ["2026-08-08", "2026-08-09"],
-            "body_battery_high": [30, 55],
-            "bb_most_recent": [8, 50],
-        })
-
-        battery = HELPERS["body_battery_now"](frame, date(2026, 8, 9))
-
-        self.assertEqual((battery["value"], battery["kind"]), (50, "now"))
-
-    def test_body_battery_falls_back_to_a_finished_days_high_not_its_last_level(self):
-        # ระดับล่าสุดของเมื่อวานคือค่าตอนก่อนนอน (ต่ำ) — เอามาโชว์เป็น "ตอนนี้" จะหลอกตา
-        frame = pd.DataFrame({
-            "calendar_date": ["2026-08-08"],
-            "body_battery_high": [75],
-            "bb_most_recent": [12],
-        })
-
-        battery = HELPERS["body_battery_now"](frame, date(2026, 8, 9))
-
-        self.assertEqual((battery["value"], battery["kind"]), (75, "high"))
 
 
-class SyncStatusTests(unittest.TestCase):
-    """เคสจริง 3 ก.ย. 69: นาฬิกาต้องไม่ sync ทั้งวัน การ์ดขึ้นสีเดียวกับคนที่ sync แล้ว"""
+class SelectedDayTests(unittest.TestCase):
+    """หน้าแรกยึดวันที่เลือก — ค่าทุกช่องบนการ์ดต้องมาจากแถวของวันนั้นแถวเดียว"""
 
-    @staticmethod
-    def snap(day):
-        return {"date": day}
+    frame = pd.DataFrame({
+        "calendar_date": ["2026-09-28", "2026-09-29", "2026-09-30"],
+        "sleep_score": [70, 75, None],
+        "bb_most_recent": [30, 12, 65],
+        "body_battery_high": [90, 88, 70],
+    })
 
-    def test_a_watch_with_nothing_from_today_is_called_out_with_its_last_date(self):
-        key, text = HELPERS["sync_status"](
-            [self.snap(date(2026, 9, 2)), self.snap(date(2026, 9, 1)), None],
-            date(2026, 9, 3))
+    def test_the_card_uses_only_the_selected_days_row(self):
+        row = HELPERS["day_row"](self.frame, date(2026, 9, 30))
+        self.assertIsNone(HELPERS["value_of"](row, "sleep_score"))   # ไม่ยืมของเมื่อวานมา
+        self.assertEqual(HELPERS["value_of"](row, "bb_most_recent"), 65)
 
-        self.assertEqual(key, "stale")
-        self.assertIn("02/09", text)
+    def test_yesterdays_high_never_stands_in_for_todays_latest_body_battery(self):
+        # ข้อบกพร่อง 4.5: เดิมถ้าวันนี้ไม่มีค่าล่าสุด โค้ดเอาสูงสุดของเมื่อวานมาแสดงแทน
+        frame = self.frame.assign(bb_most_recent=[30, 12, None])
+        row = HELPERS["day_row"](frame, date(2026, 9, 30))
+        self.assertIsNone(HELPERS["value_of"](row, "bb_most_recent"))
 
-    def test_one_value_from_today_is_enough(self):
-        # ทุกเช้าค่าบางตัวมาช้ากว่าตัวอื่น — ถ้าเตือนเพราะขาดตัวเดียว ป้ายจะขึ้นทุกเช้า
-        key, _ = HELPERS["sync_status"](
-            [self.snap(date(2026, 9, 3)), self.snap(date(2026, 9, 2))], date(2026, 9, 3))
+    def test_a_missing_value_is_offered_separately_with_its_own_date(self):
+        previous = HELPERS["last_before"](self.frame, "sleep_score", date(2026, 9, 30))
+        self.assertEqual((previous["value"], previous["date"]), (75, date(2026, 9, 29)))
 
-        self.assertEqual(key, "today")
+    def test_day_status_says_what_is_known(self):
+        today = date(2026, 9, 30)
+        row_today = HELPERS["day_row"](self.frame, today)
+        row_past = HELPERS["day_row"](self.frame, date(2026, 9, 29))
+        self.assertEqual(HELPERS["day_status"](row_today, today, today)[0], "partial_today")
+        self.assertEqual(HELPERS["day_status"](row_past, date(2026, 9, 29), today)[0],
+                         "complete_day")
+        self.assertEqual(HELPERS["day_status"](None, today, today)[0], "no_data")
 
-    def test_no_data_at_all_is_not_reported_as_synced(self):
-        self.assertEqual(HELPERS["sync_status"]([None, None], date(2026, 9, 3))[0], "none")
+
+class DuplicateSuspectTests(unittest.TestCase):
+    def test_same_athlete_start_and_type_with_different_ids_is_flagged_not_removed(self):
+        frame = pd.DataFrame([
+            {"activity_id": 1, "athlete_id": 3, "start_time_local": "2026-09-29 20:08:32",
+             "activity_type": "treadmill_running"},
+            {"activity_id": 2, "athlete_id": 3, "start_time_local": "2026-09-29 20:08:32",
+             "activity_type": "treadmill_running"},
+            {"activity_id": 3, "athlete_id": 3, "start_time_local": "2026-09-29 20:08:32",
+             "activity_type": "strength_training"},
+            {"activity_id": 4, "athlete_id": 1, "start_time_local": "2026-09-29 20:08:32",
+             "activity_type": "treadmill_running"},
+        ])
+        self.assertEqual(HELPERS["duplicate_suspects"](frame), {1, 2})
+        self.assertEqual(len(frame), 4)
 
 
 class WeeklyTotalsTests(unittest.TestCase):
@@ -122,6 +125,14 @@ class WeeklyTotalsTests(unittest.TestCase):
         self.assertAlmostEqual(week["run_km"], 15.0)      # เวทไม่นับเป็นระยะวิ่ง
         self.assertAlmostEqual(week["hours"], 2.0)        # แต่นับเป็นเวลาซ้อม
         self.assertAlmostEqual(week["Z2"], 50.0)          # (1200 + 1800) วินาที เป็นนาที
+
+    def test_unknown_hr_zones_stay_unknown_instead_of_becoming_zero(self):
+        # ข้อบกพร่อง 4.7: fillna(0) ทำให้สัปดาห์ที่ Garmin ไม่ส่งโซนดูเหมือน "0 นาที"
+        frame = pd.DataFrame([self.activity("2026-09-14 06:00", "running", 8000, 2400,
+                                            (None, None, None, None, None))])
+        weeks = HELPERS["weekly_totals"](frame, date(2026, 9, 14), date(2026, 9, 20))
+        self.assertTrue(pd.isna(weeks.loc[0, "Z2"]))
+        self.assertEqual(weeks.loc[0, "run_km"], 8.0)
 
     def test_a_week_without_training_stays_on_the_axis_as_zero(self):
         frame = pd.DataFrame([self.activity("2026-09-14 06:00", "running", 8000, 2400)])

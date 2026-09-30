@@ -183,21 +183,33 @@ def latest_field(df, column, timestamp_columns=()):
     }
 
 
-def body_battery_now(df, today_date):
-    """Body Battery ที่จะโชว์ — ระดับล่าสุดระหว่างวันของวันนี้ ถ้าไม่มีใช้ยอดสูงสุดของวันก่อน
+def day_row(df, day):
+    """แถว wellness ของวันปฏิทินที่เลือกพอดี (วันตามที่ Garmin ระบุ) หรือ None
 
-    สองช่องนี้คนละความหมาย (``bb_most_recent`` = ตอนนี้, ``body_battery_high`` =
-    สูงสุดของวันที่จบแล้ว) จึงต้องบอกผู้เรียกด้วยว่าได้ช่องไหนมา
+    หน้าแรกยึดวันที่เลือก ค่าทุกช่องบนการ์ดจึงต้องมาจากแถวนี้แถวเดียว ไม่หยิบ
+    "ค่าล่าสุดของแต่ละช่อง" จากคนละวันมาประกอบกัน (ข้อบกพร่อง 4.4 ของ Codex)
     """
     if df is None or df.empty or "calendar_date" not in df.columns:
         return None
-    today_date = pd.Timestamp(today_date).date()
     dates = pd.to_datetime(df["calendar_date"], errors="coerce").dt.date
-    current = latest_field(df.loc[dates == today_date], "bb_most_recent")
-    if current:
-        return {**current, "kind": "now"}
-    completed = latest_field(df.loc[dates < today_date], "body_battery_high")
-    return {**completed, "kind": "high"} if completed else None
+    rows = df.loc[dates == pd.Timestamp(day).date()]
+    return rows.iloc[-1] if not rows.empty else None
+
+
+def value_of(row, column):
+    """ค่าของช่องในแถว หรือ None — ไม่เปลี่ยน NULL เป็นศูนย์"""
+    if row is None or column not in row.index:
+        return None
+    value = row[column]
+    return None if value is None or pd.isna(value) else value
+
+
+def last_before(df, column, day):
+    """ค่าล่าสุดของช่องนี้ที่อยู่ *ก่อน* วันที่เลือก — ใช้แสดงแยก พร้อมวันที่ของมันเอง"""
+    if df is None or df.empty or "calendar_date" not in df.columns:
+        return None
+    dates = pd.to_datetime(df["calendar_date"], errors="coerce").dt.date
+    return latest_field(df.loc[dates < pd.Timestamp(day).date()], column)
 
 
 def field_age_days(snapshot, today_date):
@@ -230,22 +242,26 @@ def readiness_when(snapshot, today_date):
     return field_when(snapshot, today_date)
 
 
-def sync_status(snapshots, today_date):
-    """นาฬิกาคนนี้ส่งข้อมูลของวันนี้มาแล้วหรือยัง
+CORE_DAILY_FIELDS = ("sleep_score", "hrv_last_night", "resting_hr", "bb_most_recent",
+                     "body_battery_high", "stress_avg", "steps")
 
-    เกณฑ์คือ "ไม่มีค่าของวันนี้เลยสักค่า" ไม่ใช่ "ค่าใดค่าหนึ่งขาด" — ทุกเช้าค่าบางตัว
-    มาช้ากว่าตัวอื่นเป็นปกติ ถ้าเตือนทุกครั้งที่ขาดตัวเดียวป้ายจะขึ้นทุกเช้าจนโค้ชเลิกมอง
-    (เคสจริง 3 ก.ย. 69: ต้อง sync ครั้งสุดท้าย 2 ก.ย. ค่าทั้งหมดบนการ์ดจึงเป็นของเมื่อวาน)
 
-    คืน ``("today" | "stale" | "none", ข้อความ)``
+def day_status(row, day, today_date):
+    """สถานะข้อมูลของวันที่เลือก — บอกสิ่งที่รู้ ไม่เดาสาเหตุ
+
+    คืน ``(key, ข้อความ)`` โดย key เป็น
+    ``partial_today`` (วันนี้ยังไม่จบ ค่าระหว่างวันยังขยับ) · ``complete_day`` ·
+    ``no_data`` (ยังไม่ได้รับของวันนั้นเลย — อาจยังไม่ sync หรือไม่ได้ใส่นาฬิกา)
+    เคสจริง 3 ก.ย. 69: นาฬิกาไม่ sync ทั้งวัน การ์ดต้องบอกเอง ไม่ใช่ให้โค้ชไล่ดูวันที่
     """
-    dated = [snap for snap in snapshots if snap and snap.get("date")]
-    if not dated:
-        return "none", "ยังไม่มีข้อมูลจากนาฬิกา"
-    if any(field_age_days(snap, today_date) == 0 for snap in dated):
-        return "today", "sync แล้ววันนี้"
-    newest = max(snap["date"] for snap in dated)
-    return "stale", f"ยังไม่ sync วันนี้ · ล่าสุด {newest.strftime('%d/%m')}"
+    has_any = row is not None and any(value_of(row, field) is not None
+                                      for field in CORE_DAILY_FIELDS)
+    if not has_any:
+        return "no_data", ("ยังไม่ได้รับข้อมูลของวันนี้" if day == today_date
+                           else "ไม่มีข้อมูลของวันนั้น")
+    if day == today_date:
+        return "partial_today", "ระหว่างวัน · ยังไม่ครบวัน"
+    return "complete_day", "มีข้อมูลของวันนั้น"
 
 
 # ---------------------------------------------------------------- ผลรวมตรง ๆ
@@ -254,15 +270,16 @@ def weekly_totals(activity_df, period_start, period_end):
     """ผลรวมรายสัปดาห์ (เริ่มวันจันทร์) ของระยะวิ่ง เวลาซ้อม และวินาทีในโซน HR
 
     ทุกค่าเป็นผลบวกของตัวเลขที่ Garmin ส่งมาต่อกิจกรรม ไม่มีการถ่วงหรือเทียบฐาน
-    สัปดาห์ที่ไม่ได้ซ้อมยังอยู่ในตารางเป็นศูนย์ เพื่อให้แกนเวลาไม่หดหาย
+    สัปดาห์ที่ไม่มีกิจกรรมเลย ระยะ/เวลาเป็นศูนย์จริง (ไม่ได้ซ้อม) แต่นาทีในโซนเป็น
+    NaN เมื่อไม่มีกิจกรรมไหนในสัปดาห์นั้นที่ Garmin ส่งโซนมา — "ไม่รู้" ต้องไม่กลายเป็น 0
     """
     start = pd.Timestamp(period_start).normalize()
     weeks = pd.date_range(start - pd.Timedelta(days=start.weekday()),
                           pd.Timestamp(period_end), freq="7D")
     columns = ["week", "run_km", "hours", *HR_ZONE_LABELS]
-    result = pd.DataFrame({"week": weeks})
-    for column in columns[1:]:
-        result[column] = 0.0
+    result = pd.DataFrame({"week": weeks, "run_km": 0.0, "hours": 0.0})
+    for label in HR_ZONE_LABELS:
+        result[label] = float("nan")
     if activity_df is None or activity_df.empty:
         return result
 
@@ -274,11 +291,29 @@ def weekly_totals(activity_df, period_start, period_end):
     frame["hours"] = pd.to_numeric(frame.get("duration_sec"), errors="coerce") / 3600
     for column, label in zip(HR_ZONE_COLUMNS, HR_ZONE_LABELS):
         frame[label] = (pd.to_numeric(frame[column], errors="coerce") / 60
-                        if column in frame.columns else 0.0)
-    sums = frame.groupby("week")[columns[1:]].sum(min_count=1).fillna(0.0)
+                        if column in frame.columns else float("nan"))
+    sums = frame.groupby("week")[columns[1:]].sum(min_count=1)
+    sums[["run_km", "hours"]] = sums[["run_km", "hours"]].fillna(0.0)
     result = result.set_index("week")
+    # update() ข้าม NaN จึงคง NaN เดิมของสัปดาห์ที่ไม่รู้โซนไว้
     result.update(sums)
     return result.reset_index()
+
+
+def duplicate_suspects(activity_df):
+    """กิจกรรมที่ **อาจ** ซ้ำ: คนเดียวกัน เริ่มเวลาเดียวกัน ชนิดเดียวกัน แต่คนละ activity_id
+
+    ไม่ลบ ไม่รวม และไม่หักออกจากยอด — Garmin เก็บไว้ทั้งสองรายการจริง (เช่นบันทึก
+    จากสองอุปกรณ์) คนต้องไปดูใน Garmin Connect เอง คืน set ของ activity_id ที่ควรตรวจ
+    (เคสจริง: P'kao 29/09/2026 20:08:32 treadmill 6.46 km สองรายการ)
+    """
+    if activity_df is None or activity_df.empty:
+        return set()
+    keys = ["athlete_id", "start_time_local", "activity_type"]
+    if not set(keys + ["activity_id"]).issubset(activity_df.columns):
+        return set()
+    groups = activity_df.groupby(keys)["activity_id"].transform("nunique")
+    return set(activity_df.loc[groups > 1, "activity_id"].astype("int64"))
 
 
 RUN_TYPES = ("running", "track_running", "trail_running", "treadmill_running")

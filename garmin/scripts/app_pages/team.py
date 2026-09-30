@@ -1,6 +1,9 @@
-"""หน้า "ทีม" — ค่าล่าสุดที่นาฬิกาของแต่ละคนส่งมา + กิจกรรมล่าสุดของทั้งทีม
+"""หน้าแรก "ภาพรวมสุขภาพทีม — วันที่เลือก"
 
-คำถามของหน้านี้: เช้านี้นาฬิกาของใครส่งอะไรมาแล้วบ้าง และใครซ้อมอะไรไป
+ทุกตัวเลขบนหน้านี้ผูกกับ **วันที่เลือกวันเดียว** (ค่าเริ่มต้นคือวันนี้ตามเวลาไทย)
+ไม่หยิบค่าล่าสุดของแต่ละช่องจากคนละวันมาประกอบการ์ดเดียว และไม่ใช้ยอดรวม 7 วัน
+ถ้าวันที่เลือกไม่มีค่าช่องไหน จะบอกว่า "ไม่มี" แล้วแสดงค่าครั้งก่อนแยกพร้อมวันที่ของมัน
+
 ไม่มีสถานะหรือธงที่ระบบตัดสินเอง — คำของ Garmin (เช่น HRV "Balanced") แสดงตามจริง
 """
 
@@ -13,118 +16,154 @@ from dashboard_context import focus_athlete, page_context
 from dashboard_data import (
     athlete_has_training_readiness,
     load_athlete_devices,
-    load_latest_activity,
     load_team_activities,
     load_wellness_data,
 )
 from dashboard_domain import (
     activity_rows,
     activity_title,
-    body_battery_now,
-    field_when,
+    day_row,
+    day_status,
+    duplicate_suspects,
+    fmt_hours,
     fmt_num,
     fmt_pace,
     fmt_recovery_time,
     fmt_sec,
     garmin_label,
-    latest_field,
-    readiness_when,
-    sync_status,
+    last_before,
+    to_bangkok_timestamp,
+    value_of,
 )
 
 ctx = page_context()
 today = ctx.today
-LOOKBACK_DAYS = 14
+DAY_KEY = "team_day"
+FALLBACK_DAYS = 30  # ค่าครั้งก่อนที่ยอมย้อนไปหา เมื่อวันที่เลือกไม่มีค่านั้น
 
-st.title("ทีม")
-st.caption("ค่าล่าสุดที่นาฬิกาของแต่ละคนส่งมา · ป้ายสีบอกว่านาฬิกา sync วันนี้แล้วหรือยัง · "
-           "ดูกราฟย้อนหลังได้ที่หน้า \"ร่างกาย\"")
+if DAY_KEY not in st.session_state or st.session_state[DAY_KEY] > today:
+    st.session_state[DAY_KEY] = today
 
 
-def metric(label, value, note):
-    # กว้างคงที่ให้วางได้สองใบต่อแถวในการ์ดสามคอลัมน์ — การ์ดสั้นพอกวาดตาทีเดียวจบ
+def shift_day(days):
+    st.session_state[DAY_KEY] = min(today, st.session_state[DAY_KEY]
+                                    + datetime.timedelta(days=days))
+
+
+def go_today():
+    st.session_state[DAY_KEY] = today
+
+
+st.title("ภาพรวมสุขภาพทีม")
+with st.container(horizontal=True, vertical_alignment="bottom"):
+    st.button("วันก่อนหน้า", icon=":material/chevron_left:", on_click=shift_day, args=(-1,),
+              key="team-prev-day")
+    st.date_input("วันที่", key=DAY_KEY, max_value=today, format="DD/MM/YYYY", width=170)
+    st.button("วันถัดไป", icon=":material/chevron_right:", on_click=shift_day, args=(1,),
+              key="team-next-day", disabled=st.session_state[DAY_KEY] >= today)
+    st.button("วันนี้", icon=":material/today:", on_click=go_today, key="team-today",
+              disabled=st.session_state[DAY_KEY] == today)
+day = st.session_state[DAY_KEY]
+st.caption(
+    f"ข้อมูลของวันที่ {day.strftime('%d/%m/%Y')} ตามปฏิทินของ Garmin (เวลาไทย) · "
+    "Sleep/HRV คือคืนที่ตื่นเช้าวันนี้ · ค่าที่ไม่มีของวันนี้จะบอกค่าครั้งก่อนแยกพร้อมวันที่")
+
+day_activities = load_team_activities(day.isoformat(), day.isoformat())
+suspects = duplicate_suspects(day_activities)
+
+
+def metric(label, value, note=None):
+    # กว้างคงที่ให้วางได้สองใบต่อแถวในการ์ดสามคอลัมน์ บนมือถือเรียงลงเป็นแถวเดียว
     st.metric(label, value, note, delta_color="off", delta_arrow="off", width=125)
+
+
+def missing_note(wellness, column, unit=""):
+    """ค่าของวันนี้ไม่มี → บอกค่าครั้งก่อนพร้อมวันที่ ให้เห็นว่าเป็นคนละวันชัด ๆ"""
+    previous = last_before(wellness, column, day)
+    if not previous:
+        return "ไม่มีของวันนี้"
+    return f"ไม่มีของวันนี้ · ครั้งก่อน {fmt_num(previous['value'], unit)} ({previous['date']:%d/%m})"
 
 
 def athlete_card(athlete, order):
     aid, name = athlete["athlete_id"], athlete["display_name"]
     wellness = load_wellness_data(
-        aid, (today - datetime.timedelta(days=LOOKBACK_DAYS - 1)).isoformat(), today.isoformat())
+        aid, (day - datetime.timedelta(days=FALLBACK_DAYS)).isoformat(), day.isoformat())
+    row = day_row(wellness, day)
+    status_key, status_text = day_status(row, day, today)
 
-    sleep = latest_field(wellness, "sleep_score")
-    hrv = latest_field(wellness, "hrv_last_night")
-    rhr = latest_field(wellness, "resting_hr")
-    battery = body_battery_now(wellness, today)
-    readiness = latest_field(wellness, "training_readiness",
-                             ("readiness_timestamp_local", "readiness_timestamp_utc"))
-    status = latest_field(wellness, "training_status")
-    recovery = latest_field(wellness, "recovery_time_min")
-    sync_key, sync_text = sync_status([sleep, hrv, rhr, battery], today)
+    def show(label, column, unit="", note=None, digits=None):
+        value = value_of(row, column)
+        if value is None:
+            metric(label, "–", missing_note(wellness, column, unit))
+        else:
+            metric(label, fmt_num(value, unit, digits), note)
 
     with st.container(border=True, key=f"team-card-{order}"):
         with st.container(horizontal=True, vertical_alignment="center"):
             st.subheader(name, anchor=False)
-            st.badge(sync_text,
-                     icon=":material/check:" if sync_key == "today" else ":material/schedule:",
-                     color="green" if sync_key == "today" else "orange")
+            st.badge(status_text,
+                     icon={"complete_day": ":material/check:",
+                           "partial_today": ":material/schedule:"}.get(
+                               status_key, ":material/cloud_off:"),
+                     color={"complete_day": "green", "partial_today": "blue"}.get(
+                         status_key, "orange"))
+        fetched = to_bangkok_timestamp(value_of(row, "fetched_at"))
         devices = load_athlete_devices(aid)
-        if devices:
-            st.caption(devices[0].split(" (")[0])
-
-        # วันที่ของการ์ดบอกไว้ที่ป้าย sync แล้ว ใต้ตัวเลขจึงบอกวันเฉพาะค่าที่เก่ากว่านั้น
-        # (เช่น HRV ของคืนก่อน) — ไม่งั้นทุกช่องซ้ำคำว่า "เมื่อวาน" จนอ่านคำของ Garmin ไม่เห็น
-        dated = [snap["date"] for snap in (sleep, hrv, rhr, battery) if snap and snap.get("date")]
-        card_date = max(dated) if dated else None
-
-        def note(snapshot, *words):
-            if not snapshot:
-                return "ไม่มีข้อมูล"
-            parts = [word for word in words if word]
-            if snapshot.get("date") != card_date:
-                parts.append(field_when(snapshot, today))
-            return " · ".join(parts) or None
+        st.caption(" · ".join(filter(None, [
+            devices[0].split(" (")[0] if devices else None,
+            f"แถวนี้ดึงจาก Garmin ล่าสุด {fetched:%d/%m %H:%M} น." if pd.notna(fetched) else None,
+        ])))
 
         with st.container(horizontal=True, gap="small"):
-            metric("Sleep score", fmt_num(sleep["value"]) if sleep else "–", note(sleep))
-            metric("HRV คืนล่าสุด", fmt_num(hrv["value"], " ms") if hrv else "–",
-                   note(hrv, garmin_label(hrv["row"].get("hrv_status")) if hrv else ""))
-            metric("Body Battery", fmt_num(battery["value"]) if battery else "–",
-                   note(battery, ("ตอนนี้" if battery["kind"] == "now" else "สูงสุดของวัน")
-                        if battery else ""))
-            metric("RHR", fmt_num(rhr["value"], " bpm") if rhr else "–", note(rhr))
+            show("Sleep score", "sleep_score",
+                 note=fmt_hours(value_of(row, "sleep_duration_sec"))
+                 if value_of(row, "sleep_duration_sec") is not None else None)
+            show("HRV เมื่อคืน", "hrv_last_night", " ms",
+                 note=" · ".join(filter(None, [
+                     garmin_label(value_of(row, "hrv_status")),
+                     f"เฉลี่ย 7 วัน {fmt_num(value_of(row, 'hrv_weekly_avg'))}"
+                     if value_of(row, "hrv_weekly_avg") is not None else None])) or None)
+            show("RHR", "resting_hr", " bpm")
+            high, low = value_of(row, "body_battery_high"), value_of(row, "body_battery_low")
+            show("Body Battery ล่าสุด", "bb_most_recent",
+                 note=f"สูง {fmt_num(high)} · ต่ำ {fmt_num(low)}"
+                 if high is not None or low is not None else None)
+            show("Stress เฉลี่ย", "stress_avg",
+                 note=f"สูงสุด {fmt_num(value_of(row, 'max_stress'))}"
+                 if value_of(row, "max_stress") is not None else None)
             if athlete_has_training_readiness(aid):
-                metric("Training Readiness",
-                       fmt_num(readiness["value"]) if readiness else "–",
-                       " · ".join(filter(None, [
-                           garmin_label(readiness["row"].get("readiness_level"))
-                           if readiness else "",
-                           readiness_when(readiness, today)])) if readiness else "ไม่มีข้อมูล")
+                show("Training Readiness", "training_readiness",
+                     note=garmin_label(value_of(row, "readiness_level")) or None)
 
         garmin_words = []
-        if status:
-            garmin_words.append(f"Training Status **{garmin_label(status['value'])}**")
-        if recovery:
-            garmin_words.append(f"Recovery Time **{fmt_recovery_time(recovery['value'])}**")
+        if value_of(row, "training_status") is not None:
+            garmin_words.append(f"Training Status **{garmin_label(row['training_status'])}**")
+        if value_of(row, "recovery_time_min") is not None:
+            garmin_words.append(f"Recovery Time **{fmt_recovery_time(row['recovery_time_min'])}**")
+        if value_of(row, "steps") is not None:
+            garmin_words.append(f"ก้าว **{row['steps']:,.0f}**")
         if garmin_words:
             st.markdown(" · ".join(garmin_words))
 
-        latest = load_latest_activity(aid)
-        if latest:
-            when = pd.to_datetime(latest["start_time_local"])
-            distance = latest.get("distance_m")
+        mine = day_activities[day_activities["athlete_id"] == aid] if not day_activities.empty \
+            else day_activities
+        if mine.empty:
+            st.caption(":material/directions_run: ไม่มีกิจกรรมในวันนี้")
+        for _, activity in mine.sort_values("start_time_local").iterrows():
+            distance = activity.get("distance_m")
             parts = [
-                when.strftime("%d/%m %H:%M"),
-                activity_title(latest),
+                pd.to_datetime(activity["start_time_local"]).strftime("%H:%M"),
+                activity_title(activity),
                 f"{distance / 1000:.2f} km" if pd.notna(distance) and distance > 0 else None,
-                fmt_sec(latest.get("duration_sec")),
-                (fmt_pace(latest.get("avg_pace_min_per_km")) + " /km")
+                fmt_sec(activity.get("duration_sec")),
+                (fmt_pace(activity.get("avg_pace_min_per_km")) + " /km")
                 if pd.notna(distance) and distance > 0 else None,
-                f"HR {latest['avg_hr']:.0f}" if pd.notna(latest.get("avg_hr")) else None,
+                f"HR {activity['avg_hr']:.0f}" if pd.notna(activity.get("avg_hr")) else None,
+                "⚠ อาจซ้ำ" if int(activity["activity_id"]) in suspects else None,
             ]
-            st.markdown(":material/directions_run: **กิจกรรมล่าสุด** · "
+            st.markdown(":material/directions_run: "
                         + " · ".join(part for part in parts if part and part != "–"))
-        else:
-            st.caption("ยังไม่มีกิจกรรม")
 
         st.button(f"ดูข้อมูลของ {name}", key=f"open-athlete-{order}",
                   on_click=focus_athlete, args=(name,), icon=":material/arrow_forward:",
@@ -139,14 +178,15 @@ for row_start in range(0, len(athletes), 3):
         with column:
             athlete_card(athlete, order)
 
-st.subheader("กิจกรรม 7 วันล่าสุดของทีม", anchor=False)
-feed = load_team_activities((today - datetime.timedelta(days=6)).isoformat(), today.isoformat())
-if feed.empty:
-    st.caption("ยังไม่มีกิจกรรมใน 7 วันล่าสุด")
+st.subheader("กิจกรรมของทีมในวันนี้", anchor=False)
+if day_activities.empty:
+    st.caption("ไม่มีกิจกรรมที่ Garmin บันทึกในวันนี้")
 else:
-    table = activity_rows(feed)
-    table.insert(1, "นักกีฬา", feed.sort_values("start_time_local", ascending=False)
-                 ["display_name"].reset_index(drop=True))
+    ordered = day_activities.sort_values("start_time_local", ascending=False)
+    table = activity_rows(ordered)
+    table.insert(1, "นักกีฬา", ordered["display_name"].reset_index(drop=True))
+    table["ตรวจสอบ"] = ["อาจซ้ำ" if int(aid) in suspects else ""
+                        for aid in ordered["activity_id"]]
     st.dataframe(
         table, hide_index=True, width="stretch",
         column_config={
@@ -155,7 +195,13 @@ else:
             "HR สูงสุด": st.column_config.NumberColumn(format="%d"),
             "Training Effect": st.column_config.NumberColumn(format="%.1f"),
             "Training Load": st.column_config.NumberColumn(format="%d"),
+            "ตรวจสอบ": st.column_config.TextColumn(
+                help="คนเดียวกัน เริ่มเวลาเดียวกัน ชนิดเดียวกัน แต่ Garmin เก็บเป็นคนละรายการ "
+                     "(เช่นบันทึกจากสองอุปกรณ์) ระบบไม่ลบหรือรวมเอง — ตรวจใน Garmin Connect"),
         },
     )
+    if suspects:
+        st.caption(f"มี {len(suspects)} รายการที่อาจซ้ำ — ยังนับรวมอยู่ในยอดทุกหน้า "
+                   "จนกว่าจะลบรายการที่ซ้ำใน Garmin Connect")
 
 st.caption("ข้อมูลทั้งหมดมาจาก Garmin · ก่อนซ้อมต้องถามอาการเจ็บ ป่วย และความล้าจากนักกีฬาเอง")

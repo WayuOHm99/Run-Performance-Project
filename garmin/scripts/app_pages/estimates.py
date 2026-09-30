@@ -61,12 +61,13 @@ distances = (("time_5k_sec", "5K"), ("time_10k_sec", "10K"),
 if not predictions.empty:
     shown_any = True
     st.subheader("เวลาคาดการณ์แข่ง (Garmin Race Predictor)", anchor=False)
-    latest = predictions.iloc[-1]
     with st.container(horizontal=True):
         for column, label in distances:
-            st.metric(label, fmt_sec(latest[column]),
-                      latest["calendar_date"].strftime("%d/%m/%Y"),
-                      delta_color="off", delta_arrow="off", border=True)
+            snapshot = latest_field(predictions, column)
+            if snapshot:
+                st.metric(label, fmt_sec(snapshot["value"]),
+                          snapshot["date"].strftime("%d/%m/%Y"),
+                          delta_color="off", delta_arrow="off", border=True)
     in_range = predictions[
         (predictions["calendar_date"] >= pd.Timestamp(ctx.start_date))
         & (predictions["calendar_date"] <= pd.Timestamp(ctx.end_date))
@@ -105,13 +106,15 @@ body = load_body_composition(ctx.athlete_id)
 if not body.empty and body[["weight_kg", "bmi", "body_fat_pct"]].notna().any().any():
     shown_any = True
     st.subheader("องค์ประกอบร่างกาย", anchor=False)
-    last = body.dropna(subset=["weight_kg", "bmi", "body_fat_pct"], how="all").iloc[-1]
-    when = last["calendar_date"].strftime("%d/%m/%Y")
+    # ค่าล่าสุด "รายช่อง" พร้อมวันที่ของช่องนั้น — แถวล่าสุดอาจมีแค่น้ำหนักไม่มีไขมัน
+    # การหยิบแถวเดียวจะซ่อนค่าไขมันครั้งก่อนที่ยังเป็นค่าล่าสุดจริงของมัน
     with st.container(horizontal=True):
         for column, label, unit in (("weight_kg", "น้ำหนัก", " kg"), ("bmi", "BMI", ""),
                                     ("body_fat_pct", "ไขมัน", "%")):
-            if pd.notna(last[column]):
-                st.metric(label, fmt_num(last[column], unit), when,
+            snapshot = latest_field(body, column)
+            if snapshot:
+                st.metric(label, fmt_num(snapshot["value"], unit),
+                          snapshot["date"].strftime("%d/%m/%Y"),
                           delta_color="off", delta_arrow="off", border=True)
 
 if not shown_any:

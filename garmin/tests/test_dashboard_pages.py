@@ -57,6 +57,11 @@ def seed_team(conn):
          1500, 300, 0, 0, 0),
         (201, 2, "running", "Dan easy", f"{YESTERDAY} 06:00:00", 2700, 8000, 140, 160, 5.6,
          0, 2700, 0, 0, 0),
+        # สองรายการที่ Garmin เก็บไว้จริงทั้งคู่ — เคส P'kao 29/09/2026 (สองอุปกรณ์?)
+        (301, 3, "treadmill_running", "Treadmill", f"{YESTERDAY} 20:08:32", 2193, 6460,
+         156, 171, 5.66, 0, 0, 2193, 0, 0),
+        (302, 3, "treadmill_running", "Treadmill", f"{YESTERDAY} 20:08:32", 2193, 6460,
+         157, 171, 5.66, 0, 0, 2193, 0, 0),
     ]
     conn.executemany(
         "INSERT INTO fact_activity (activity_id, athlete_id, activity_type, activity_name,"
@@ -127,24 +132,38 @@ class GarminOnlyOnScreenTests(unittest.TestCase):
 
 
 class TeamPageTests(unittest.TestCase):
+    """หน้าแรกยึดวันที่เลือก (ค่าเริ่มต้น = วันนี้ตามเวลาไทย)"""
+
     @classmethod
     def setUpClass(cls):
         cls.main, _ = render_page(TEAM_PAGE, seed_team)
         cls.text = page_text(cls.main)
+        cls.yesterday_main, _ = render_page(TEAM_PAGE, seed_team,
+                                            state={"team_day": YESTERDAY})
+        cls.yesterday_text = page_text(cls.yesterday_main)
 
-    def test_each_card_says_whether_the_watch_has_synced_today(self):
+    def test_each_card_says_what_it_has_for_the_selected_day(self):
         # เคส 3 ก.ย. 69 — การ์ดของคนที่นาฬิกาเงียบต้องบอกเอง ไม่ใช่ให้โค้ชไล่ดูวันที่
         badges = [m.value for m in self.main.get("markdown") if "-badge[" in m.value]
-        self.assertTrue(any("sync แล้ววันนี้" in badge for badge in badges))
+        self.assertTrue(any("ระหว่างวัน" in badge for badge in badges), badges)
+        self.assertEqual(sum("ยังไม่ได้รับข้อมูลของวันนี้" in badge for badge in badges), 2)
+
+    def test_a_value_from_another_day_is_labelled_with_its_own_date(self):
+        # ข้อบกพร่อง 4.4: เดิมการ์ดหนึ่งใบประกอบจากค่าคนละวันโดยไม่บอก
+        metrics = {(m.label, m.proto.delta) for m in self.main.get("metric")}
         stale = (TODAY - datetime.timedelta(days=2)).strftime("%d/%m")
-        self.assertTrue(any("ยังไม่ sync วันนี้" in b and stale in b for b in badges), badges)
-        self.assertTrue(any("ยังไม่มีข้อมูลจากนาฬิกา" in badge for badge in badges))
+        self.assertIn(("RHR", f"ไม่มีของวันนี้ · ครั้งก่อน 50 bpm ({stale})"), metrics)
 
-    def test_card_shows_the_latest_activity(self):
-        self.assertIn("Long run", self.text)
+    def test_activities_follow_the_selected_day_not_a_seven_day_total(self):
+        self.assertNotIn("Long run", self.text)          # เป็นของเมื่อวาน
+        self.assertIn("Long run", self.yesterday_text)
 
-    def test_activity_deleted_in_garmin_is_not_in_the_team_feed(self):
-        self.assertNotIn("Deleted in Garmin", self.text)
+    def test_possible_duplicates_are_flagged_but_still_listed(self):
+        self.assertEqual(self.yesterday_text.count("อาจซ้ำ") >= 2, True)
+        self.assertIn("ยังนับรวมอยู่ในยอด", self.yesterday_text)
+
+    def test_activity_deleted_in_garmin_is_not_listed(self):
+        self.assertNotIn("Deleted in Garmin", self.yesterday_text)
 
     def test_every_athlete_has_a_button_to_open_their_page(self):
         labels = [button.label for button in self.main.get("button")]
@@ -159,7 +178,7 @@ class SessionPageTests(unittest.TestCase):
 
     def test_short_and_distance_less_activities_are_selectable(self):
         options = self.app.selectbox(key="session_activity").options
-        self.assertEqual(len(options), 3)
+        self.assertEqual(len(options), 3)  # ของ Tong: รันยาว warm-up เวท
         self.assertTrue(any("Warm up" in option and "0.30 km" in option for option in options))
 
     def test_a_zero_metre_lap_is_shown_as_garmin_recorded_it(self):

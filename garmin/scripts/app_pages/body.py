@@ -9,7 +9,6 @@ import streamlit as st
 
 from dashboard_context import page_context
 from dashboard_domain import (
-    body_battery_now,
     calendar_aligned_frame,
     field_when,
     fmt_hours,
@@ -52,7 +51,7 @@ def spark(column):
 sleep = latest_field(wellness, "sleep_score")
 hrv = latest_field(wellness, "hrv_last_night")
 rhr = latest_field(wellness, "resting_hr")
-battery = body_battery_now(wellness, today)
+battery = latest_field(wellness, "bb_most_recent")
 stress = latest_field(wellness, "stress_avg")
 readiness = latest_field(wellness, "training_readiness",
                          ("readiness_timestamp_local", "readiness_timestamp_utc"))
@@ -66,9 +65,8 @@ with st.container(horizontal=True):
                                   field_when(hrv, today)])), "hrv_last_night"),
         ("RHR", rhr, fmt_num(rhr["value"], " bpm") if rhr else "–",
          field_when(rhr, today), "resting_hr"),
-        ("Body Battery", battery, fmt_num(battery["value"]) if battery else "–",
-         (("ตอนนี้" if battery["kind"] == "now" else "สูงสุด") + " · "
-          + field_when(battery, today)) if battery else "ไม่มีข้อมูล", "body_battery_high"),
+        ("Body Battery ล่าสุด", battery, fmt_num(battery["value"]) if battery else "–",
+         field_when(battery, today), "bb_most_recent"),
         ("Stress เฉลี่ย", stress, fmt_num(stress["value"]) if stress else "–",
          field_when(stress, today), "stress_avg"),
     ]
@@ -108,6 +106,9 @@ with left:
     if has("body_battery_high", "body_battery_low"):
         line(chart_card("Body Battery", "สูงสุดและต่ำสุดของแต่ละวัน"),
              ["body_battery_high", "body_battery_low"], ["สูงสุด", "ต่ำสุด"], "")
+    if has("bb_charged", "bb_drained"):
+        line(chart_card("Body Battery ที่ได้/ใช้ไป", "ชาร์จเข้าและใช้ไปของแต่ละวันตามที่ Garmin นับ"),
+             ["bb_charged", "bb_drained"], ["ชาร์จ", "ใช้ไป"], "")
     if has("avg_sleep_respiration", "avg_waking_respiration"):
         line(chart_card("การหายใจ", "ครั้งต่อนาที ตอนหลับและตอนตื่น"),
              ["avg_sleep_respiration", "avg_waking_respiration"], ["ตอนหลับ", "ตอนตื่น"],
