@@ -1324,15 +1324,13 @@ def fetch_and_settle_review_previous_day_wellness(
     date_str = str(review_date)
     failures = []
     values = _fetch_previous_day_values(garmin, date_str, failures)
-    if endpoint_failures is not None:
-        endpoint_failures.extend(failures)
-    error = _core_wellness_error(failures)
-    if error is not None:
-        # ไม่ประทับเวลา review — รอบถัดไปลองใหม่ (เหมือน repair)
-        print("   ⚠️  ตรวจทานเมื่อวานไม่สำเร็จ (endpoint หลักล้มทั้งหมด)")
-        if terminal_errors is None:
-            raise error
-        terminal_errors.append(error)
+    # แถวนี้ครบอยู่แล้ว การตรวจทานเป็นของแถม — endpoint ที่ล้มจึง **ไม่** ส่งต่อไปที่
+    # endpoint_failures/terminal_errors ของสาย ไม่งั้น Garmin สะดุดชั่วคราวครั้งเดียว
+    # จะกลายเป็นแจ้งเตือนทั้งที่ไม่มีอะไรให้เจ้าของทำ (log จำนวนไว้พอให้ย้อนดูได้)
+    if failures:
+        print(f"   ⚠️  ตรวจทานเมื่อวาน: endpoint ล้ม {len(failures)} ตัว (ไม่นับเป็นความล้มเหลวของสาย)")
+    if _core_wellness_error(failures) is not None:
+        # ไม่ประทับเวลา review — รอบถัดไปลองใหม่
         return 0
 
     cur = conn.cursor()

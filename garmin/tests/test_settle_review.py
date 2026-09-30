@@ -135,11 +135,23 @@ class SettleReviewTests(unittest.TestCase):
 
     def test_all_core_endpoints_failing_does_not_consume_review(self):
         garmin = self.Garmin(fail={"stats", "hrv", "sleep", "readiness"})
-        terminal = []
-        self.run_lane(garmin, at(9, 30, 0, 46), terminal=terminal)
-        self.assertEqual(len(terminal), 1)
-        self.assertIsNone(self.row()[4])
-        self.assertEqual(self.row()[0], 22517)
+        self.run_lane(garmin, at(9, 30, 0, 46), terminal=[])
+        self.assertIsNone(self.row()[4])          # ไม่ประทับ = รอบถัดไปลองใหม่
+        self.assertEqual(self.row()[0], 22517)    # ค่าเดิมไม่ถูกลบ
+
+    def test_a_failed_review_never_fails_the_lane_or_raises_an_alert(self):
+        """ข้อมูลเมื่อวานครบอยู่แล้ว การตรวจทานซ้ำเป็นของแถม — ล้มแล้วต้องเงียบ
+
+        ถ้านับเป็นความล้มเหลวของสาย แจ้งเตือนจะขึ้นทุกครั้งที่ Garmin สะดุดชั่วคราว
+        ทั้งที่ไม่มีอะไรให้เจ้าของทำ (ผู้ใช้เจอปัญหาเตือนถี่มาแล้ว)
+        """
+        garmin = self.Garmin(fail={"stats", "hrv", "sleep", "readiness"})
+        terminal, failures = [], []
+        with mock.patch.object(backfill.time, "sleep"):
+            backfill.fetch_and_repair_previous_day_wellness(
+                garmin, self.conn, 1, self.DAY, now_utc=at(9, 30, 0, 46),
+                endpoint_failures=failures, terminal_errors=terminal)
+        self.assertEqual((terminal, failures), ([], []))
 
     def test_partial_row_still_takes_repair_path(self):
         self.conn.execute(
