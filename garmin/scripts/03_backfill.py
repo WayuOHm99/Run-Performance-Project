@@ -284,34 +284,41 @@ def _call_wellness_endpoint(garmin, endpoint, date_str, failures):
 
 
 # ── HOOK: intraday wellness (logic อยู่ใน scripts/intraday.py) ──────────────
+def _intraday_module():
+    """import intraday.py ข้างไฟล์นี้ — ตอนรันเป็นสคริปต์ scripts/ อยู่ใน sys.path อยู่แล้ว
+    แต่เทสโหลดไฟล์นี้ด้วย path จึงต้องใส่เองให้แน่ใจ"""
+    scripts = str(Path(__file__).resolve().parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import intraday
+    return intraday
+
+
 def _sync_intraday_day(garmin, conn, athlete_id, day, failures):
     """ดึง HR+stress ของวัน `day` เก็บลง fact_wellness_intraday. ห้ามทำให้ lane ล้ม:
-    ทุกความผิดพลาดกลายเป็น failure ที่ surface ผ่าน endpoint_failures เหมือน endpoint อื่น."""
+    ทุกความผิดพลาดกลายเป็น failure ที่ surface ผ่าน endpoint_failures เหมือน endpoint อื่น
+    (endpoint_failures แสดงบนหน้าสถานะระบบ แต่ไม่ทำให้สายล้มและไม่ส่งแจ้งเตือน)"""
     try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "garmin_intraday", Path(__file__).resolve().parent / "intraday.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        module.fetch_and_store_day(
+        _intraday_module().fetch_and_store_day(
             garmin, conn, athlete_id, day.isoformat(),
             call=safe_call, failures=failures,
         )
-        return module
     except Exception as exc:  # noqa: BLE001 — intraday เป็นของแถม ไม่บล็อก sync หลัก
         conn.rollback()
         _record_endpoint_failure(failures, None, exc, endpoint="intraday_store")
-        return None
 
 
-def _prune_intraday(module, conn):
-    if module is None:
-        return
+def _prune_intraday(conn, failures):
+    """ลบจุด intraday เก่ากว่า 180 วัน — ล้มแล้วต้องมองเห็นได้ ไม่งั้นตารางโตไม่หยุดเงียบ ๆ"""
     try:
-        module.prune(conn)
-    except Exception:  # noqa: BLE001
+        intraday = _intraday_module()
+        removed = intraday.prune(conn)
+        if removed:
+            print(f"   🧹 ลบจุด intraday เก่ากว่า {intraday.INTRADAY_RETENTION_DAYS} วัน: {removed} จุด")
+    except Exception as exc:  # noqa: BLE001
         conn.rollback()
+        print(f"   ⚠️  prune intraday ล้ม ({type(exc).__name__})")
+        _record_endpoint_failure(failures, None, exc, endpoint="intraday_prune")
 
 
 def _normalize_activity_id(value):
@@ -1355,11 +1362,13 @@ def fetch_and_settle_review_previous_day_wellness(
     date_str = str(review_date)
     failures = []
     values = _fetch_previous_day_values(garmin, date_str, failures)
-    # แถวนี้ครบอยู่แล้ว การตรวจทานเป็นของแถม — endpoint ที่ล้มจึง **ไม่** ส่งต่อไปที่
-    # endpoint_failures/terminal_errors ของสาย ไม่งั้น Garmin สะดุดชั่วคราวครั้งเดียว
-    # จะกลายเป็นแจ้งเตือนทั้งที่ไม่มีอะไรให้เจ้าของทำ (log จำนวนไว้พอให้ย้อนดูได้)
+    # แถวนี้ครบอยู่แล้ว การตรวจทานเป็นของแถม — endpoint ที่ล้มบันทึกลง endpoint_failures
+    # (เห็นบนหน้าสถานะระบบ ไม่ส่งแจ้งเตือน) แต่ **ไม่** เข้า terminal_errors ที่ทำให้สายล้ม
+    # ไม่งั้น Garmin สะดุดชั่วคราวครั้งเดียวจะกลายเป็นแจ้งเตือนทั้งที่ไม่มีอะไรให้เจ้าของทำ
     if failures:
         print(f"   ⚠️  ตรวจทานเมื่อวาน: endpoint ล้ม {len(failures)} ตัว (ไม่นับเป็นความล้มเหลวของสาย)")
+        if endpoint_failures is not None:
+            endpoint_failures.extend(failures)
     if _core_wellness_error(failures) is not None:
         # ไม่ประทับเวลา review — รอบถัดไปลองใหม่
         return 0
@@ -1819,13 +1828,16 @@ def fetch_and_insert_extras(
     if isinstance(prs, dict):
         prs = prs.get("personalRecords")
     records = {}
+    unreadable = 0
     if isinstance(prs, list):
         for pr in prs:
             if not isinstance(pr, dict):
+                unreadable += 1
                 continue
             record_type_id = _bounded_number(pr.get("typeId"), 1, 1_000_000)
             value = _bounded_number(pr.get("value"), 0, 1_000_000_000)
             if record_type_id is None or value is None:
+                unreadable += 1
                 continue
             achieved = _first_not_none(
                 pr.get("prStartTimeGmtFormatted"), pr.get("prStartTimeGmt"))
@@ -1846,13 +1858,19 @@ def fetch_and_insert_extras(
     # list ว่าง (หรือไม่มีแถวใดอ่านได้) ไม่ถือเป็น snapshot ที่ล้างตารางได้: response ว่างแยกไม่ออก
     # จาก Garmin ตอบว่างชั่วคราว แต่การที่นักกีฬาลบ PR "ทุกอัน" แทบไม่เกิด — ยอมค้างของเก่าดีกว่า
     # เสี่ยงล้างทั้งชุดจาก response เสีย (ลบทีละอันยังได้ผลตามปกติ เพราะ list ยังไม่ว่าง)
+    # มีแถวที่ Garmin ส่งมาแต่เราอ่านไม่ออกแม้แถวเดียว = snapshot ไม่ครบ → upsert อย่างเดียว
+    # ไม่ลบ (ไม่งั้น PR จริงของแถวนั้นจะถูกตีความว่า "Garmin ลบแล้ว" — code review 30 ก.ย. 69)
     n_pr = 0
-    if records:
+    if records and not unreadable:
         placeholders = ", ".join("?" for _ in records)
         cur.execute(
             "DELETE FROM fact_personal_record "
             f"WHERE athlete_id = ? AND record_type_id NOT IN ({placeholders})",
             (athlete_id, *records))
+    elif unreadable and endpoint_failures is not None:
+        endpoint_failures.append(
+            {"endpoint": "get_personal_record", "reason": "payload"})
+    if records:
         for record_type_id, (label, value, activity_id, achieved) in records.items():
             # ทับด้วยค่าปัจจุบันทั้งแถว (ไม่ COALESCE กับของเก่า) — ค่าที่ Garmin แก้ต้องแทนที่จริง
             cur.execute(f"""INSERT INTO fact_personal_record
@@ -2215,13 +2233,11 @@ def main():
                 endpoint_failures=wellness_endpoint_failures,
             )
             # full sync: intraday ของเมื่อวาน (จุดท้ายวัน) + prune >180 วัน รอบละครั้ง
-            _prune_intraday(
-                _sync_intraday_day(
-                    garmin, conn, athlete_id, end_date - timedelta(days=1),
-                    wellness_endpoint_failures,
-                ),
-                conn,
+            _sync_intraday_day(
+                garmin, conn, athlete_id, end_date - timedelta(days=1),
+                wellness_endpoint_failures,
             )
+            _prune_intraday(conn, wellness_endpoint_failures)
         if wellness_terminal_errors:
             raise CoreWellnessUnavailableError(
                 failure

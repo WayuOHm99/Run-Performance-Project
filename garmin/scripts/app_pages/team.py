@@ -16,7 +16,6 @@ from dashboard_charts import intraday_chart
 from dashboard_context import focus_athlete, page_context
 from dashboard_data import (
     athlete_has_training_readiness,
-    load_athlete_devices,
     load_intraday,
     load_team_activities,
     load_wellness_data,
@@ -112,12 +111,12 @@ def athlete_card(athlete, order):
                                status_key, ":material/cloud_off:"),
                      color={"complete_day": "green", "partial_today": "blue"}.get(
                          status_key, "orange"))
+        # ไม่โชว์ชื่ออุปกรณ์บนการ์ด — ทะเบียนอุปกรณ์ของ Garmin ไม่บอกว่าตัวไหนเป็นนาฬิกาหลัก
+        # (is_primary_* เป็น NULL ทุกแถว) การ์ดของ P'kao จึงขึ้น "HRM 600" สายคาดอกแทน fenix 8
+        # รายชื่ออุปกรณ์ทั้งหมดยังดูได้ใน "ข้อมูลที่ Garmin ส่งมา" บน sidebar
         fetched = to_bangkok_timestamp(value_of(row, "fetched_at"))
-        devices = load_athlete_devices(aid)
-        st.caption(" · ".join(filter(None, [
-            devices[0].split(" (")[0] if devices else None,
-            f"แถวนี้ดึงจาก Garmin ล่าสุด {fetched:%d/%m %H:%M} น." if pd.notna(fetched) else None,
-        ])))
+        if pd.notna(fetched):
+            st.caption(f"แถวนี้ดึงจาก Garmin ล่าสุด {fetched:%d/%m %H:%M} น.")
 
         with st.container(horizontal=True, gap="small"):
             show("Sleep score", "sleep_score",

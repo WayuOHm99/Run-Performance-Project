@@ -172,8 +172,8 @@ INSERT INTO fact_wellness_intraday
 VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 ON CONFLICT(athlete_id, metric, ts_utc) DO UPDATE SET
     calendar_date = excluded.calendar_date,
-    value         = excluded.value,
-    source_code   = excluded.source_code,
+    value         = COALESCE(excluded.value, fact_wellness_intraday.value),
+    source_code   = COALESCE(excluded.source_code, fact_wellness_intraday.source_code),
     fetched_at    = excluded.fetched_at
 """
 

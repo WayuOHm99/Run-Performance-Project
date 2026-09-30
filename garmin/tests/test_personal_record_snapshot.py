@@ -69,6 +69,15 @@ class PersonalRecordSnapshotTests(unittest.TestCase):
         self.sync([pr(2, 300.0)])
         self.assertEqual(self.rows(), [(2, 300.0)])
 
+    def test_a_row_garmin_sent_but_we_could_not_read_is_never_deleted(self):
+        """code review 30 ก.ย. 69: แถวที่ parse ไม่ได้ต้องไม่ถูกตีความว่า "Garmin ลบแล้ว"
+
+        Garmin ส่งมาครบ 2 รายการ แต่รายการที่ 1 ค่าเพี้ยน → ต้องไม่ลบ PR เดิมของรายการนั้น
+        """
+        self.sync([pr(1, 83.0), pr(2, 300.0)])
+        self.sync([pr(1, None), pr(2, 290.0)])
+        self.assertEqual(self.rows(), [(1, 83.0), (2, 290.0)])
+
     def test_other_athletes_rows_are_untouched(self):
         self.sync([pr(1, 83.0)], athlete=2)
         self.sync([pr(2, 300.0)], athlete=1)

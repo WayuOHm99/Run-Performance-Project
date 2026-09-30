@@ -139,7 +139,7 @@ class SettleReviewTests(unittest.TestCase):
         self.assertIsNone(self.row()[4])          # ไม่ประทับ = รอบถัดไปลองใหม่
         self.assertEqual(self.row()[0], 22517)    # ค่าเดิมไม่ถูกลบ
 
-    def test_a_failed_review_never_fails_the_lane_or_raises_an_alert(self):
+    def test_a_failed_review_is_visible_but_never_fails_the_lane(self):
         """ข้อมูลเมื่อวานครบอยู่แล้ว การตรวจทานซ้ำเป็นของแถม — ล้มแล้วต้องเงียบ
 
         ถ้านับเป็นความล้มเหลวของสาย แจ้งเตือนจะขึ้นทุกครั้งที่ Garmin สะดุดชั่วคราว
@@ -151,7 +151,8 @@ class SettleReviewTests(unittest.TestCase):
             backfill.fetch_and_repair_previous_day_wellness(
                 garmin, self.conn, 1, self.DAY, now_utc=at(9, 30, 0, 46),
                 endpoint_failures=failures, terminal_errors=terminal)
-        self.assertEqual((terminal, failures), ([], []))
+        self.assertEqual(terminal, [])          # สายไม่ล้ม = ไม่มีแจ้งเตือน
+        self.assertTrue(failures)               # แต่ยังเห็นบนหน้าสถานะระบบ
 
     def test_partial_row_still_takes_repair_path(self):
         self.conn.execute(

@@ -160,6 +160,12 @@ class StoreTests(IntradayBase):
         self.assertEqual(len(self.rows()), 2)
         self.assertEqual(self.rows("heart_rate")[0][2], 75.0)
 
+    def test_a_refetch_that_comes_back_empty_does_not_erase_a_good_point(self):
+        # code review 30 ก.ย. 69 — กฎ NULL-safe merge เดียวกับ wellness รายวัน
+        intraday.store_intraday(self.conn, 1, {"heart_rate": hr_payload([[T0, 60]])})
+        intraday.store_intraday(self.conn, 1, {"heart_rate": hr_payload([[T0, None]])})
+        self.assertEqual(self.rows("heart_rate")[0][2], 60.0)
+
     def test_no_payload_for_a_metric_leaves_existing_rows_alone(self):
         intraday.store_intraday(self.conn, 1, {"heart_rate": hr_payload([[T0, 60]])})
         intraday.store_intraday(self.conn, 1, {"heart_rate": None, "stress": None})
@@ -334,3 +340,13 @@ class MainLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PruneFailureVisibilityTests(IntradayBase):
+    def test_a_failed_prune_is_recorded_not_swallowed(self):
+        # เดิม except แล้ว rollback เงียบ ๆ — ถ้าล้มถาวร ตารางจะโตไม่หยุดโดยไม่มีใครรู้
+        failures = []
+        with mock.patch.object(intraday, "prune", side_effect=sqlite3.OperationalError("locked")), \
+                mock.patch.object(backfill, "_intraday_module", return_value=intraday):
+            backfill._prune_intraday(self.conn, failures)
+        self.assertEqual([f.get("endpoint") for f in failures], ["intraday_prune"])
