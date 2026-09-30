@@ -22,7 +22,7 @@ from pathlib import Path
 
 DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "scripts" / "dashboard.py"
 DASHBOARD_SRC = DASHBOARD_PATH.read_text(encoding="utf-8")
-TREE = ast.parse(DASHBOARD_SRC)
+TREE = ast.parse(DASHBOARD_SRC + chr(10) + (DASHBOARD_PATH.parent / "dashboard_data.py").read_text(encoding="utf-8"))
 
 
 def call_guards(function_name):

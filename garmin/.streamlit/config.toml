@@ -6,35 +6,29 @@ base = "light"
 primaryColor = "#2a78d6"
 textColor = "#31333F"
 
-# --- ระบบดีไซน์ของใบงาน #18 (25 ส.ค. 69) ---
-# ฟอนต์ตัวเดียวรองรับทั้งไทยและอังกฤษ ตัวเลขใช้ mono เพื่อให้เรียงตรงคอลัมน์
-# **`codeFont` ลงถึงแค่ st.code / st.dataframe** ไม่ถึง st.metric หรือการ์ด HTML ของเรา
-# ตัวเลขที่เหลือจึงถูกชี้ด้วย CSS ใน dashboard.py (NUMBER_FONT_CSS + กฎในบล็อกการ์ด)
-# ยามเฝ้ากฎอยู่ที่ tests/test_dashboard_number_font.py
+# --- ระบบดีไซน์รอบ Garmin-only (30 ก.ย. 69) ---
+# ใช้ component ของ Streamlit ตรง ๆ แทนการ์ด HTML ที่เขียนเอง — หน้าตามาจากธีมนี้ที่เดียว
+# ฟอนต์ตัวเดียวรองรับทั้งไทยและอังกฤษ ตัวเลขใน st.metric ถูกชี้เป็น mono ด้วย CSS ใน dashboard.py
 font = "IBM Plex Sans Thai"
 headingFont = "IBM Plex Sans Thai"
 codeFont = "IBM Plex Mono"
 
-# มุม 2 px ทั้งระบบ — คมแบบเครื่องมือ ไม่ใช่การ์ดมนซึ่งเป็นค่าเริ่มต้นที่ดูเหมือนกันไปหมด
-baseRadius = "2px"
-borderColor = "#e4e1da"
+# การ์ดมนเล็กน้อย เส้นขอบจาง พื้นรองเทาอมฟ้า — ให้ตัวเลขเป็นพระเอก ไม่ใช่กรอบ
+baseRadius = "0.75rem"
+borderColor = "#e5e7eb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6f9"
 
-# สีกราฟ: น้ำเงิน↔ส้มผ่านการตรวจตาบอดสีแล้ว (ΔE 24.7) ตรงกับ C_BLUE / C_SECOND
-# ใน dashboard.py  สองบรรทัดนี้ Streamlit ส่งไปให้ฝั่งหน้าเว็บทาทับกราฟที่ใช้ theme="streamlit"
-# **แต่ตัวที่ตัดสินสีจริงในโปรเจกต์นี้คือ `colorway` ของ plotly template ใน dashboard.py**
-# เพราะไฟล์นั้นตั้ง `pio.templates.default` ทับ template ของ Streamlit ไปแล้ว — ค่าที่นี่
-# จึงเป็นตาข่ายรองสำหรับกราฟชนิดอื่น (st.line_chart / altair) ไม่ใช่ที่เดียวที่ต้องแก้
-# สองสีท้ายเลี่ยงเขียว/เหลืองเพราะมันคือสีสถานะ ซึ่งจองไว้ให้สถานะอย่างเดียว
+# สีกราฟ: น้ำเงิน↔ส้มผ่านการตรวจตาบอดสีแล้ว (ΔE 24.7) — กราฟทุกใบเป็น st.line_chart /
+# st.bar_chart จึงรับสีจากที่นี่ที่เดียว สองสีท้ายเลี่ยงเขียว/เหลืองซึ่งเป็นสีสถานะ
 chartCategoricalColors = ["#2a78d6", "#eb6834", "#104281", "#86b6ef"]
 # Streamlit บังคับ **10 ค่าพอดี** สำหรับ sequential/diverging (app_session.py: required_length=10)
 # ใส่ 7 ค่าแล้วมันจะ log error ทุกครั้งที่เปิดหน้าและถอยไปใช้สีเริ่มต้นแทน
 chartSequentialColors = ["#eaf2fd", "#cde2fb", "#aed0f7", "#9ec5f4", "#6da7ec",
                          "#3987e5", "#2a78d6", "#1c5cab", "#164a8f", "#104281"]
 
-# ตัวเลขใน st.metric ของแท็บที่ยังไม่ได้รื้อ (การฟื้นตัว/การซ้อม/ความก้าวหน้า/เซสชัน)
-# ค่าเริ่มต้นของ Streamlit ใหญ่เท่าตัวเลขคำตัดสิน ทำให้ค่าประกอบดังเท่าตัวตัดสิน
-# 1.75rem/600 ดันให้มันอยู่ต่ำกว่าเลข 34px บนการ์ดของแท็บที่รื้อแล้วตามลำดับในระบบดีไซน์
-metricValueFontSize = "1.75rem"
+# ตัวเลขใน st.metric ขนาดกลาง — ค่าเริ่มต้นใหญ่เกินเมื่อวางหลายใบในการ์ดเดียว
+metricValueFontSize = "1.6rem"
 metricValueFontWeight = 600
 
 # ฟอนต์โหลดจาก Google Fonts โดยแยก subset ไทยกับละตินตามที่ Google ตัดมา
@@ -102,5 +96,9 @@ textColor = "#31333F"
 
 # Health and activity data is private.  Bind only to this computer unless an
 # authenticated reverse proxy is deliberately configured in front of Streamlit.
+# ซ่อนปุ่ม Deploy และเมนูนักพัฒนา — แอปนี้เปิดดูในเครื่องอย่างเดียว
+[client]
+toolbarMode = "minimal"
+
 [server]
 address = "127.0.0.1"

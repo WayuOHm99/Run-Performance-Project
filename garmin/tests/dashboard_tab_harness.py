@@ -1,18 +1,14 @@
-"""เรนเดอร์ *แท็บเดียว* ของ dashboard จริงแล้วอ่านสิ่งที่ถูกส่งออกไปหน้าเว็บ
+"""เรนเดอร์ *หน้าเดียว* ของ dashboard จริงแล้วอ่านสิ่งที่ถูกส่งออกไปหน้าเว็บ
 
-ไม่ใช่ไฟล์เทส — เป็นเครื่องมือที่ ``test_dashboard_*_tab.py`` ใช้ร่วมกัน
-เทสที่สร้างจากที่นี่อ่าน **ผลลัพธ์** (หัวข้อกราฟ สี แกน caption) ไม่ใช่รูปร่างของโค้ด
+ไม่ใช่ไฟล์เทส — เป็นเครื่องมือที่ ``test_dashboard_pages.py`` ใช้
+เทสที่สร้างจากที่นี่อ่าน **ผลลัพธ์** (ข้อความ ตัวเลข ตาราง) ไม่ใช่รูปร่างของโค้ด
 จึงรอดการจัดโครงใหม่ แต่แดงทันทีที่พฤติกรรมเพี้ยน
 
-**สองกับดักที่เคยทำให้เทสเขียวโดยไม่ได้ดูข้อมูลเลย — ปิดไว้ในนี้แล้วทั้งคู่**
-
-1. ``st.cache_data`` อยู่ข้ามอินสแตนซ์ ``AppTest`` ในโปรเซสเดียวกัน ไม่ล้างก่อน
-   เคสที่สองจะได้ข้อมูลของเคสแรก (เจอตอน readiness=True ให้ผลเท่ากับ readiness=False เป๊ะ)
-2. ``proto.spec`` ย่อ ``y`` เป็น typed array base64 และ ``pio.from_json`` ก็ไม่ถอดให้
-   เทสที่วนบน ``trace.y`` ตรง ๆ จึงวนบน "ชื่อคีย์สองตัว" แล้วผ่านฉลุย — ใช้ ``y_values()``
+**กับดักที่เคยทำให้เทสเขียวโดยไม่ได้ดูข้อมูลเลย — ปิดไว้ในนี้แล้ว:**
+``st.cache_data`` อยู่ข้ามอินสแตนซ์ ``AppTest`` ในโปรเซสเดียวกัน ไม่ล้างก่อน
+เคสที่สองจะได้ข้อมูลของเคสแรก (เจอตอน readiness=True ให้ผลเท่ากับ readiness=False เป๊ะ)
 """
 
-import base64
 import datetime
 import importlib.util
 import math
@@ -21,20 +17,17 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-import numpy as np
-import plotly.io as pio
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
 
-# แต่ละแท็บกลายเป็นไฟล์ของตัวเองใต้ app_pages/ ตั้งแต่ย้ายไป st.navigation
-# ป้ายเดิมยังใช้เป็น "ชื่อที่เทสเรียก" ได้ แต่สิ่งที่ต้องส่งให้ AppTest คือ path ของหน้า
-TEAM_TAB_LABEL = "app_pages/team.py"
-RECOVERY_TAB_LABEL = "app_pages/recovery.py"
-TRAINING_TAB_LABEL = "app_pages/training.py"
-PROGRESS_TAB_LABEL = "app_pages/progress.py"
-SPLITS_TAB_LABEL = "app_pages/session.py"
-TODAY_TAB_LABEL = "app_pages/today.py"
+# path ของแต่ละหน้าที่ส่งให้ AppTest.switch_page
+TEAM_PAGE = "app_pages/team.py"
+BODY_PAGE = "app_pages/body.py"
+TRAINING_PAGE = "app_pages/training.py"
+ESTIMATES_PAGE = "app_pages/estimates.py"
+SESSION_PAGE = "app_pages/session.py"
+ALL_PAGES = (TEAM_PAGE, BODY_PAGE, TRAINING_PAGE, ESTIMATES_PAGE, SESSION_PAGE)
 
 
 
@@ -64,18 +57,6 @@ LAST_DAY = load_script("garmin_dashboard_domain_for_tests", "dashboard_domain.py
 def is_missing(value):
     """ช่องว่างบนเส้นกราฟมาถึงเทสในรูป ``None`` หรือ ``NaN`` แล้วแต่ชนิดคอลัมน์"""
     return value is None or (isinstance(value, float) and math.isnan(value))
-
-
-def y_values(trace):
-    """คืนค่าบนแกน y เป็นตัวเลขจริง แม้ถูกย่อเป็น typed array base64"""
-    raw = trace.y
-    if raw is None:
-        return []
-    if isinstance(raw, dict):
-        return np.frombuffer(
-            base64.b64decode(raw["bdata"]), dtype=raw["dtype"]
-        ).tolist()
-    return list(raw)
 
 
 def visible(block, kind):
@@ -109,8 +90,10 @@ def new_test_db(directory):
     return sqlite3.connect(destination)
 
 
-def render_tab(tab_label, seed):
-    """คืน ``(tab, charts)`` ของแท็บที่ขอ หลังเรนเดอร์ dashboard จริงบน DB ที่ ``seed`` ปั้น
+def render_page(page, seed, athlete=None, state=None):
+    """คืน ``(main, app)`` ของหน้าที่ขอ หลังเรนเดอร์ dashboard จริงบน DB ที่ ``seed`` ปั้น
+
+    ``main`` คือผังของเนื้อหาหน้า ไม่รวม sidebar ที่หน้าเปลือกวาด
 
     ``seed`` รับ connection ของ DB เปล่าที่มี schema ครบแล้ว และใส่ข้อมูลที่เคสนั้นต้องการ
     """
@@ -132,8 +115,14 @@ def render_tab(tab_label, seed):
         os.environ["GARMIN_DATA_DIR"] = tmp
         try:
             app = AppTest.from_file(str(DASHBOARD_PATH))
-            app.switch_page(tab_label)
+            app.switch_page(page)
+            # ค่า widget ต้องตั้งก่อนรัน — หลังออกจาก with นี้ DB ชั่วคราวถูกลบไปแล้ว
+            # การ set_value().run() ทีหลังจะอ่าน DB ไม่เจอ
+            for key, value in (state or {}).items():
+                app.session_state[key] = value
             app.run(timeout=90)
+            if athlete is not None:
+                app.sidebar.selectbox(key="selected_athlete").set_value(athlete).run(timeout=90)
         finally:
             if previous is None:
                 os.environ.pop("GARMIN_DATA_DIR", None)
@@ -142,12 +131,34 @@ def render_tab(tab_label, seed):
 
     if list(app.exception):
         raise AssertionError(
-            f"หน้า {tab_label!r} โยน exception: "
+            f"หน้า {page!r} โยน exception: "
             + " | ".join(item.value for item in app.exception)
         )
     # คืน ``app.main`` ไม่ใช่ ``app`` — รากของผังรวม sidebar ที่หน้าเปลือกวาดไว้ด้วย
     # เทสที่นับ "ข้อความที่เห็นตอนเปิดหน้า" จะนับ caption ของ sidebar ปนเข้ามาทันที
     # (เจอจริงตอนแยกหน้า: แท็บการฟื้นตัวรายงาน caption 8 อันแทนที่จะเป็น 4)
-    body = app.main
-    charts = [pio.from_json(el.proto.spec) for el in body.get("plotly_chart")]
-    return body, charts
+    return app.main, app
+
+
+def page_text(block):
+    """ทุกข้อความที่หน้าส่งออกไปให้คนอ่าน — markdown, caption, หัวข้อ, ป้าย/ค่า/หมายเหตุของ metric"""
+    parts = []
+
+    def walk(node):
+        children = getattr(node, "children", None)
+        if isinstance(children, dict):
+            children = list(children.values())
+        for child in children or []:
+            kind = type(child).__name__
+            if kind == "Metric":
+                parts.extend([child.label, child.value, child.proto.delta, child.proto.help])
+            elif kind in ("Markdown", "Caption", "Title", "Subheader", "Header", "Alert",
+                          "Info", "Warning", "Error"):
+                parts.append(child.value)
+            elif kind == "Dataframe":
+                parts.extend(str(column) for column in child.value.columns)
+                parts.append(child.value.to_string())
+            walk(child)
+
+    walk(block)
+    return chr(10).join(str(part) for part in parts if part)
