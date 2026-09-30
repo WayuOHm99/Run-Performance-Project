@@ -517,6 +517,31 @@ class SensorApplicabilityTests(unittest.TestCase):
         self.assertIn("vo2max_trend", fields)
 
 
+class DriftGroupingTests(unittest.TestCase):
+    """ช่องที่มาจาก endpoint เดียวกันหายพร้อมกัน = เหตุการณ์เดียว ไม่ใช่สามเหตุการณ์
+
+    เคสจริง 30 ก.ย. 69: hill_score_overall/strength/endurance ของ P'kao ลดเหลือ 3/7
+    พร้อมกัน หน้าสถานะระบบและ heartbeat ขึ้นคำเตือน 3 บรรทัดของเรื่องเดียว
+    """
+
+    @staticmethod
+    def coverage(field, short, baseline=(30, 30)):
+        return {"table": "wellness", "field": field, "recent": (30, 30), "prior": (30, 30),
+                "short": short, "short_baseline": baseline}
+
+    def test_fields_of_one_endpoint_dropping_together_become_one_finding(self):
+        coverage = [self.coverage(field, (3, 7)) for field in (
+            "hill_score_overall", "hill_score_strength", "hill_score_endurance")]
+        findings = dq.drift_findings(coverage)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("hill_score_overall", findings[0]["field"])
+        self.assertIn("hill_score_endurance", findings[0]["field"])
+
+    def test_unrelated_fields_with_the_same_numbers_stay_separate(self):
+        coverage = [self.coverage("resting_hr", (3, 7)), self.coverage("sleep_score", (3, 7))]
+        self.assertEqual(len(dq.drift_findings(coverage)), 2)
+
+
 class SentinelAndRangeTests(unittest.TestCase):
     def test_invalid_sentinels_ranges_and_relations_are_reported(self):
         conn = create_db()
