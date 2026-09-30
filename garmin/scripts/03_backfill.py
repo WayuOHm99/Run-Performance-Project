@@ -283,6 +283,37 @@ def _call_wellness_endpoint(garmin, endpoint, date_str, failures):
     )
 
 
+# ── HOOK: intraday wellness (logic อยู่ใน scripts/intraday.py) ──────────────
+def _sync_intraday_day(garmin, conn, athlete_id, day, failures):
+    """ดึง HR+stress ของวัน `day` เก็บลง fact_wellness_intraday. ห้ามทำให้ lane ล้ม:
+    ทุกความผิดพลาดกลายเป็น failure ที่ surface ผ่าน endpoint_failures เหมือน endpoint อื่น."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "garmin_intraday", Path(__file__).resolve().parent / "intraday.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.fetch_and_store_day(
+            garmin, conn, athlete_id, day.isoformat(),
+            call=safe_call, failures=failures,
+        )
+        return module
+    except Exception as exc:  # noqa: BLE001 — intraday เป็นของแถม ไม่บล็อก sync หลัก
+        conn.rollback()
+        _record_endpoint_failure(failures, None, exc, endpoint="intraday_store")
+        return None
+
+
+def _prune_intraday(module, conn):
+    if module is None:
+        return
+    try:
+        module.prune(conn)
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+
+
 def _normalize_activity_id(value):
     """Return one canonical positive SQLite INTEGER activity id."""
     if isinstance(value, bool):
@@ -2169,6 +2200,10 @@ def main():
                     endpoint_failures=wellness_endpoint_failures,
                     terminal_errors=wellness_terminal_errors,
                 )
+            # intraday HR/stress ของวันนี้ 1 ครั้ง/รอบ (2 call × 30 นาที = 96 call/คน/วัน)
+            _sync_intraday_day(
+                garmin, conn, athlete_id, end_date, wellness_endpoint_failures
+            )
         else:
             wellness_count = fetch_and_insert_wellness(
                 garmin, conn, athlete_id, start_date, end_date,
@@ -2178,6 +2213,14 @@ def main():
             fetch_and_insert_extras(
                 garmin, conn, athlete_id, start_date, end_date,
                 endpoint_failures=wellness_endpoint_failures,
+            )
+            # full sync: intraday ของเมื่อวาน (จุดท้ายวัน) + prune >180 วัน รอบละครั้ง
+            _prune_intraday(
+                _sync_intraday_day(
+                    garmin, conn, athlete_id, end_date - timedelta(days=1),
+                    wellness_endpoint_failures,
+                ),
+                conn,
             )
         if wellness_terminal_errors:
             raise CoreWellnessUnavailableError(

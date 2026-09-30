@@ -250,6 +250,18 @@ BODY_COMPOSITION_COLUMNS = [
 ]
 
 
+# จุด intraday (HR/stress/body battery ทุก 2-3 นาที) — เก็บ 180 วัน ดู scripts/intraday.py
+WELLNESS_INTRADAY_COLUMNS = [
+    ("athlete_id", "INTEGER NOT NULL REFERENCES dim_athlete(athlete_id)"),
+    ("calendar_date", "TEXT NOT NULL"),
+    ("metric", "TEXT NOT NULL"),
+    ("ts_utc", "TEXT NOT NULL"),
+    ("value", "REAL"),
+    ("source_code", "INTEGER"),
+    ("fetched_at", UTC_NOW_DEFAULT),
+]
+
+
 def _create(cur, table, columns, extra=""):
     cols_sql = ",\n        ".join(f"{name} {typ}" for name, typ in columns)
     cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (\n        {cols_sql}{extra}\n    )")
@@ -322,6 +334,8 @@ def init_schema(db_path: Path | None = None):
             ",\n        PRIMARY KEY (activity_id, split_num) ON CONFLICT REPLACE")
     _create(cur, "fact_daily_wellness", WELLNESS_COLUMNS,
             ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
+    _create(cur, "fact_wellness_intraday", WELLNESS_INTRADAY_COLUMNS,
+            ",\n        PRIMARY KEY (athlete_id, metric, ts_utc)")
     _create(cur, "fact_race_prediction", RACE_PREDICTION_COLUMNS,
             ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
     _create(cur, "fact_personal_record", PERSONAL_RECORD_COLUMNS,
@@ -345,6 +359,7 @@ def init_schema(db_path: Path | None = None):
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date ON fact_wellness_intraday(athlete_id, calendar_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_device_athlete ON dim_athlete_device(athlete_id)")
 
     conn.commit()
