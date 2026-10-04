@@ -88,19 +88,36 @@ def _github_repository(gh: str) -> str:
 
 
 def _ensure_release(gh: str, repository: str) -> None:
-    result = _run(
-        [gh, "release", "view", RELEASE_TAG, "--repo", repository],
-        allow_failure=True,
-    )
+    view_command = [gh, "release", "view", RELEASE_TAG, "--repo", repository]
+    result = _run(view_command, allow_failure=True, timeout=60)
     if result.returncode == 0:
         return
-    _run(
+    # ถ้าถามสถานะไม่สำเร็จเพราะเครือข่าย/สิทธิ์ ห้ามตีความว่า release ไม่มี
+    diagnostic = (result.stderr or result.stdout).lower()
+    if "release not found" not in diagnostic:
+        raise HeartbeatError("command_failed:gh release view:status_unknown")
+    created = _run(
         [
             gh, "release", "create", RELEASE_TAG, "--repo", repository,
             "--title", "System health heartbeat",
             "--notes", "Machine-readable status only; contains no athlete findings or health measurements.",
             "--latest=false", "--target", "main",
-        ]
+        ],
+        allow_failure=True,
+        timeout=120,
+    )
+    if created.returncode == 0:
+        return
+    # Publisher อีกตัวอาจสร้างทันเรา; ยืนยันปลายทางก่อนอัปโหลด
+    diagnostic = (created.stderr or created.stdout).lower()
+    if "already exists" in diagnostic:
+        checked = _run(view_command, allow_failure=True, timeout=60)
+        if checked.returncode == 0:
+            return
+        raise HeartbeatError("command_failed:gh release view:status_unknown")
+    # ไม่ส่ง stdout/stderr ออกไป เพราะอาจมีข้อมูลส่วนตัวจากเครื่อง
+    raise HeartbeatError(
+        f"command_failed:gh release create:{win_process.exit_reason(created.returncode)}"
     )
 
 

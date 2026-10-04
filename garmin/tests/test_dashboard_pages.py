@@ -5,20 +5,25 @@
 """
 
 import datetime
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dashboard_tab_harness import (  # noqa: E402
     ALL_PAGES,
     BODY_PAGE,
+    DASHBOARD_PATH,
     ESTIMATES_PAGE,
     LAST_DAY,
     SESSION_PAGE,
     SYSTEM_PAGE,
     TEAM_PAGE,
     TRAINING_PAGE,
+    new_test_db,
     page_text,
     render_page,
 )
@@ -119,6 +124,69 @@ class EveryPageRendersTests(unittest.TestCase):
             with self.subTest(page=page):
                 main, _ = render_page(page, seed_nothing_for_tong)
                 self.assertTrue(page_text(main))
+
+
+class AthleteSelectionTests(unittest.TestCase):
+    def setUp(self):
+        import streamlit as st
+        from streamlit.testing.v1 import AppTest
+
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(directory.cleanup)
+        env = patch.dict(os.environ, {"GARMIN_DATA_DIR": directory.name})
+        env.start()
+        self.addCleanup(env.stop)
+        conn = new_test_db(directory.name)
+        try:
+            conn.executemany(
+                "INSERT INTO dim_athlete (athlete_id, slug, display_name) VALUES (?, ?, ?)",
+                [(1, "alpha", "Same name"), (2, "beta", "Same name")],
+            )
+            conn.executemany(
+                "INSERT INTO fact_daily_wellness (athlete_id, calendar_date, resting_hr)"
+                " VALUES (?, ?, ?)", [(1, TODAY.isoformat(), 48), (2, TODAY.isoformat(), 65)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.app = AppTest.from_file(str(DASHBOARD_PATH))
+
+    def assert_selected(self, athlete_id, slug, rhr):
+        self.assertFalse(list(self.app.exception))
+        context = self.app.session_state["_dashboard_context"]
+        self.assertEqual(context.athlete_id, athlete_id)
+        self.assertEqual(context.selected_slug, slug)
+        self.assertEqual(context.wellness_df.iloc[0]["resting_hr"], rhr)
+
+    def test_duplicate_names_are_distinct_and_select_their_own_data(self):
+        self.app.switch_page(BODY_PAGE).run(timeout=90)
+        self.assertEqual(self.app.sidebar.selectbox(key="selected_athlete").options,
+                         ["Same name (alpha)", "Same name (beta)"])
+        for athlete_id, slug, rhr in [(2, "beta", 65), (1, "alpha", 48)]:
+            with self.subTest(athlete_id=athlete_id):
+                self.app.sidebar.selectbox(key="selected_athlete").set_value(athlete_id).run(timeout=90)
+                self.assert_selected(athlete_id, slug, rhr)
+
+    def test_each_duplicate_name_team_card_selects_its_own_athlete(self):
+        for order, athlete_id, slug, rhr in [(0, 1, "alpha", 48), (1, 2, "beta", 65)]:
+            with self.subTest(athlete_id=athlete_id):
+                self.app.switch_page(TEAM_PAGE).run(timeout=90)
+                self.assertEqual(self.app.button(key=f"open-athlete-{order}").label,
+                                 f"ดูข้อมูลของ Same name ({slug})")
+                self.app.button(key=f"open-athlete-{order}").click().run(timeout=90)
+                self.assert_selected(athlete_id, slug, rhr)
+                self.assertIn("ร่างกาย · Same name", page_text(self.app.main))
+
+    def test_existing_name_based_session_keeps_the_selected_athlete(self):
+        _, app = render_page(BODY_PAGE, seed_team, state={"selected_athlete": "Dan"})
+        self.assertEqual(app.session_state["_dashboard_context"].athlete_id, 2)
+        self.assertEqual(app.sidebar.selectbox(key="selected_athlete").value, 2)
+
+    def test_removed_athlete_selection_falls_back_to_an_existing_athlete(self):
+        _, app = render_page(BODY_PAGE, seed_team, state={"selected_athlete": 999})
+        self.assertEqual(app.session_state["_dashboard_context"].athlete_id, 1)
 
 
 class GarminOnlyOnScreenTests(unittest.TestCase):
@@ -247,7 +315,7 @@ class TrainingPageTests(unittest.TestCase):
 
 class BodyPageTests(unittest.TestCase):
     def test_athlete_whose_watch_stopped_still_sees_their_last_values(self):
-        main, _ = render_page(BODY_PAGE, seed_team, athlete="Dan")
+        main, _ = render_page(BODY_PAGE, seed_team, athlete=2)
         metrics = {m.label: (m.value, m.proto.delta) for m in main.get("metric")}
         self.assertEqual(metrics["RHR"][0], "50 bpm")
         self.assertEqual(metrics["RHR"][1],

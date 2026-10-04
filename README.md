@@ -8,7 +8,7 @@
 ![Python](https://img.shields.io/badge/Python-3.14-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-WAL-003B57?style=flat-square&logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-500%2B-16a34a?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-unittest-16a34a?style=flat-square)
 
 </div>
 
@@ -33,12 +33,15 @@ Garmin Connect API  ──►  SQLite (garmin.db)  ──►  Streamlit Coach Da
 
 | หน้า | ใช้ดูอะไร |
 | --- | --- |
-| 📅 **วันนี้** | สรุปสถานะของทุกคนในวันนี้ และสัญญาณที่ควรระวัง |
-| 👥 **ทีม** | สัญญาณของทั้งทีมในมุมเดียว พร้อมเตือนเมื่อข้อมูลของใครไม่อัปเดต |
-| 🌙 **การฟื้นตัว** | HRV, การนอน, ความพร้อมซ้อมและเวลาฟื้นตัวจาก Garmin เทียบกับค่าปกติของแต่ละคน |
-| 🏃 **การซ้อม** | แนวโน้ม pace–HR ของรันเบา, โหลดสะสม และสัดส่วนความหนัก 3 โซน |
-| 📈 **ความก้าวหน้า** | Lactate threshold, เวลาแข่งที่คาดการณ์, Endurance/Hill score และสถิติส่วนตัว |
-| 🔎 **รายละเอียดเซสชัน** | ภาพรวมของการซ้อมแต่ละครั้ง พร้อมตาราง Splits รายรอบ |
+| 👥 **ทีม** | ค่าของทุกคนตามวันที่เลือกบนหน้านี้ พร้อมระบุช่องที่ยังไม่ได้รับข้อมูล |
+| 🌙 **ร่างกาย** | การนอน, HRV, RHR, Body Battery, Stress, การหายใจและ Training Readiness จาก Garmin |
+| 🏃 **การซ้อม** | ระยะวิ่ง, เวลาซ้อม, โซน HR ของ Garmin, Training Load และตารางกิจกรรม |
+| 📈 **ค่าประเมิน Garmin** | VO2max, Lactate Threshold, เวลาแข่งที่คาดการณ์, Endurance/Hill Score, PR และองค์ประกอบร่างกาย |
+| 🔎 **เซสชัน** | ค่าที่ Garmin ส่งมากับแต่ละกิจกรรม พร้อมตาราง Splits รายรอบ |
+| 🛠️ **สถานะระบบ** | ความสดของข้อมูล, ผลตรวจสุขภาพระบบและสถานะสายซิงก์ |
+
+ตัวกรองนักกีฬาและช่วงวันที่ใน sidebar ใช้กับหน้ารายบุคคล ส่วนหน้าทีมเลือกวันที่เอง
+สถานะ “ได้รับครบทุกช่อง” หมายถึงแต่ละช่องมีข้อมูลอย่างน้อยหนึ่งครั้งในช่วงนั้น ไม่ได้หมายถึงได้รับครบทุกวัน
 
 ### ระบบเบื้องหลังที่ทำงานเองได้
 
@@ -64,7 +67,7 @@ Garmin Connect API  ──►  SQLite (garmin.db)  ──►  Streamlit Coach Da
 | ภาษา | Python 3.14, จัดการ dependency ด้วย [uv](https://docs.astral.sh/uv/) |
 | ดึงข้อมูล | [`garminconnect`](https://github.com/cyberjunky/python-garminconnect) |
 | ฐานข้อมูล | SQLite (โหมด WAL) |
-| Dashboard | Streamlit (multipage), Plotly, pandas |
+| Dashboard | Streamlit (multipage และกราฟมาตรฐาน), pandas |
 | งานอัตโนมัติ | Windows Task Scheduler, PowerShell |
 | Backup | Restic, GitHub Releases (private) |
 | CI | GitHub Actions: unittest, py_compile และตรวจว่าเทสไม่แตะข้อมูลจริง |
@@ -76,16 +79,16 @@ Garmin Connect API  ──►  SQLite (garmin.db)  ──►  Streamlit Coach Da
 ```powershell
 # 1) ติดตั้ง dependency
 cd garmin
-uv sync
+uv sync --frozen
 
 # 2) สร้างฐานข้อมูล
-uv run python scripts/02_init_schema.py
+uv run --frozen python scripts/02_init_schema.py
 
 # 3) ขอ token ของนักกีฬา (ถามชื่อ อีเมล และรหัสผ่านแบบซ่อน รหัสผ่านไม่ถูกบันทึก)
-uv run python scripts/01_generate_token.py
+uv run --frozen python scripts/01_generate_token.py
 
 # 4) ดึงข้อมูลย้อนหลังของทุกคน
-uv run python scripts/fetch_all.py --days 30
+uv run --frozen python scripts/fetch_all.py --days 30
 
 # 5) เปิด Dashboard
 cd ..
@@ -98,10 +101,23 @@ cd ..
 
 ```powershell
 cd garmin
-uv run python -m unittest discover -s tests
+uv run --frozen python -m unittest discover -s tests
 ```
 
-มีเทสมากกว่า 500 กรณี ครอบคลุมทุกหน้าของ Dashboard, นโยบายแจ้งเตือน, การ backup และการกู้คืน, heartbeat และความปลอดภัยของไฟล์ ทุกบั๊กที่เคยเจอจริงจะมีเทสล็อกไว้ไม่ให้เกิดซ้ำ
+ชุดเทสครอบคลุมทุกหน้าของ Dashboard, นโยบายแจ้งเตือน, การ backup และการกู้คืน, heartbeat และความปลอดภัยของไฟล์ กรณีที่ต้องใช้ Windows/PowerShell จะถูกข้ามเมื่อรันบน Linux
+
+CI รันชุดเทสเต็มทั้ง Linux และ Windows ตรวจ dependency ที่ปักไว้ใน lockfile และเปิด Dashboard ใน Chromium ด้วยข้อมูลจำลองเพื่อทดสอบทั้ง 6 หน้า การเลือกนักกีฬาชื่อซ้ำ และการกดบนมือถือ
+
+รันเทสเบราว์เซอร์บน Linux ได้ด้วย:
+
+```bash
+cd garmin
+uv sync --frozen --group ci
+uv run --frozen --group ci playwright install --with-deps chromium
+uv run --frozen --group ci python tests/browser_smoke.py
+```
+
+ถ้ามี Chromium ติดตั้งอยู่แล้ว ใช้ `--chromium-path /usr/bin/chromium` แทนการดาวน์โหลดเบราว์เซอร์ เทสสร้างฐานข้อมูลจำลองแยกและหยุดเซิร์ฟเวอร์เองเมื่อจบ ดูขั้นตอนนำไปใช้จริงที่ [คู่มือจากคลาวด์สู่การใช้งานจริง](docs/CLOUD_WORKFLOW.md)
 
 ## 🗂️ โครงสร้างโปรเจกต์
 

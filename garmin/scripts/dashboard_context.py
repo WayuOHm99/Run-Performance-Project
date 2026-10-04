@@ -33,10 +33,10 @@ def page_context():
     return context
 
 
-def focus_athlete(name):
+def focus_athlete(athlete_id):
     """ปุ่มบนการ์ดทีม: เลือกนักกีฬาคนนั้นแล้วพาไปหน้า "ร่างกาย" ของคนนั้นในคลิกเดียว
 
-    ตั้งแค่ชื่อจะเปลี่ยนคนแต่ค้างหน้าเดิม ตั้งแค่หน้าจะย้ายหน้าแต่ยังเป็นคนเดิม
+    ตั้งแค่ ID จะเปลี่ยนคนแต่ค้างหน้าเดิม ตั้งแค่หน้าจะย้ายหน้าแต่ยังเป็นคนเดิม
     ทั้งสองอย่างอ่านเหมือนปุ่มเสียพอ ๆ กัน จึงต้องทำครบทั้งคู่
 
     **เรียก ``st.switch_page()`` ตรงนี้ไม่ได้** — ซอร์สของมันจบด้วย ``st.empty()``
@@ -45,7 +45,7 @@ def focus_athlete(name):
     แต่หน้าไม่ย้าย และไม่มี error ให้เห็นเลย (จับได้ด้วย CDP ในเบราว์เซอร์จริง
     เท่านั้น — ทั้งเทสและ AppTest มองไม่เห็น) จึงฝากคำขอไว้ให้หน้าเปลือกทำแทน
     """
-    st.session_state[ATHLETE_STATE_KEY] = name
+    st.session_state[ATHLETE_STATE_KEY] = athlete_id
     st.session_state[PENDING_PAGE_KEY] = ATHLETE_PAGE
 
 

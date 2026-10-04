@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -447,26 +448,51 @@ class CiCoverageTests(unittest.TestCase):
         source = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
-        windows_job = source.split("  windows-ops:", 1)[1]
-        self.assertIn("runs-on: windows-latest", source)
-        self.assertIn("garmin.tests.test_ops_security", source)
-        self.assertIn("garmin.tests.test_health_report.PrivateAclChecksTests", source)
-        self.assertIn(
-            "garmin.tests.test_backup_healthcheck.HealthcheckSecretStorageTests",
-            source,
-        )
-        self.assertIn(
-            "garmin.tests.test_health_report.HealthcheckSecretStorageChecksTests",
-            source,
-        )
-        self.assertIn("garmin.tests.test_offsite_backup", source)
-        self.assertIn("garmin.tests.test_system_heartbeat", source)
+        windows_job = re.search(r"(?ms)^  windows-ops:\n(.*?)(?=^  \S|\Z)", source)[1]
+        self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("astral-sh/setup-uv@v9.0.0", windows_job)
-        self.assertIn("uv sync --project garmin --frozen", windows_job)
+        self.assertRegex(windows_job, r"uv sync\b[^\n]*--frozen")
         self.assertIn('tzutil /s "SE Asia Standard Time"', windows_job)
-        self.assertIn(
-            "uv run --project garmin --frozen python -m unittest", windows_job
-        )
+        self.assertIn("GARMIN_DATA_DIR:", windows_job)
+
+        # Collect the suite selected by CI's actual command rather than requiring
+        # a literal list of modules. Narrowing discovery must not drop these guards.
+        command = re.search(r"(uv run[^\n]*python -m unittest[^\n]*)", windows_job)[1]
+        args = shlex.split(command)[shlex.split(command).index("unittest") + 1:]
+        working_dir = re.search(r"working-directory:\s*(\S+)", windows_job)[1]
+        for flag in ("-s", "--start-directory", "-t", "--top-level-directory"):
+            if flag in args:
+                index = args.index(flag) + 1
+                args[index] = str(PROJECT_ROOT / working_dir / args[index])
+        collected = set()
+
+        class CollectRunner:
+            def run(self, suite):
+                def collect(node):
+                    if isinstance(node, unittest.TestSuite):
+                        for test in node:
+                            collect(test)
+                    else:
+                        collected.add((type(node).__module__.split(".")[-1], type(node).__name__))
+                collect(suite)
+                return unittest.TestResult()
+
+        unittest.TestProgram(module=None, argv=["unittest", *args],
+                             testRunner=CollectRunner(), exit=False)
+        required = {
+            ("test_ops_security", "PrivateAclPowerShellIntegrationTests"),
+            ("test_ops_security", "PrepLogPowerShellIntegrationTests"),
+            ("test_ops_security", "SchedulerPlanTests"),
+            ("test_health_report", "PrivateAclChecksTests"),
+            ("test_health_report", "HealthcheckSecretStorageChecksTests"),
+            ("test_backup_healthcheck", "HealthcheckSecretStorageTests"),
+            ("test_offsite_backup", "OffsiteBackupCliTests"),
+            ("test_system_heartbeat", "SystemHeartbeatCliTests"),
+            ("test_share_token", "PrivateTokenAclTests"),
+            ("test_notify_sync", "NotifySyncBehaviorTests"),
+            ("test_notify_sync", "HeartbeatPublisherWatchdogTests"),
+        }
+        self.assertFalse(required - collected, f"Windows CI is missing {required - collected}")
 
 
 class PowerShellEncodingTests(unittest.TestCase):

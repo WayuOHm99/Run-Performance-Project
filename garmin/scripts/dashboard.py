@@ -106,12 +106,32 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    athlete_options = dict(zip(athletes_df["display_name"], athletes_df["athlete_id"]))
-    selected_name = st.selectbox(
-        "นักกีฬา", options=list(athlete_options), key="selected_athlete",
+    athlete_options = {int(row["athlete_id"]): row for row in athletes_df.to_dict("records")}
+    duplicate_names = set(athletes_df.loc[
+        athletes_df["display_name"].duplicated(keep=False), "display_name",
+    ])
+    athlete_labels = {
+        aid: f'{row["display_name"]} ({row["slug"]})'
+             if row["display_name"] in duplicate_names else row["display_name"]
+        for aid, row in athlete_options.items()
+    }
+    # session เดิมใช้ชื่อเป็นค่า widget; รักษาคนที่เลือกไว้เมื่อเปลี่ยนมาใช้ ID
+    previous_athlete = st.session_state.get("selected_athlete")
+    if isinstance(previous_athlete, str):
+        matches = [aid for aid, row in athlete_options.items()
+                   if row["display_name"] == previous_athlete]
+        if matches:
+            st.session_state["selected_athlete"] = matches[-1]
+        else:
+            st.session_state.pop("selected_athlete", None)
+    elif previous_athlete is not None and previous_athlete not in athlete_options:
+        st.session_state.pop("selected_athlete", None)
+    athlete_id = st.selectbox(
+        "นักกีฬา", options=list(athlete_options), format_func=athlete_labels.__getitem__,
+        key="selected_athlete",
     )
-    athlete_id = athlete_options[selected_name]
-    selected_slug = athletes_df.loc[athletes_df["athlete_id"] == athlete_id, "slug"].iloc[0]
+    selected_name = athlete_labels[athlete_id]
+    selected_slug = athlete_options[athlete_id]["slug"]
 
     period = st.segmented_control(
         "ช่วงวันที่", options=list(PERIODS), default="30 วัน", required=True,
@@ -128,12 +148,13 @@ with st.sidebar:
         start_date, end_date = (picked[0], picked[-1]) if picked else (today, today)
     else:
         start_date, end_date = today - datetime.timedelta(days=PERIODS[period] - 1), today
-    st.caption("หน้าทีมแสดงค่าล่าสุดเสมอ ไม่ขึ้นกับนักกีฬาหรือช่วงวันที่ที่เลือก")
+    st.caption("หน้าทีมใช้วันที่ที่เลือกบนหน้านั้น ไม่ขึ้นกับตัวกรองนักกีฬาหรือช่วงวันที่นี้")
 
     availability = load_data_availability(athlete_id, start_date.isoformat(), end_date.isoformat())
     with st.popover("ข้อมูลที่ Garmin ส่งมา", icon=":material/database:", width="stretch"):
         state_text = {
-            "available": "มีครบในช่วงนี้", "partial": "มีบางค่า",
+            "available": "ได้รับครบทุกช่องอย่างน้อยหนึ่งครั้งในช่วงนี้",
+            "partial": "ได้รับบางช่องในช่วงนี้",
             "outside_range": "มีแต่นอกช่วงนี้", "never_received": "ยังไม่เคยได้รับ",
         }
         rows = []
@@ -165,6 +186,7 @@ if not activity_df.empty:
 set_page_context(
     today=today,
     athletes_df=athletes_df,
+    athlete_labels=athlete_labels,
     athlete_id=athlete_id,
     selected_name=selected_name,
     selected_slug=selected_slug,
