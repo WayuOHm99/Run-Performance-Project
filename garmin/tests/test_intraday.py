@@ -171,6 +171,21 @@ class StoreTests(IntradayBase):
         intraday.store_intraday(self.conn, 1, {"heart_rate": None, "stress": None})
         self.assertEqual(len(self.rows("heart_rate")), 1)
 
+    def test_stress_corrections_replace_value_and_status_together(self):
+        for raw, expected in [(30, (30.0, None)), (-1, (None, -1)),
+                              (-2, (None, -2)), (40, (40.0, None))]:
+            with self.subTest(raw=raw):
+                intraday.store_intraday(self.conn, 1, {"stress": stress_payload([[T0, raw]])})
+                self.assertEqual(self.rows("stress")[0][2:], expected)
+                self.assertEqual(len(self.rows("stress")), 1)
+
+    def test_empty_stress_refetch_preserves_the_last_known_value_or_status(self):
+        for raw, expected in [(30, (30.0, None)), (-1, (None, -1))]:
+            with self.subTest(raw=raw):
+                intraday.store_intraday(self.conn, 1, {"stress": stress_payload([[T0, raw]])})
+                intraday.store_intraday(self.conn, 1, {"stress": stress_payload([[T0, None]])})
+                self.assertEqual(self.rows("stress")[0][2:], expected)
+
 
 class PruneTests(IntradayBase):
     def test_prune_keeps_last_180_days_only(self):

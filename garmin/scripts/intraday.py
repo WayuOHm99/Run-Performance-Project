@@ -172,8 +172,12 @@ INSERT INTO fact_wellness_intraday
 VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 ON CONFLICT(athlete_id, metric, ts_utc) DO UPDATE SET
     calendar_date = excluded.calendar_date,
-    value         = COALESCE(excluded.value, fact_wellness_intraday.value),
-    source_code   = COALESCE(excluded.source_code, fact_wellness_intraday.source_code),
+    value         = CASE
+        WHEN excluded.value IS NOT NULL OR excluded.source_code IS NOT NULL
+        THEN excluded.value ELSE fact_wellness_intraday.value END,
+    source_code   = CASE
+        WHEN excluded.value IS NOT NULL OR excluded.source_code IS NOT NULL
+        THEN excluded.source_code ELSE fact_wellness_intraday.source_code END,
     fetched_at    = excluded.fetched_at
 """
 
@@ -189,6 +193,8 @@ def store_intraday(conn, athlete_id, payloads, *, failures=None, date_str=None):
     payloads: {"heart_rate": <get_heart_rates>, "stress": <get_stress_data>} — key ที่ไม่มี/None = ข้าม
     (ไม่แตะแถวเดิม). metric ที่ schema เพี้ยน → ไม่เก็บ + failures.append({endpoint, reason:"payload"})
     ส่วน metric อื่นยังเก็บตามปกติ. ไม่ commit เอง — ผู้เรียก commit.
+    value/source_code เป็นสถานะเดียวกัน: ค่าใหม่หรือรหัสใหม่แทนทั้งคู่;
+    ถ้าทั้งคู่เป็น NULL แปลว่าไม่มีข้อมูลใหม่ จึงเก็บสถานะเดิมไว้.
     """
     counts = {m: 0 for m in METRICS}
     jobs = (

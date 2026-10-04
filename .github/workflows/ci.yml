@@ -93,6 +93,12 @@ jobs:
     name: Windows ACL and launcher regressions
     runs-on: windows-latest
     timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: garmin
+    env:
+      GARMIN_DATA_DIR: ${{ github.workspace }}/garmin-data-ci
+      PYTHONUTF8: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -108,7 +114,7 @@ jobs:
           version: "0.11.19"
 
       - name: Sync locked dependencies
-        run: uv sync --project garmin --frozen
+        run: uv sync --frozen
 
       - name: Match the production timezone
         run: |
@@ -117,15 +123,72 @@ jobs:
             throw "Failed to configure the production timezone"
           }
 
-      - name: Run temp-only Windows operations tests
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: >-
-          uv run --project garmin --frozen python -m unittest
-          garmin.tests.test_ops_security
-          garmin.tests.test_health_report.PrivateAclChecksTests
-          garmin.tests.test_health_report.HealthcheckSecretStorageChecksTests
-          garmin.tests.test_backup_healthcheck.HealthcheckSecretStorageTests
-          garmin.tests.test_offsite_backup
-          garmin.tests.test_system_heartbeat
-          -v
+      - name: Prepare isolated data and production canary
+        id: canary
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:GARMIN_DATA_DIR, 'data' | Out-Null
+          "ci-canary-${{ github.run_id }}-${{ github.run_attempt }}" | Set-Content data/ci-canary.txt
+          $hash = (Get-FileHash data/ci-canary.txt -Algorithm SHA256).Hash
+          "CANARY_HASH=$hash" >> $env:GITHUB_ENV
+
+      - name: Run full unittest suite including Windows regressions
+        run: uv run --frozen python -m unittest discover -s tests -v
+
+      - name: Verify production data untouched
+        if: always() && steps.canary.outcome == 'success'
+        run: |
+          $hash = (Get-FileHash data/ci-canary.txt -Algorithm SHA256).Hash
+          if ($hash -ne $env:CANARY_HASH) { throw 'Production canary changed during tests' }
+          $extra = Get-ChildItem data -File -Recurse | Where-Object Name -ne 'ci-canary.txt'
+          if ($extra) { throw 'Tests created files in production data' }
+
+      - name: Compile all project Python files
+        run: uv run --frozen python -m compileall -q scripts share tests
+
+      - name: Clean up canary
+        if: always()
+        run: Remove-Item data/ci-canary.txt -ErrorAction SilentlyContinue
+
+  dashboard-and-dependencies:
+    name: Dashboard browser and dependency checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: garmin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.11.19"
+
+      - name: Install locked CI tools
+        run: uv sync --frozen --group ci
+
+      - name: Audit locked runtime dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/garmin-requirements.txt"
+          uv run --frozen --group ci pip-audit --disable-pip --no-deps --require-hashes --strict --progress-spinner off --cache-dir "$RUNNER_TEMP/pip-audit" -r "$RUNNER_TEMP/garmin-requirements.txt"
+
+      - name: Install Chromium
+        run: uv run --frozen --group ci playwright install --with-deps chromium
+
+      - name: Check all dashboard pages with synthetic data
+        run: uv run --frozen --group ci python tests/browser_smoke.py --artifacts-dir "$RUNNER_TEMP/dashboard-smoke"
+
+      - name: Save browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dashboard-smoke
+          path: ${{ runner.temp }}/dashboard-smoke
+          if-no-files-found: ignore
+          retention-days: 7

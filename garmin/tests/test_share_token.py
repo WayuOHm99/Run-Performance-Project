@@ -103,6 +103,33 @@ class GarminConnectDependencyTests(unittest.TestCase):
 
 
 class PrivatePackagingFlowTests(unittest.TestCase):
+    def test_git_ignores_interrupted_token_staging_at_any_depth(self):
+        root = SCRIPT_PATH.parents[2]
+        with tempfile.TemporaryDirectory(prefix="token-ignore-") as temp:
+            checkout = Path(temp)
+            subprocess.run(["git", "init", "--quiet", str(checkout)], check=True,
+                           capture_output=True, timeout=SUBPROCESS_TIMEOUT_SEC)
+            (checkout / ".gitignore").write_bytes((root / ".gitignore").read_bytes())
+            ignored = [
+                f"{prefix}.garmin-token-interrupted/{name}"
+                for prefix in ("", "garmin/share/", "nested/copied-helper/")
+                for name in ("garmin_tokens.json", ".token-archive.zip")
+            ] + ["garmin_token_runner.zip", "nested/garmin_token_runner.zip"]
+            for path in ignored:
+                with self.subTest(path=path):
+                    result = subprocess.run(
+                        ["git", "check-ignore", "--no-index", path], cwd=checkout,
+                        capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            for path in ("ordinary-archive.zip", "garmin/share/get_garmin_token.py",
+                         "garmin/.streamlit/config.toml"):
+                result = subprocess.run(
+                    ["git", "check-ignore", "--no-index", path], cwd=checkout,
+                    capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC,
+                )
+                self.assertEqual(result.returncode, 1, path)
+
     def test_success_publishes_private_zip_and_removes_plaintext_staging(self):
         class FakeGarmin:
             def __init__(self, *_args, **_kwargs):

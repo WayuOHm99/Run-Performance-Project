@@ -89,7 +89,8 @@ def missing_note(wellness, column, unit=""):
 
 
 def athlete_card(athlete, order):
-    aid, name = athlete["athlete_id"], athlete["display_name"]
+    aid = athlete["athlete_id"]
+    name = ctx.athlete_labels[aid]
     wellness = load_wellness_data(
         aid, (day - datetime.timedelta(days=FALLBACK_DAYS)).isoformat(), day.isoformat())
     row = day_row(wellness, day)
@@ -168,7 +169,7 @@ def athlete_card(athlete, order):
                         + " · ".join(part for part in parts if part and part != "–"))
 
         st.button(f"ดูข้อมูลของ {name}", key=f"open-athlete-{order}",
-                  on_click=focus_athlete, args=(name,), icon=":material/arrow_forward:",
+                  on_click=focus_athlete, args=(aid,), icon=":material/arrow_forward:",
                   type="tertiary")
 
 

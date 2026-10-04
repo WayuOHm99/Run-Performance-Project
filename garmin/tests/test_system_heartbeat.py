@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +31,56 @@ def load_script(name, path):
 
 
 heartbeat_script = load_script("garmin_system_heartbeat_under_test", SCRIPT)
+
+
+class SystemHeartbeatReleaseTests(unittest.TestCase):
+    @staticmethod
+    def result(code=0, stderr=""):
+        return subprocess.CompletedProcess([], code, stdout="", stderr=stderr)
+
+    def test_existing_release_is_reused(self):
+        with patch.object(heartbeat_script, "_run", return_value=self.result()) as run:
+            heartbeat_script._ensure_release("gh", "owner/project")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1:3], ["release", "view"])
+
+    def test_missing_release_is_created(self):
+        with patch.object(heartbeat_script, "_run", side_effect=[
+            self.result(1, "release not found"), self.result(),
+        ]) as run:
+            heartbeat_script._ensure_release("gh", "owner/project")
+        self.assertEqual([call.args[0][2] for call in run.call_args_list], ["view", "create"])
+
+    def test_unknown_release_status_never_attempts_creation_or_exposes_diagnostics(self):
+        for diagnostic in ("HTTP 401: synthetic-private-token", "network timeout", ""):
+            with self.subTest(diagnostic=diagnostic), patch.object(
+                heartbeat_script, "_run", return_value=self.result(1, diagnostic),
+            ) as run:
+                with self.assertRaises(heartbeat_script.HeartbeatError) as raised:
+                    heartbeat_script._ensure_release("gh", "owner/project")
+                self.assertEqual(run.call_count, 1)
+                self.assertNotIn("synthetic-private-token", str(raised.exception))
+
+    def test_concurrent_creation_rechecks_that_the_release_exists(self):
+        with patch.object(heartbeat_script, "_run", side_effect=[
+            self.result(1, "release not found"), self.result(1, "already exists"), self.result(),
+        ]) as run:
+            heartbeat_script._ensure_release("gh", "owner/project")
+        self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                         ["view", "create", "view"])
+
+    def test_failed_creation_or_recheck_is_reported_without_private_diagnostics(self):
+        for results in (
+            [self.result(1, "release not found"), self.result(1, "synthetic-private-token")],
+            [self.result(1, "release not found"), self.result(1, "already exists"),
+             self.result(1, "synthetic-private-token")],
+        ):
+            with self.subTest(results=results), patch.object(
+                heartbeat_script, "_run", side_effect=results,
+            ):
+                with self.assertRaises(heartbeat_script.HeartbeatError) as raised:
+                    heartbeat_script._ensure_release("gh", "owner/project")
+                self.assertNotIn("synthetic-private-token", str(raised.exception))
 
 
 class SystemHeartbeatCliTests(unittest.TestCase):
