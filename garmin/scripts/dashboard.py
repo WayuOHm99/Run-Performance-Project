@@ -8,6 +8,7 @@
 """
 
 import datetime
+import os
 import time
 
 import pandas as pd
@@ -26,6 +27,7 @@ from dashboard_data import (
     load_wellness_data,
 )
 from dashboard_domain import bangkok_date, summarize_metric_group, to_bangkok_timestamp
+from dashboard_freshness import load_freshness
 
 AUTO_REFRESH_SEC = 60
 
@@ -42,6 +44,11 @@ st.set_page_config(
     page_icon=":material/directions_run:",
     layout="wide",
 )
+
+demo_mode = os.environ.get("GARMIN_DASHBOARD_DEMO") == "1"
+if demo_mode:
+    st.info("โหมด Demo · ทุกชื่อและตัวเลขเป็นข้อมูลจำลอง ไม่ได้เชื่อมบัญชี Garmin · "
+            "ลองเลือกนักกีฬา เปลี่ยนวันที่ และเปิดทั้ง 6 หน้าได้ ข้อมูลทดลองถูกลบเมื่อปิด Demo ตามปกติ")
 
 # CSS ที่เหลืออยู่มีแค่สองเรื่องที่ธีมทำให้ไม่ได้ ของที่เหลือใช้ component ของ Streamlit ตรง ๆ
 # 1) ตัวเลขใน st.metric เป็นฟอนต์ mono ความกว้างเท่ากันทุกหลัก — codeFont ในธีมลงไม่ถึง
@@ -85,11 +92,14 @@ today = bangkok_date()
 
 if not db_path().exists():
     st.error(f"ไม่พบฐานข้อมูลที่ {db_path()} — ต้องรัน sync ก่อน")
+    st.info("ลองหน้าจอโดยไม่ใช้บัญชี Garmin: จากโฟลเดอร์ garmin รันคำสั่งด้านล่าง")
+    st.code("uv run --frozen python scripts/run_demo.py", language="bash")
     st.stop()
 
 athletes_df = load_athletes()
 if athletes_df.empty:
     st.warning("ยังไม่มีนักกีฬาในฐานข้อมูล — เพิ่มด้วย garmin\\เพิ่มนักกีฬา.bat")
+    st.code("uv run --frozen python scripts/run_demo.py", language="bash")
     st.stop()
 
 PERIODS = {"7 วัน": 7, "30 วัน": 30, "90 วัน": 90, "ทั้งหมด": None, "กำหนดเอง": None}
@@ -98,7 +108,8 @@ with st.sidebar:
     st.markdown("### Run Performance")
     fetched = to_bangkok_timestamp(load_latest_fetch())
     st.caption(
-        f"วันนี้ {today.strftime('%d/%m/%Y')} · ดึงจาก Garmin ล่าสุด "
+        f"วันนี้ {today.strftime('%d/%m/%Y')} · "
+        + ("ข้อมูล Demo ทั้งทีม " if demo_mode else "ดึงค่าหลักทั้งทีมล่าสุด ")
         + (fetched.strftime("%d/%m %H:%M น.") if pd.notna(fetched) else "–")
     )
     if st.button("รีเฟรชข้อมูล", icon=":material/refresh:", width="stretch",
@@ -148,6 +159,14 @@ with st.sidebar:
         start_date, end_date = (picked[0], picked[-1]) if picked else (today, today)
     else:
         start_date, end_date = today - datetime.timedelta(days=PERIODS[period] - 1), today
+    freshness = load_freshness(athlete_id, start_date, end_date, today)
+    st.caption(f"{selected_name} · สุขภาพล่าสุด {freshness['latest_text']} · "
+               f"ดึงค่าหลักล่าสุด {freshness['received_at']}")
+    if freshness["gaps"]:
+        st.caption(f"วันไม่มีข้อมูลสุขภาพในช่วงที่เลือก: {len(freshness['gaps'])} วัน · "
+                   "ดูวันที่และขั้นตอนตรวจในหน้าสถานะระบบ")
+    elif not freshness["has_history"]:
+        st.caption("ยังไม่มีข้อมูลสุขภาพรายวัน · ดูขั้นตอนเริ่มต้นในหน้าสถานะระบบ")
     st.caption("หน้าทีมใช้วันที่ที่เลือกบนหน้านั้น ไม่ขึ้นกับตัวกรองนักกีฬาหรือช่วงวันที่นี้")
 
     availability = load_data_availability(athlete_id, start_date.isoformat(), end_date.isoformat())
@@ -184,6 +203,7 @@ if not activity_df.empty:
     activity_df["start_time_local"] = pd.to_datetime(activity_df["start_time_local"])
 
 set_page_context(
+    demo_mode=demo_mode,
     today=today,
     athletes_df=athletes_df,
     athlete_labels=athlete_labels,
