@@ -183,6 +183,76 @@ def main():
                     process.kill()
                     process.wait(timeout=10)
     print("DASHBOARD_BROWSER_OK", flush=True)
+    check_demo(artifacts, args.chromium_path)
+
+
+def check_demo(artifacts, chromium_path):
+    """Boot the user-facing Demo launcher, not a separate test-only seed path."""
+    from playwright.sync_api import expect, sync_playwright
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    with (artifacts / "demo-streamlit.log").open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-u", "scripts/run_demo.py", "--port", str(port)],
+            cwd=GARMIN_ROOT, stdout=log, stderr=subprocess.STDOUT,
+        )
+        try:
+            wait_for_server(process, url)
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(executable_path=chromium_path, headless=True)
+                try:
+                    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+                    errors = []
+                    page.on("pageerror", lambda error: errors.append(str(error)))
+                    page.goto(url, wait_until="domcontentloaded")
+                    for label in ["ทีม", "ร่างกาย", "การซ้อม", "ค่าประเมิน Garmin", "เซสชัน", "สถานะระบบ"]:
+                        page.get_by_role("link", name=re.compile(re.escape(label) + "$")).click()
+                        heading = "ภาพรวมสุขภาพทีม" if label == "ทีม" else label
+                        expect(page.get_by_role("heading", name=re.compile(
+                            "^" + re.escape(heading))).first).to_be_visible(timeout=30000)
+                        expect(page.get_by_test_id("stApp")).to_have_attribute(
+                            "data-test-script-state", "notRunning", timeout=30000,
+                        )
+                        expect(page.get_by_test_id("stException")).to_have_count(0)
+                        expect(page.get_by_text(re.compile("โหมด Demo · ทุกชื่อและตัวเลข"))).to_be_visible()
+                        print(f"DEMO_PAGE_OK {label}", flush=True)
+                    expect(page.get_by_test_id("stDataFrame")).to_have_count(2)
+                    page.screenshot(path=str(artifacts / "desktop-demo-system.png"), full_page=True)
+                    page.get_by_role("link", name=re.compile("ร่างกาย$")).click()
+                    page.get_by_role("combobox").first.click()
+                    page.get_by_role("option", name="นักกีฬาทดลอง B", exact=True).click()
+                    expect(page.get_by_role("heading", name="ร่างกาย · นักกีฬาทดลอง B", exact=True)).to_be_visible()
+                    expect(page.get_by_test_id("stSidebar").get_by_text(re.compile(
+                        "วันไม่มีข้อมูลสุขภาพในช่วงที่เลือก: 2 วัน"))).to_be_visible()
+                    page.get_by_role("combobox").first.click()
+                    page.get_by_role("option", name="นักกีฬาทดลองใหม่", exact=True).click()
+                    expect(page.get_by_test_id("stSidebar").get_by_text(re.compile(
+                        "ยังไม่มีข้อมูลสุขภาพรายวัน"))).to_be_visible()
+                    expect(page.get_by_test_id("stException")).to_have_count(0)
+                    page.set_viewport_size({"width": 390, "height": 844})
+                    page.screenshot(path=str(artifacts / "mobile-demo-new.png"), full_page=True)
+                    dimensions = page.evaluate("({width: innerWidth, scroll: document.documentElement.scrollWidth})")
+                    if dimensions["scroll"] > dimensions["width"]:
+                        raise AssertionError(f"Demo mobile overflow: {dimensions}")
+                    if errors:
+                        raise AssertionError(f"Demo browser errors: {errors}")
+                finally:
+                    browser.close()
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+    log_text = (artifacts / "demo-streamlit.log").read_text(encoding="utf-8")
+    directory_match = re.search(r"Schema initialized: (.+)[/\\]garmin\.db", log_text)
+    if not directory_match or Path(directory_match.group(1)).exists():
+        raise AssertionError("Demo did not clean up its temporary database")
+    print("DEMO_BROWSER_AND_CLEANUP_OK", flush=True)
 
 
 if __name__ == "__main__":

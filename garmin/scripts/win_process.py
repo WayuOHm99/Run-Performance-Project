@@ -49,6 +49,13 @@ def run(command, **kwargs):
     return subprocess.run(command, **kwargs)
 
 
+def popen(command, **kwargs):
+    """Start a long-lived child with the same Windows console protection as run."""
+    if os.name == "nt":
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | CREATE_NO_WINDOW
+    return subprocess.Popen(command, **kwargs)
+
+
 def command_label(command, *, max_words: int = 3) -> str:
     """ชื่อคำสั่งแบบสั้นไว้ใส่ในข้อความ error เช่น ``gh release upload``
 

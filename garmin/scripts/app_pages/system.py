@@ -5,18 +5,46 @@
 ไม่แสดง token, stack trace หรือค่าข้อมูลสุขภาพ
 """
 
-import json
-
 import pandas as pd
 import streamlit as st
 
 import health_report
 from dashboard_context import page_context
-from dashboard_data import data_dir
+from dashboard_freshness import load_freshness, read_sync_summary
 
 ctx = page_context()
 
 st.title("สถานะระบบ")
+st.subheader("ความสดและวันที่ไม่มีข้อมูล", anchor=False)
+coverage = []
+sync_rows = []
+for athlete in ctx.athletes_df.to_dict("records"):
+    summary = load_freshness(athlete["athlete_id"], ctx.start_date, ctx.end_date, ctx.today)
+    sync = read_sync_summary(athlete["slug"]) if not ctx.demo_mode else {
+        "result": "ไม่ได้ซิงก์จริง (Demo)", "finished": "–",
+        "action": "ลองนักกีฬา A, B และนักกีฬาใหม่ เพื่อดูข้อมูลต่อเนื่อง วันว่าง และยังไม่มีประวัติ",
+    }
+    name = ctx.athlete_labels[athlete["athlete_id"]]
+    coverage.append({
+        "นักกีฬา": name, "สุขภาพล่าสุด": summary["latest_text"],
+        "ดึงค่าหลักล่าสุด (เวลาไทย)": summary["received_at"],
+        "วันไม่มีข้อมูลสุขภาพ": summary["gaps_text"],
+    })
+    sync_rows.append({"นักกีฬา": name, "ผล": sync["result"],
+                      "จบรอบล่าสุด (เวลาเครื่องซิงก์/เวลาไทยเมื่อมีโซน)": sync["finished"],
+                      "ควรทำต่อ": sync["action"]})
+st.caption(f"ตรวจช่วง {ctx.start_date:%d/%m/%Y}–{ctx.end_date:%d/%m/%Y} ของทุกคน · "
+           "ไม่นับวันนี้ที่ยังไม่จบและวันก่อนมีข้อมูลครั้งแรก · มีค่าอย่างน้อยหนึ่งช่องในหน้าร่างกายถือว่ามีข้อมูล")
+st.dataframe(pd.DataFrame(coverage), hide_index=True, width="stretch")
+st.caption("วันว่างไม่ได้ยืนยันว่าซิงก์ล้ม และวันที่มีก็ไม่ได้หมายถึงครบทุกช่อง · "
+           "วันที่ไม่วิ่งไม่ถือเป็นกิจกรรมขาด · ตรวจวันเดียวกันใน Garmin Connect และการใส่/ซิงก์นาฬิกาก่อน")
+with st.expander("ควรเริ่มตรวจอย่างไร"):
+    st.markdown("1. ตรวจวันเดียวกันใน Garmin Connect และให้นาฬิกาซิงก์กับแอป\n"
+                "2. ดูผลซิงก์รายคนด้านล่าง: token ต้องขอใหม่บนเครื่องใช้งาน; "
+                "เน็ต/ช่องข้อมูลที่ล้มให้รอรอบถัดไป\n"
+                "3. ถ้า Garmin Connect มีข้อมูลแต่หน้ายังว่าง ให้กดรีเฟรชข้อมูล "
+                "แล้วตรวจ log บนเครื่องใช้งานตามคู่มือ ไม่ส่งรหัสผ่านหรือ token")
+
 st.caption("ตรวจงาน sync, Scheduled Task, backup, ฐานข้อมูล และพื้นที่ดิสก์แบบอ่านอย่างเดียว · "
            "เครื่องที่หลับหรือปิดอยู่ทำงานเหล่านี้ไม่ได้ เมื่อเปิดกลับมาจะตามเก็บรอบที่พลาดเอง")
 
@@ -33,8 +61,11 @@ def load_findings():
         return [], type(exc).__name__
 
 
-findings, failure = load_findings()
-if failure:
+findings, failure = ([], None) if ctx.demo_mode else load_findings()
+if ctx.demo_mode:
+    st.info("Demo ไม่ตรวจ Scheduled Task, token, backup หรือ heartbeat ของเครื่องจริง · "
+            "ใช้สำหรับทดลองหน้าจอเท่านั้น")
+elif failure:
     st.error(f"ตัวตรวจสถานะทำงานไม่สำเร็จ ({failure}) — ลองรัน "
              "`garmin\\.venv\\Scripts\\python.exe scripts\\health_report.py` เพื่อดูรายละเอียด",
              icon=":material/error:")
@@ -52,23 +83,6 @@ else:
     )
 
 st.subheader("sync ล่าสุดรายคน", anchor=False)
-rows = []
-for athlete in ctx.athletes_df.to_dict("records"):
-    path = data_dir() / "sync_status" / f"{athlete['slug']}.json"
-    try:
-        status = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        status = {}
-    failures = status.get("endpoint_failures") or []
-    rows.append({
-        "นักกีฬา": athlete["display_name"],
-        "ผล": "สำเร็จ" if status.get("ok") else ("ไม่มีบันทึก" if not status else "ล้มเหลว"),
-        "สาเหตุ": {"ok": "", "token": "ต้องขอ token ใหม่ (เพิ่มนักกีฬา.bat)",
-                   "network": "เน็ต/เซิร์ฟเวอร์ Garmin"}.get(status.get("reason"),
-                                                             status.get("reason") or ""),
-        "endpoint ที่ล้ม": len(failures),
-        "เสร็จเมื่อ": (status.get("finished_at") or "")[:16].replace("T", " "),
-    })
-st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-st.caption("endpoint ที่ล้ม = ช่องข้อมูลที่ Garmin ตอบไม่สำเร็จในรอบนั้น รอบถัดไปจะลองใหม่เอง · "
+st.dataframe(pd.DataFrame(sync_rows), hide_index=True, width="stretch")
+st.caption("สำเร็จบางส่วน = มีช่องข้อมูลที่ Garmin ตอบไม่สำเร็จในรอบนั้น รอบถัดไปจะลองใหม่เอง · "
            "แจ้งเตือนจริงส่งผ่าน Windows toast และ GitHub heartbeat ตามเดิม")
