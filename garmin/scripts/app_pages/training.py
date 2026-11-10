@@ -5,10 +5,10 @@
 โซน HR คือโซนที่ตั้งไว้ในนาฬิกา/Garmin Connect ของนักกีฬาแต่ละคน
 """
 
-import altair as alt
 import pandas as pd
 import streamlit as st
 
+from dashboard_charts import zone_bar_spec
 from dashboard_context import page_context
 from dashboard_domain import (
     HR_ZONE_COLUMNS,
@@ -70,17 +70,9 @@ with right, st.container(border=True):
                     for column in HR_ZONE_COLUMNS)
     if has_zones:
         # โซนเป็นลำดับ จึงไล่เฉดสีเดียวอ่อนไปเข้ม ไม่ใช้เขียว-แดงที่อ่านว่า "ดี/อันตราย"
-        # st.bar_chart รับได้ทั้งคอลัมน์สีหรือรายการสี แต่ไม่ทั้งสองอย่าง จึงต้องลง altair
-        st.altair_chart(
-            alt.Chart(zones_long).mark_bar().encode(
-                x=alt.X("สัปดาห์:N", sort=None, title=None),
-                y=alt.Y("sum(นาที):Q", title="นาที"),
-                color=alt.Color("โซน:N", scale=alt.Scale(domain=list(HR_ZONE_LABELS),
-                                                        range=ZONE_COLORS),
-                                legend=alt.Legend(orient="bottom", title=None)),
-                order=alt.Order("โซน:N"),
-                tooltip=["สัปดาห์", "โซน", "นาที"],
-            ).properties(height=CHART_HEIGHT),
+        st.vega_lite_chart(
+            zones_long,
+            zone_bar_spec(HR_ZONE_LABELS, ZONE_COLORS, height=CHART_HEIGHT),
             width="stretch",
         )
     else:

@@ -7,19 +7,25 @@
 import pandas as pd
 import streamlit as st
 
-from dashboard_charts import intraday_chart
+from dashboard_charts import (
+    daily_line_frame_and_spec,
+    intraday_frame_and_spec,
+    sleep_stage_bar_frame_and_spec,
+)
 from dashboard_context import page_context
 from dashboard_data import load_intraday
 from dashboard_domain import (
     INTRADAY_METRICS,
-    intraday_series,
     calendar_aligned_frame,
     field_when,
     fmt_hours,
     fmt_num,
+    fmt_recovery_time,
     garmin_label,
+    intraday_series,
     latest_field,
     readiness_when,
+    value_of,
 )
 
 ctx = page_context()
@@ -47,6 +53,8 @@ def has(*columns):
 
 
 def spark(column):
+    if column not in wellness:
+        return None
     values = pd.to_numeric(wellness[column], errors="coerce").dropna().tolist()
     return values if len(values) >= 2 else None
 
@@ -57,8 +65,15 @@ hrv = latest_field(wellness, "hrv_last_night")
 rhr = latest_field(wellness, "resting_hr")
 battery = latest_field(wellness, "bb_most_recent")
 stress = latest_field(wellness, "stress_avg")
+recovery = latest_field(wellness, "recovery_time_min")
 readiness = latest_field(wellness, "training_readiness",
                          ("readiness_timestamp_local", "readiness_timestamp_utc"))
+
+battery_wake = value_of(battery["row"], "bb_at_wake") if battery else None
+battery_note = " · ".join(filter(None, [
+    f"ตื่น {fmt_num(battery_wake)}" if battery_wake is not None else "",
+    field_when(battery, today),
+]))
 
 with st.container(horizontal=True):
     tiles = [
@@ -70,10 +85,15 @@ with st.container(horizontal=True):
         ("RHR", rhr, fmt_num(rhr["value"], " bpm") if rhr else "–",
          field_when(rhr, today), "resting_hr"),
         ("Body Battery ล่าสุด", battery, fmt_num(battery["value"]) if battery else "–",
-         field_when(battery, today), "bb_most_recent"),
+         battery_note, "bb_most_recent"),
         ("Stress เฉลี่ย", stress, fmt_num(stress["value"]) if stress else "–",
          field_when(stress, today), "stress_avg"),
     ]
+    if recovery:
+        tiles.append((
+            "Recovery Time", recovery, fmt_recovery_time(recovery["value"]),
+            field_when(recovery, today), "recovery_time_min",
+        ))
     if readiness:
         tiles.append((
             "Training Readiness", readiness, fmt_num(readiness["value"]),
@@ -83,6 +103,32 @@ with st.container(horizontal=True):
     for label, snapshot, value, note, column in tiles:
         st.metric(label, value, note, delta_color="off", delta_arrow="off",
                   border=True, chart_data=spark(column) if snapshot else None)
+
+if readiness:
+    r_row = readiness["row"]
+    factor_items = []
+    for pct_col, fb_col, label in (
+        ("readiness_sleep_factor_pct", "readiness_sleep_factor_feedback", "ปัจจัยการนอน (Garmin)"),
+        ("recovery_time_factor_pct", "recovery_time_factor_feedback", "ปัจจัย Recovery Time (Garmin)"),
+        ("hrv_factor_pct", "hrv_factor_feedback", "ปัจจัย HRV (Garmin)"),
+        ("stress_history_pct", "stress_history_factor_feedback", "ปัจจัย Stress สะสม (Garmin)"),
+    ):
+        pct_val = value_of(r_row, pct_col)
+        if pct_val is not None:
+            factor_items.append((label, fmt_num(pct_val, "%"), garmin_label(value_of(r_row, fb_col)) or None))
+    acute_val = value_of(r_row, "acute_load")
+    if acute_val is not None:
+        factor_items.append(("Acute Load (Garmin)", fmt_num(acute_val), None))
+    short_fb = garmin_label(value_of(r_row, "readiness_feedback"))
+    long_fb = garmin_label(value_of(r_row, "readiness_feedback_long"))
+    if factor_items or short_fb or long_fb:
+        with st.expander("รายละเอียด Training Readiness ล่าสุดจาก Garmin", icon=":material/insights:"):
+            if short_fb or long_fb:
+                st.caption(" · ".join(filter(None, [short_fb, long_fb, readiness_when(readiness, today)])))
+            if factor_items:
+                with st.container(horizontal=True):
+                    for f_label, f_val, f_note in factor_items:
+                        st.metric(f_label, f_val, f_note, delta_color="off", delta_arrow="off", border=True)
 
 
 def chart_card(title, caption=None):
@@ -94,9 +140,8 @@ def chart_card(title, caption=None):
 
 
 def line(card, columns, labels, y_label):
-    frame = daily[["วันที่", *columns]].rename(columns=dict(zip(columns, labels, strict=True)))
-    card.line_chart(frame, x="วันที่", y=list(labels), x_label="",
-                    y_label=y_label, height=CHART_HEIGHT)
+    frame, spec = daily_line_frame_and_spec(daily, columns, labels, y_label=y_label, height=CHART_HEIGHT)
+    card.vega_lite_chart(frame, spec, width="stretch")
 
 
 left, right = st.columns(2)
@@ -125,9 +170,14 @@ with right:
                               ("rem_sleep_sec", "REM"), ("awake_sec", "ตื่น")):
             stages[label] = pd.to_numeric(daily.get(column), errors="coerce") / 3600
         # หลับลึกเข้มสุดไล่ไปหลับตื้นอ่อนสุด ส่วนช่วงตื่นเป็นสีส้มให้เด่นแยกออกมา
-        card.bar_chart(stages, x="วันที่", y=["Deep", "REM", "Light", "ตื่น"],
-                       color=["#104281", "#3987e5", "#aed0f7", "#eb6834"],
-                       x_label="", y_label="ชั่วโมง", height=CHART_HEIGHT)
+        stage_frame, stage_spec = sleep_stage_bar_frame_and_spec(
+            stages,
+            labels=("Deep", "REM", "Light", "ตื่น"),
+            colors=("#104281", "#3987e5", "#aed0f7", "#eb6834"),
+            y_label="ชั่วโมง",
+            height=CHART_HEIGHT,
+        )
+        card.vega_lite_chart(stage_frame, stage_spec, width="stretch")
     if has("resting_hr"):
         line(chart_card("Resting HR"), ["resting_hr"], ["RHR"], "bpm")
     if has("stress_avg", "max_stress"):
@@ -154,9 +204,10 @@ else:
         if series["ค่า"].notna().any():
             with st.container(border=True):
                 st.markdown(f"**{label}**")
-                st.altair_chart(intraday_chart(series, intraday_day, y_title=unit,
-                                               names={ctx.athlete_id: ctx.selected_name}),
-                                width="stretch")
+                in_frame, in_spec = intraday_frame_and_spec(
+                    series, intraday_day, y_title=unit, names={ctx.athlete_id: ctx.selected_name},
+                )
+                st.vega_lite_chart(in_frame, in_spec, width="stretch")
 
 
 def _formatted_or_none(frame, column, formatter):
@@ -178,11 +229,19 @@ with st.expander("ตารางค่ารายวันทั้งหม�
         "HRV (ms)": table.get("hrv_last_night"),
         "HRV status": _formatted_or_none(table, "hrv_status", garmin_label),
         "RHR": table.get("resting_hr"),
+        "BB ตอนตื่น": table.get("bb_at_wake"),
+        "BB ชาร์จตอนนอน": table.get("bb_during_sleep"),
         "BB สูงสุด": table.get("body_battery_high"),
         "BB ต่ำสุด": table.get("body_battery_low"),
         "Stress": table.get("stress_avg"),
+        "Recovery Time": _formatted_or_none(table, "recovery_time_min", fmt_recovery_time),
         "Readiness": table.get("training_readiness"),
         "Training Status": _formatted_or_none(table, "training_status", garmin_label),
+        "หายใจหลับ": table.get("avg_sleep_respiration"),
+        "หายใจตื่น": table.get("avg_waking_respiration"),
         "ก้าว": table.get("steps"),
+        "เป้าก้าว": table.get("steps_goal"),
+        "Active kcal": table.get("active_kilocalories"),
+        "ชั้นที่ขึ้น": table.get("floors_ascended"),
     })
     st.dataframe(shown.dropna(axis=1, how="all"), hide_index=True, width="stretch")

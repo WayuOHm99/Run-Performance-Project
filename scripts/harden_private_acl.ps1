@@ -62,35 +62,27 @@ $propagationFlags = [System.Security.AccessControl.PropagationFlags]::None
 $allowType = [System.Security.AccessControl.AccessControlType]::Allow
 $fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
 
-$problems = @()
-$changed = @()
+$aclSections = [System.Security.AccessControl.AccessControlSections]::Access -bor `
+               [System.Security.AccessControl.AccessControlSections]::Owner
+$allowedSidSet = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]$allowedSids,
+    [System.StringComparer]::OrdinalIgnoreCase
+)
+$problems = [System.Collections.Generic.List[object]]::new()
+$changed = [System.Collections.Generic.List[string]]::new()
 $script:scanned = 0
 
 function Add-Problem {
     param([string]$Path, [string]$Code, [string]$Detail)
-    $script:problems += [ordered]@{ path = $Path; code = $Code; detail = $Detail }
-}
-
-function ConvertTo-SidValue {
-    param($IdentityReference)
-    try {
-        return $IdentityReference.Translate(
-            [System.Security.Principal.SecurityIdentifier]
-        ).Value
-    }
-    catch {
-        return $null
-    }
+    $script:problems.Add([ordered]@{ path = $Path; code = $Code; detail = $Detail })
 }
 
 function Get-PrivateAcl {
     param([Parameter(Mandatory = $true)][string]$Path)
-    $sections = [System.Security.AccessControl.AccessControlSections]::Access -bor `
-                [System.Security.AccessControl.AccessControlSections]::Owner
     if ([System.IO.Directory]::Exists($Path)) {
-        return [System.IO.Directory]::GetAccessControl($Path, $sections)
+        return [System.IO.Directory]::GetAccessControl($Path, $aclSections)
     }
-    return [System.IO.File]::GetAccessControl($Path, $sections)
+    return [System.IO.File]::GetAccessControl($Path, $aclSections)
 }
 
 function Set-PrivateAclObject {
@@ -111,6 +103,30 @@ function Get-PrivateAccessRules {
     return $Acl.GetAccessRules(
         $true, $true, [System.Security.Principal.SecurityIdentifier]
     )
+}
+
+function Get-DescendantItems {
+    param([Parameter(Mandatory = $true)][string]$RootPath)
+    $results = [System.Collections.Generic.List[System.IO.FileSystemInfo]]::new()
+    $rootDir = [System.IO.DirectoryInfo]::new($RootPath)
+    if (-not $rootDir.Exists) { return $results }
+    if ($rootDir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $results }
+
+    $stack = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $stack.Push($rootDir)
+    while ($stack.Count -gt 0) {
+        $current = $stack.Pop()
+        $entries = $current.GetFileSystemInfos()
+        for ($i = $entries.Length - 1; $i -ge 0; $i--) {
+            $entry = $entries[$i]
+            $results.Add($entry)
+            if (($entry -is [System.IO.DirectoryInfo]) -and
+                    -not ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                $stack.Push([System.IO.DirectoryInfo]$entry)
+            }
+        }
+    }
+    return $results
 }
 
 function Test-TaskPrincipalsMatchCurrentUser {
@@ -183,83 +199,108 @@ function Test-TaskPrincipalsMatchCurrentUser {
 function Get-AclProblems {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][bool]$IsRoot
+        [Parameter(Mandatory = $true)][bool]$IsRoot,
+        [System.IO.FileSystemInfo]$Item = $null
     )
 
-    $local = @()
-    if (-not (Test-Path -LiteralPath $Path -PathType Container) -and $IsRoot) {
-        $local += [ordered]@{ path = $Path; code = 'missing'; detail = 'Private directory does not exist' }
-        return $local
+    $local = [System.Collections.Generic.List[object]]::new()
+    if ($null -eq $Item) {
+        if ($IsRoot) {
+            if (-not [System.IO.Directory]::Exists($Path)) {
+                $local.Add([ordered]@{ path = $Path; code = 'missing'; detail = 'Private directory does not exist' })
+                return $local
+            }
+            $Item = [System.IO.DirectoryInfo]::new($Path)
+        }
+        else {
+            if ([System.IO.Directory]::Exists($Path)) {
+                $Item = [System.IO.DirectoryInfo]::new($Path)
+            }
+            elseif ([System.IO.File]::Exists($Path)) {
+                $Item = [System.IO.FileInfo]::new($Path)
+            }
+            else {
+                $local.Add([ordered]@{ path = $Path; code = 'missing'; detail = 'Path does not exist' })
+                return $local
+            }
+        }
     }
-    if (-not (Test-Path -LiteralPath $Path)) {
-        $local += [ordered]@{ path = $Path; code = 'missing'; detail = 'Path does not exist' }
+
+    if ($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        $local.Add([ordered]@{ path = $Path; code = 'reparse_point'; detail = 'Reparse points are not allowed in private roots' })
         return $local
     }
 
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-        $local += [ordered]@{ path = $Path; code = 'reparse_point'; detail = 'Reparse points are not allowed in private roots' }
-        return $local
+    $isContainer = $Item -is [System.IO.DirectoryInfo]
+    $acl = if ($isContainer) {
+        ([System.IO.DirectoryInfo]$Item).GetAccessControl($aclSections)
     }
-
-    $acl = Get-PrivateAcl -Path $Path
+    else {
+        ([System.IO.FileInfo]$Item).GetAccessControl($aclSections)
+    }
     $script:scanned++
 
     if ($IsRoot -and -not $acl.AreAccessRulesProtected) {
-        $local += [ordered]@{ path = $Path; code = 'inheritance_enabled'; detail = 'Root still inherits its parent DACL' }
+        $local.Add([ordered]@{ path = $Path; code = 'inheritance_enabled'; detail = 'Root still inherits its parent DACL' })
     }
     if (-not $IsRoot -and $acl.AreAccessRulesProtected) {
-        $local += [ordered]@{ path = $Path; code = 'descendant_protected'; detail = 'Descendant does not inherit the private root DACL' }
+        $local.Add([ordered]@{ path = $Path; code = 'descendant_protected'; detail = 'Descendant does not inherit the private root DACL' })
     }
 
     $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($ownerSid -ne $currentSid.Value) {
-        $local += [ordered]@{ path = $Path; code = 'wrong_owner'; detail = 'Owner is not the current Scheduled Task user' }
+        $local.Add([ordered]@{ path = $Path; code = 'wrong_owner'; detail = 'Owner is not the current Scheduled Task user' })
     }
 
-    $rules = @(Get-PrivateAccessRules -Acl $acl)
+    $rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
     if ($rules.Count -ne $allowedSids.Count) {
-        $local += [ordered]@{ path = $Path; code = 'ace_count'; detail = 'DACL must contain exactly three access rules' }
+        $local.Add([ordered]@{ path = $Path; code = 'ace_count'; detail = 'DACL must contain exactly three access rules' })
     }
 
     foreach ($ace in $rules) {
         $sid = $ace.IdentityReference.Value
-        if ($sid -notin $allowedSids) {
-            $local += [ordered]@{ path = $Path; code = 'unexpected_ace'; detail = 'ACL grants or denies an identity outside current user, SYSTEM, and Administrators' }
+        if (-not $allowedSidSet.Contains($sid)) {
+            $local.Add([ordered]@{ path = $Path; code = 'unexpected_ace'; detail = 'ACL grants or denies an identity outside current user, SYSTEM, and Administrators' })
         }
         if ($ace.AccessControlType -ne $allowType) {
-            $local += [ordered]@{ path = $Path; code = 'deny_ace'; detail = 'Private paths must use the exact allow-only DACL' }
+            $local.Add([ordered]@{ path = $Path; code = 'deny_ace'; detail = 'Private paths must use the exact allow-only DACL' })
         }
     }
 
     $expectedInherited = -not $IsRoot
-    $expectedInheritFlags = if ($item.PSIsContainer) {
+    $expectedInheritFlags = if ($isContainer) {
         $inheritFlags
     }
     else {
         [System.Security.AccessControl.InheritanceFlags]::None
     }
     foreach ($requiredSid in $allowedSids) {
-        $matches = @($rules | Where-Object { $_.IdentityReference.Value -eq $requiredSid })
-        if ($matches.Count -eq 0) {
-            $local += [ordered]@{ path = $Path; code = 'required_ace_missing'; detail = 'Current user, SYSTEM, and Administrators must each have FullControl' }
+        $matchCount = 0
+        $matchedAce = $null
+        foreach ($candidate in $rules) {
+            if ($candidate.IdentityReference.Value -eq $requiredSid) {
+                $matchCount++
+                $matchedAce = $candidate
+            }
+        }
+        if ($matchCount -eq 0) {
+            $local.Add([ordered]@{ path = $Path; code = 'required_ace_missing'; detail = 'Current user, SYSTEM, and Administrators must each have FullControl' })
             continue
         }
-        if ($matches.Count -ne 1) {
-            $local += [ordered]@{ path = $Path; code = 'duplicate_ace'; detail = 'Each allowed SID must appear exactly once' }
+        if ($matchCount -ne 1) {
+            $local.Add([ordered]@{ path = $Path; code = 'duplicate_ace'; detail = 'Each allowed SID must appear exactly once' })
             continue
         }
 
-        $ace = $matches[0]
-        if ($ace.AccessControlType -ne $allowType -or $ace.FileSystemRights -ne $fullControl) {
-            $local += [ordered]@{ path = $Path; code = 'required_ace_not_full_control'; detail = 'Each allowed SID must have exactly Allow FullControl' }
+        if ($matchedAce.AccessControlType -ne $allowType -or $matchedAce.FileSystemRights -ne $fullControl) {
+            $local.Add([ordered]@{ path = $Path; code = 'required_ace_not_full_control'; detail = 'Each allowed SID must have exactly Allow FullControl' })
         }
-        if ($ace.IsInherited -ne $expectedInherited) {
-            $local += [ordered]@{ path = $Path; code = 'wrong_inheritance_source'; detail = 'Root rules must be explicit and descendant rules must be inherited' }
+        if ($matchedAce.IsInherited -ne $expectedInherited) {
+            $local.Add([ordered]@{ path = $Path; code = 'wrong_inheritance_source'; detail = 'Root rules must be explicit and descendant rules must be inherited' })
         }
-        if ($ace.InheritanceFlags -ne $expectedInheritFlags -or
-                $ace.PropagationFlags -ne $propagationFlags) {
-            $local += [ordered]@{ path = $Path; code = 'wrong_inheritance_flags'; detail = 'ACL inheritance flags do not match the exact private DACL' }
+        if ($matchedAce.InheritanceFlags -ne $expectedInheritFlags -or
+                $matchedAce.PropagationFlags -ne $propagationFlags) {
+            $local.Add([ordered]@{ path = $Path; code = 'wrong_inheritance_flags'; detail = 'ACL inheritance flags do not match the exact private DACL' })
         }
     }
     return $local
@@ -307,8 +348,10 @@ function Reset-DescendantAcl {
     }
     $acl = Get-PrivateAcl -Path $Item.FullName
     $acl.SetAccessRuleProtection($false, $false)
-    foreach ($ace in @(Get-PrivateAccessRules -Acl $acl | Where-Object { -not $_.IsInherited })) {
-        [void]$acl.RemoveAccessRuleSpecific($ace)
+    foreach ($ace in @(Get-PrivateAccessRules -Acl $acl)) {
+        if (-not $ace.IsInherited) {
+            [void]$acl.RemoveAccessRuleSpecific($ace)
+        }
     }
     $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
     if ($ownerSid.Value -ne $currentSid.Value) {
@@ -337,34 +380,42 @@ if ($CheckTaskPrincipals) {
 foreach ($rawTarget in $Targets) {
     $target = [System.IO.Path]::GetFullPath($rawTarget)
     try {
+        $needsVerify = $true
         if (-not $CheckOnly) {
-            $rootProblems = @(Get-AclProblems -Path $target -IsRoot $true)
+            $targetChanged = $false
+            $rootProblems = Get-AclProblems -Path $target -IsRoot $true
             if ($rootProblems.Count -gt 0) {
                 Set-PrivateRootAcl -Path $target
-                $changed += $target
+                $changed.Add($target)
+                $targetChanged = $true
             }
 
             if ($Recurse) {
-                $items = @(Get-ChildItem -LiteralPath $target -Force -Recurse | Sort-Object { $_.FullName.Length })
                 $descendantChanged = $false
-                foreach ($item in $items) {
-                    $itemProblems = @(Get-AclProblems -Path $item.FullName -IsRoot $false)
+                foreach ($item in (Get-DescendantItems -RootPath $target)) {
+                    $itemProblems = Get-AclProblems -Path $item.FullName -IsRoot $false -Item $item
                     if ($itemProblems.Count -gt 0) {
                         Reset-DescendantAcl -Item $item
                         $descendantChanged = $true
                     }
                 }
-                if ($descendantChanged) { $changed += "$target\**" }
+                if ($descendantChanged) {
+                    $changed.Add("$target\**")
+                    $targetChanged = $true
+                }
             }
+            $needsVerify = $targetChanged
         }
 
-        foreach ($problem in @(Get-AclProblems -Path $target -IsRoot $true)) {
-            $problems += $problem
-        }
-        if ($Recurse -and (Test-Path -LiteralPath $target -PathType Container)) {
-            foreach ($item in @(Get-ChildItem -LiteralPath $target -Force -Recurse)) {
-                foreach ($problem in @(Get-AclProblems -Path $item.FullName -IsRoot $false)) {
-                    $problems += $problem
+        if ($needsVerify) {
+            foreach ($problem in (Get-AclProblems -Path $target -IsRoot $true)) {
+                $problems.Add($problem)
+            }
+            if ($Recurse -and [System.IO.Directory]::Exists($target)) {
+                foreach ($item in (Get-DescendantItems -RootPath $target)) {
+                    foreach ($problem in (Get-AclProblems -Path $item.FullName -IsRoot $false -Item $item)) {
+                        $problems.Add($problem)
+                    }
                 }
             }
         }

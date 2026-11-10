@@ -18,6 +18,7 @@ from dashboard_domain import (
     fmt_pace,
     fmt_sec,
     garmin_label,
+    value_of,
 )
 
 ctx = page_context()
@@ -46,33 +47,42 @@ activity = candidates[candidates["activity_id"] == chosen].iloc[0]
 
 
 def value(column, unit="", decimals=0):
-    raw = activity.get(column)
-    return fmt_num(raw, unit, decimals) if pd.notna(raw) else None
+    raw = value_of(activity, column)
+    return fmt_num(raw, unit, decimals) if raw is not None else None
 
 
 def speed(column):
     """Garmin ส่งความเร็วเป็น m/s — แปลงหน่วยเป็น km/h เท่านั้น"""
-    raw = pd.to_numeric(activity.get(column), errors="coerce")
-    return f"{raw * 3.6:.1f} km/h" if pd.notna(raw) and raw > 0 else None
+    raw = value_of(activity, column)
+    return f"{float(raw) * 3.6:.1f} km/h" if raw is not None and float(raw) > 0 else None
 
 
-distance_m = activity.get("distance_m")
-has_distance = pd.notna(distance_m) and distance_m > 0
+distance_m = value_of(activity, "distance_m")
+has_distance = distance_m is not None and float(distance_m) > 0
+duration_sec = value_of(activity, "duration_sec")
+moving_duration_sec = value_of(activity, "moving_duration_sec")
+avg_pace = value_of(activity, "avg_pace_min_per_km")
+steps_val = value_of(activity, "steps")
+begin_stamina = value_of(activity, "begin_stamina")
+end_stamina = value_of(activity, "end_stamina")
+start_lat = value_of(activity, "start_latitude")
+start_lon = value_of(activity, "start_longitude")
 groups = [
     ("ภาพรวม", [
-        ("ระยะ", f"{distance_m / 1000:.2f} km" if has_distance else None),
-        ("เวลา", fmt_sec(activity.get("duration_sec"))
-         if pd.notna(activity.get("duration_sec")) else None),
-        ("เวลาเคลื่อนที่", fmt_sec(activity.get("moving_duration_sec"))
-         if pd.notna(activity.get("moving_duration_sec")) else None),
-        ("เพซเฉลี่ย", fmt_pace(activity.get("avg_pace_min_per_km")) + " /km"
-         if has_distance and pd.notna(activity.get("avg_pace_min_per_km")) else None),
+        ("ระยะ", f"{float(distance_m) / 1000:.2f} km" if has_distance else None),
+        ("เวลา", fmt_sec(duration_sec) if duration_sec is not None else None),
+        ("เวลาเคลื่อนที่", fmt_sec(moving_duration_sec)
+         if moving_duration_sec is not None else None),
+        ("เพซเฉลี่ย", fmt_pace(avg_pace) + " /km"
+         if has_distance and avg_pace is not None and float(avg_pace) > 0 else None),
         ("HR เฉลี่ย", value("avg_hr", " bpm")),
         ("HR ต่ำสุด", value("min_hr", " bpm")),
         ("HR สูงสุด", value("max_hr", " bpm")),
         ("ความเร็วเฉลี่ย", speed("avg_speed_mps")),
         ("ความเร็วสูงสุด", speed("max_speed_mps")),
         ("ความเร็วปรับความชัน", speed("avg_grade_adjusted_speed_mps")),
+        ("ก้าว", f"{int(round(float(steps_val))):,}"
+         if steps_val is not None and float(steps_val) > 0 else None),
         ("แคลอรี่", value("calories", " kcal")),
         ("นาทีหนักปานกลาง", value("moderate_intensity_min", " นาที")),
         ("นาทีหนักมาก", value("vigorous_intensity_min", " นาที")),
@@ -85,8 +95,8 @@ groups = [
         ("VO2max", value("vo2max_value")),
         ("Impact Load", value("impact_load", "", 1)),
         ("Stamina เริ่ม → จบ",
-         f"{activity['begin_stamina']:.0f}% → {activity['end_stamina']:.0f}%"
-         if pd.notna(activity.get("begin_stamina")) and pd.notna(activity.get("end_stamina"))
+         f"{float(begin_stamina):.0f}% → {float(end_stamina):.0f}%"
+         if begin_stamina is not None and end_stamina is not None
          else None),
         ("Body Battery ที่ใช้", value("diff_body_battery")),
         ("เหงื่อ (ประมาณ)", value("sweat_loss_ml", " ml")),
@@ -108,12 +118,13 @@ groups = [
         ("จุดต่ำสุด", value("min_elevation_m", " m")),
         ("จุดสูงสุด", value("max_elevation_m", " m")),
         ("อุณหภูมิ", value("weather_temp_c", " °C")),
+        ("อุณหภูมิที่รู้สึก", value("weather_apparent_temp_c", " °C")),
         ("ความชื้น", value("weather_humidity", "%")),
         ("ลม", value("weather_wind_kph", " km/h")),
         ("สถานที่", activity.get("location_name")
          if isinstance(activity.get("location_name"), str) else None),
-        ("จุดเริ่ม", f"{activity['start_latitude']:.4f}, {activity['start_longitude']:.4f}"
-         if pd.notna(activity.get("start_latitude")) and pd.notna(activity.get("start_longitude"))
+        ("จุดเริ่ม", f"{float(start_lat):.4f}, {float(start_lon):.4f}"
+         if start_lat is not None and start_lon is not None
          else None),
     ]),
 ]

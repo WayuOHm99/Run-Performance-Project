@@ -534,22 +534,49 @@ def _parse_task_result(value):
             return None
 
 
+def _query_all_scheduled_tasks(provider) -> dict:
+    """Query expected Scheduled Tasks, running the real Windows provider concurrently."""
+    if provider is not None:
+        results = {}
+        for task_name in SCHEDULED_TASKS:
+            try:
+                results[task_name] = (provider(task_name), None)
+            except (ScheduledTaskQueryFailed, SchtasksUnavailable) as exc:
+                results[task_name] = (None, exc)
+        return results
+
+    if os.name != "nt":
+        err = SchtasksUnavailable("ไม่ใช่ Windows")
+        return {task_name: (None, err) for task_name in SCHEDULED_TASKS}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(task_name: str):
+        try:
+            return (default_schtasks_provider(task_name), None)
+        except (ScheduledTaskQueryFailed, SchtasksUnavailable) as exc:
+            return (None, exc)
+
+    with ThreadPoolExecutor(max_workers=len(SCHEDULED_TASKS)) as pool:
+        outcomes = list(pool.map(_one, SCHEDULED_TASKS))
+    return dict(zip(SCHEDULED_TASKS, outcomes, strict=True))
+
+
 def check_scheduled_tasks(provider=None, now=None) -> list:
-    provider = provider or default_schtasks_provider
+    queried = _query_all_scheduled_tasks(provider)
     findings = []
     for task_name in SCHEDULED_TASKS:
         lane = TASK_LANE.get(task_name)
-        try:
-            raw = provider(task_name)
-        except ScheduledTaskQueryFailed as e:
+        raw, err = queried[task_name]
+        if isinstance(err, ScheduledTaskQueryFailed):
             findings.append(Finding(
                 f"scheduled_task:{task_name}", ERROR,
-                f"query Scheduled Task ที่ระบบต้องมีไม่สำเร็จ: {e}",
+                f"query Scheduled Task ที่ระบบต้องมีไม่สำเร็จ: {err}",
             ))
             continue
-        except SchtasksUnavailable as e:
+        if isinstance(err, SchtasksUnavailable):
             findings.append(Finding(f"scheduled_task:{task_name}", WARNING,
-                                     f"ตรวจไม่ได้ (skipped): {e} — ไม่ถือว่าระบบเสีย"))
+                                     f"ตรวจไม่ได้ (skipped): {err} — ไม่ถือว่าระบบเสีย"))
             continue
 
         info = parse_schtasks_output(raw)

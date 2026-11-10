@@ -183,31 +183,39 @@ def latest_field(df, column, timestamp_columns=()):
     if (df is None or df.empty or column not in df.columns
             or "calendar_date" not in df.columns):
         return None
-    candidates = df[df[column].notna()].copy()
-    if candidates.empty:
+    mask = df[column].notna()
+    if not mask.any():
         return None
 
-    candidates["_sort_calendar"] = _to_datetime(candidates["calendar_date"], utc=True)
-    candidates["_sort_source"] = pd.Series(
-        pd.NaT, index=candidates.index, dtype="datetime64[ns, UTC]"
+    sub = df.loc[mask]
+    pos_index = pd.RangeIndex(len(sub))
+    sort_frame = pd.DataFrame(index=pos_index)
+    sort_frame["_sort_calendar"] = _to_datetime(sub["calendar_date"], utc=True).to_numpy()
+    sort_frame["_sort_source"] = pd.Series(
+        pd.NaT, index=pos_index, dtype="datetime64[ns, UTC]"
     )
-    candidates["_source_column_used"] = None
+    source_used = pd.Series(None, index=pos_index, dtype=object)
     for name in timestamp_columns:
-        if name not in candidates.columns:
+        if name not in sub.columns:
             continue
-        parsed = _parse_source_timestamp_utc(candidates[name], name)
-        fill = candidates["_sort_source"].isna() & parsed.notna()
-        candidates.loc[fill, "_sort_source"] = parsed[fill]
-        candidates.loc[fill, "_source_column_used"] = name
-    candidates["_sort_fetched"] = (
-        _to_datetime(candidates["fetched_at"], utc=True)
-        if "fetched_at" in candidates.columns else pd.NaT
+        parsed = _parse_source_timestamp_utc(sub[name], name).reset_index(drop=True)
+        fill = sort_frame["_sort_source"].isna() & parsed.notna()
+        sort_frame.loc[fill, "_sort_source"] = parsed[fill]
+        source_used.loc[fill] = name
+    sort_frame["_sort_fetched"] = (
+        _to_datetime(sub["fetched_at"], utc=True).to_numpy()
+        if "fetched_at" in sub.columns else pd.NaT
     )
 
-    row = candidates.sort_values(
-        ["_sort_calendar", "_sort_source", "_sort_fetched"], na_position="first"
-    ).iloc[-1]
-    source_column = row.get("_source_column_used")
+    winner_pos = int(
+        sort_frame.sort_values(
+            ["_sort_calendar", "_sort_source", "_sort_fetched"],
+            na_position="first",
+            kind="stable",
+        ).index[-1]
+    )
+    row = sub.iloc[winner_pos]
+    source_column = source_used.iloc[winner_pos]
     calendar = _to_datetime(row.get("calendar_date"))
     return {
         "value": row[column],

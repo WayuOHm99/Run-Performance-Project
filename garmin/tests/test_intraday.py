@@ -386,6 +386,27 @@ class IntradayQueryPlanTests(IntradayBase):
         )
         self.assertNotIn("SCAN fact_wellness_intraday", details)
 
+    def test_single_athlete_day_query_uses_athlete_date_ts_index_without_temp_sort(self):
+        details = self._plan_details(
+            "SELECT athlete_id, metric, ts_utc, value FROM fact_wellness_intraday "
+            "WHERE calendar_date = ? AND athlete_id IN (?) ORDER BY ts_utc",
+            (DAY, 1),
+        )
+        self.assertIn("idx_intraday_athlete_date_ts", details)
+        self.assertNotIn("TEMP B-TREE", details)
+
+    def test_team_activities_window_query_uses_active_start_index_without_full_scan(self):
+        details = self._plan_details(
+            "SELECT a.display_name, f.* "
+            "FROM fact_activity f JOIN dim_athlete a ON a.athlete_id = f.athlete_id "
+            "WHERE f.start_time_local >= ? AND f.start_time_local < ? "
+            "  AND f.deleted_at IS NULL "
+            "ORDER BY REPLACE(f.start_time_local, 'T', ' ') DESC",
+            ("2030-01-02", "2030-01-03"),
+        )
+        self.assertNotIn("SCAN f", details)
+        self.assertIn("idx_activity_active_start", details)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dashboard_modules import HELPERS
+import dashboard_charts
 
 
 class LatestPerFieldTests(unittest.TestCase):
@@ -331,6 +332,82 @@ class NumericEdgeAndLocalTimestampTests(unittest.TestCase):
         )
         self.assertIsNotNone(snap)
         self.assertEqual(snap["value"], 72.0)
+
+    def test_latest_field_handles_duplicate_dataframe_index_labels(self):
+        first = pd.DataFrame({
+            "calendar_date": ["2026-08-14"],
+            "training_readiness": [58.0],
+            "readiness_timestamp_local": ["2026-08-14T07:00:00+07:00"],
+            "fetched_at": ["2026-08-14T00:05:00Z"],
+        })
+        second = pd.DataFrame({
+            "calendar_date": ["2026-08-15"],
+            "training_readiness": [79.0],
+            "readiness_timestamp_local": ["2026-08-15T07:30:00+07:00"],
+            "fetched_at": ["2026-08-15T00:35:00Z"],
+        })
+        dup = pd.concat([first, second])  # index = [0, 0]
+        snap = HELPERS["latest_field"](
+            dup,
+            "training_readiness",
+            timestamp_columns=("readiness_timestamp_local", "readiness_timestamp_utc"),
+        )
+        self.assertIsNotNone(snap)
+        self.assertEqual((snap["value"], snap["date"]), (79.0, date(2026, 8, 15)))
+
+
+class CachedChartSpecTests(unittest.TestCase):
+    def test_daily_line_frame_preserves_missing_day_gaps_for_single_and_multi_series(self):
+        raw = pd.DataFrame({
+            "calendar_date": ["2026-08-07", "2026-08-09"],
+            "resting_hr": [48.0, 49.0],
+            "hrv_last_night": [62.0, 64.0],
+            "hrv_weekly_avg": [60.0, 61.0],
+        })
+        aligned = HELPERS["calendar_aligned_frame"](
+            raw, "calendar_date", date(2026, 8, 7), date(2026, 8, 9),
+        ).rename(columns={"calendar_date": "วันที่"})
+
+        single_df, single_spec = dashboard_charts.daily_line_frame_and_spec(
+            aligned, ["resting_hr"], ["RHR"], y_label="bpm",
+        )
+        self.assertEqual(len(single_df), 3)
+        self.assertTrue(pd.isna(single_df.loc[1, "RHR"]))
+        self.assertNotIn("data", single_spec)
+        self.assertNotIn("datasets", single_spec)
+
+        multi_df, multi_spec = dashboard_charts.daily_line_frame_and_spec(
+            aligned,
+            ["hrv_last_night", "hrv_weekly_avg"],
+            ["เมื่อคืน", "เฉลี่ย 7 วัน"],
+            y_label="ms",
+        )
+        self.assertEqual(len(multi_df), 6)
+        self.assertEqual(int(multi_df["ค่า"].isna().sum()), 2)
+        self.assertNotIn("data", multi_spec)
+
+    def test_cached_specs_are_fresh_copies_and_do_not_leak_internal_tooltip_names(self):
+        raw = pd.DataFrame({
+            "วันที่": pd.to_datetime(["2026-08-07", "2026-08-08"]),
+            "high": [88.0, 90.0],
+            "low": [22.0, 25.0],
+        })
+        _, first = dashboard_charts.daily_line_frame_and_spec(
+            raw, ["high", "low"], ["สูงสุด", "ต่ำสุด"],
+        )
+        # จำลองพฤติกรรมของ Streamlit _marshall_chart_data ที่แก้ dict ของ spec กลางอากาศ
+        first["data"] = {"mutated": True}
+        first["layer"].clear()
+
+        _, second = dashboard_charts.daily_line_frame_and_spec(
+            raw, ["high", "low"], ["สูงสุด", "ต่ำสุด"],
+        )
+        self.assertNotIn("data", second)
+        self.assertEqual(len(second["layer"]), 2)
+        spec_text = str(second)
+        self.assertNotIn("streamlit-generated", spec_text)
+        self.assertIn("รายการ", spec_text)
+        self.assertIn("ค่า", spec_text)
 
 
 if __name__ == "__main__":

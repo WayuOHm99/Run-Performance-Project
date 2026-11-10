@@ -34,10 +34,10 @@ Garmin Connect API  ──►  SQLite (garmin.db)  ──►  Streamlit Coach Da
 | หน้า | ใช้ดูอะไร |
 | --- | --- |
 | 👥 **ทีม** | ค่าของทุกคนตามวันที่เลือกบนหน้านี้ พร้อมระบุช่องที่ยังไม่ได้รับข้อมูล |
-| 🌙 **ร่างกาย** | การนอน, HRV, RHR, Body Battery, Stress, การหายใจและ Training Readiness จาก Garmin |
+| 🌙 **ร่างกาย** | การนอน, HRV, RHR, Body Battery, Stress, การหายใจ, Recovery Time และ Training Readiness จาก Garmin |
 | 🏃 **การซ้อม** | ระยะวิ่ง, เวลาซ้อม, โซน HR ของ Garmin, Training Load และตารางกิจกรรม |
-| 📈 **ค่าประเมิน Garmin** | VO2max, Lactate Threshold, เวลาแข่งที่คาดการณ์, Endurance/Hill Score, PR และองค์ประกอบร่างกาย |
-| 🔎 **เซสชัน** | ค่าที่ Garmin ส่งมากับแต่ละกิจกรรม พร้อมตาราง Splits รายรอบ |
+| 📈 **ค่าประเมิน Garmin** | VO2max, Lactate Threshold, เวลาแข่งที่คาดการณ์, Endurance/Hill Score (รวม Strength/Endurance), PR และองค์ประกอบร่างกาย |
+| 🔎 **เซสชัน** | ค่าที่ Garmin ส่งมากับแต่ละกิจกรรม (รวมก้าวและสภาพอากาศกลางแจ้ง) พร้อมตาราง Splits รายรอบ |
 | 🛠️ **สถานะระบบ** | ความสดของข้อมูล, ผลตรวจสุขภาพระบบและสถานะสายซิงก์ |
 
 ตัวกรองนักกีฬาและช่วงวันที่ใน sidebar ใช้กับหน้ารายบุคคล ส่วนหน้าทีมเลือกวันที่เอง

@@ -194,10 +194,19 @@ def check_demo(artifacts, chromium_path):
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     url = f"http://127.0.0.1:{port}"
+    stop_file = artifacts / "demo-stop.flag"
+    stop_file.unlink(missing_ok=True)
+    demo_env = dict(os.environ)
+    if os.name == "nt":
+        demo_env["GARMIN_DEMO_STOP_FILE"] = str(stop_file)
     with (artifacts / "demo-streamlit.log").open("w", encoding="utf-8") as log:
+        popen_kwargs = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         process = subprocess.Popen(
             [sys.executable, "-u", "scripts/run_demo.py", "--port", str(port)],
-            cwd=GARMIN_ROOT, stdout=log, stderr=subprocess.STDOUT,
+            cwd=GARMIN_ROOT, env=demo_env, stdout=log, stderr=subprocess.STDOUT,
+            **popen_kwargs,
         )
         try:
             wait_for_server(process, url)
@@ -242,12 +251,23 @@ def check_demo(artifacts, chromium_path):
                 finally:
                     browser.close()
         finally:
-            process.terminate()
+            if os.name == "nt":
+                stop_file.write_text("stop", encoding="utf-8")
+            else:
+                process.terminate()
             try:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                process.kill()
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                    )
+                else:
+                    process.kill()
                 process.wait(timeout=10)
+            finally:
+                stop_file.unlink(missing_ok=True)
     log_text = (artifacts / "demo-streamlit.log").read_text(encoding="utf-8")
     directory_match = re.search(r"Schema initialized: (.+)[/\\]garmin\.db", log_text)
     if not directory_match or Path(directory_match.group(1)).exists():

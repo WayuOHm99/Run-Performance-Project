@@ -360,8 +360,16 @@ def init_schema(db_path: Path | None = None):
             _migrate(cur, table, cols)
 
         cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activity_active_start "
+            "ON fact_activity(start_time_local) WHERE deleted_at IS NULL"
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date ON fact_wellness_intraday(athlete_id, calendar_date)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date_ts "
+            "ON fact_wellness_intraday(athlete_id, calendar_date, ts_utc)"
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_date_ts ON fact_wellness_intraday(calendar_date, ts_utc)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_ts ON fact_wellness_intraday(ts_utc)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_device_athlete ON dim_athlete_device(athlete_id)")

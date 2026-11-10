@@ -820,6 +820,44 @@ class PrivateAclPowerShellIntegrationTests(unittest.TestCase):
         self.assertTrue(again_payload["ok"], "hardening must be idempotent")
         self.assertEqual(again_payload["changed"], [], "an exact DACL must be a no-op")
 
+    def test_reparse_point_descendant_is_flagged_without_traversing_outside_root(self):
+        outside = self.temp_dir / "outside-target"
+        outside.mkdir()
+        outside_file = outside / "untouched.txt"
+        outside_file.write_text("outside", encoding="utf-8")
+        grant = subprocess.run(
+            ["icacls.exe", str(outside_file), "/grant", "*S-1-5-11:R"],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC, check=False,
+        )
+        self.assertEqual(grant.returncode, 0, msg=grant.stderr)
+
+        # Harden root cleanly first, then plant a directory junction inside it.
+        first, first_payload = self.run_acl("-Recurse")
+        self.assertEqual(first.returncode, 0, msg=first.stderr)
+        self.assertTrue(first_payload["ok"])
+
+        junction = self.root / "linked-outside"
+        mklink = subprocess.run(
+            ["cmd.exe", "/c", "mklink", "/J", str(junction), str(outside)],
+            capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_SEC, check=False,
+        )
+        self.assertEqual(mklink.returncode, 0, msg=mklink.stderr + mklink.stdout)
+        self.addCleanup(
+            subprocess.run,
+            ["cmd.exe", "/c", "rmdir", str(junction)],
+            capture_output=True, check=False,
+        )
+
+        check_res, check_payload = self.run_acl("-CheckOnly", "-Recurse")
+        self.assertNotEqual(check_res.returncode, 0)
+        self.assertFalse(check_payload["ok"])
+        self.assertEqual(
+            [p["code"] for p in check_payload["problems"]],
+            ["reparse_point"],
+            "ACL verifier must report only the reparse point and never walk inside it",
+        )
+        self.assertEqual(check_payload["scanned"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

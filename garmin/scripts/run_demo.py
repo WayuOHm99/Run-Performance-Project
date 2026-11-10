@@ -41,11 +41,15 @@ def seed_demo_data(conn, today):
             conn.execute(
                 "INSERT INTO fact_daily_wellness (athlete_id, calendar_date, resting_hr,"
                 " hrv_last_night, hrv_weekly_avg, hrv_status, sleep_score, sleep_duration_sec,"
-                " bb_most_recent, body_battery_high, stress_avg, training_readiness,"
-                " recovery_time_min, vo2max_trend, lactate_threshold_hr,"
-                " lactate_threshold_pace_min_km, endurance_score, hill_score_overall,"
-                " fitness_age, fetched_at) VALUES (?, ?, ?, ?, 58, 'BALANCED', ?,"
-                " 25200, 70, 90, 30, 75, 480, ?, 172, 4.65, 6200, 58, 28, ?)",
+                " bb_most_recent, bb_at_wake, bb_during_sleep, body_battery_high,"
+                " body_battery_low, stress_avg, training_readiness, readiness_level,"
+                " readiness_feedback, readiness_sleep_factor_pct, recovery_time_factor_pct,"
+                " hrv_factor_pct, stress_history_pct, recovery_time_min, vo2max_trend,"
+                " lactate_threshold_hr, lactate_threshold_pace_min_km, endurance_score,"
+                " hill_score_overall, hill_score_strength, hill_score_endurance, steps,"
+                " steps_goal, fitness_age, fetched_at) VALUES (?, ?, ?, ?, 58, 'BALANCED', ?,"
+                " 25200, 70, 84, 52, 90, 22, 30, 75, 'HIGH', 'GOOD_SLEEP_LAST_NIGHT',"
+                " 86, 82, 88, 79, 480, ?, 172, 4.65, 6200, 58, 24, 39, 9400, 10000, 28, ?)",
                 (athlete_id, day.isoformat(), rhr + offset % 3, 55 + offset % 8,
                  80 + offset % 5, 52 - (athlete_id - 1) * 4 + (offset % 3) * 0.2,
                  f"{day}T01:00:00Z"),
@@ -55,8 +59,10 @@ def seed_demo_data(conn, today):
                 conn.execute(
                     "INSERT INTO fact_activity (activity_id, athlete_id, activity_type,"
                     " activity_name, start_time_local, distance_m, duration_sec, avg_hr,"
-                    " avg_pace_min_per_km, hr_zone1_sec, hr_zone2_sec, vo2max_value, fetched_at)"
-                    " VALUES (?, ?, 'running', 'วิ่งทดลอง', ?, 6000, 2160, 140, 6, 360, 1800, 50, ?)",
+                    " avg_pace_min_per_km, steps, weather_temp_c, weather_apparent_temp_c,"
+                    " weather_humidity, hr_zone1_sec, hr_zone2_sec, vo2max_value, fetched_at)"
+                    " VALUES (?, ?, 'running', 'วิ่งทดลอง', ?, 6000, 2160, 140, 6, 5820, 29.0,"
+                    " 34.0, 76.0, 360, 1800, 50, ?)",
                     (activity_id, athlete_id, f"{day} 06:00:00", f"{day}T01:00:00Z"),
                 )
                 for lap in range(1, 7):
@@ -139,7 +145,9 @@ def main():
     with shutdown_signals(), tempfile.TemporaryDirectory(
             prefix="run-performance-demo-", ignore_cleanup_errors=True) as directory:
         create_demo_database(directory)
+        stop_file = os.environ.get("GARMIN_DEMO_STOP_FILE")
         environment = dict(os.environ, GARMIN_DATA_DIR=directory, GARMIN_DASHBOARD_DEMO="1")
+        environment.pop("GARMIN_DEMO_STOP_FILE", None)
         print(f"กำลังเปิด Demo ที่ http://127.0.0.1:{args.port} (กด Ctrl+C เพื่อปิด)...", flush=True)
         process = win_process.popen(
             [sys.executable, "-m", "streamlit", "run", "scripts/dashboard.py",
@@ -148,6 +156,14 @@ def main():
             cwd=GARMIN_ROOT, env=environment, stdout=sys.stdout, stderr=sys.stderr,
         )
         try:
+            # Poll with short timeout so Python signal handlers (Ctrl+C / SIGBREAK on Windows)
+            # and headless stop-file requests are serviced promptly instead of blocking in C.
+            while process.poll() is None:
+                try:
+                    return process.wait(timeout=0.25)
+                except subprocess.TimeoutExpired:
+                    if stop_file and Path(stop_file).exists():
+                        return 0
             return process.wait()
         except KeyboardInterrupt:
             return 0

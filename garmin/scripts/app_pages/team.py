@@ -12,7 +12,7 @@ import datetime
 import pandas as pd
 import streamlit as st
 
-from dashboard_charts import intraday_chart
+from dashboard_charts import intraday_frame_and_spec
 from dashboard_context import focus_athlete, page_context
 from dashboard_data import (
     athlete_has_training_readiness,
@@ -200,8 +200,10 @@ else:
     names = ctx.athlete_labels
     series = intraday_series(intraday, chosen)
     if series["ค่า"].notna().any():
-        st.altair_chart(intraday_chart(series, day, y_title=INTRADAY_METRICS[chosen][1],
-                                       names=names, height=240), width="stretch")
+        in_frame, in_spec = intraday_frame_and_spec(
+            series, day, y_title=INTRADAY_METRICS[chosen][1], names=names, height=240,
+        )
+        st.vega_lite_chart(in_frame, in_spec, width="stretch")
         st.caption("แกนเวลาเดียวกัน 00:00–24:00 · เส้นขาด = ช่วงที่ไม่มีข้อมูลจากนาฬิกา")
     else:
         st.caption(f"ไม่มีข้อมูล {labels[chosen]} ระหว่างวันของ{day_word}")

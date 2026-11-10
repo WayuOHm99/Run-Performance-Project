@@ -8,6 +8,7 @@ VO2max, เวลาคาดการณ์แข่ง, Lactate Threshold, End
 import pandas as pd
 import streamlit as st
 
+from dashboard_charts import daily_line_frame_and_spec
 from dashboard_context import page_context
 from dashboard_data import (
     load_body_composition,
@@ -24,6 +25,7 @@ from dashboard_domain import (
     fmt_sec,
     latest_field,
     personal_record_rows,
+    value_of,
 )
 
 ctx = page_context()
@@ -49,7 +51,16 @@ for column, label, render in (
 ):
     snapshot = latest_field(history, column)
     if snapshot:
-        tiles.append((label, render(snapshot["value"]), field_when(snapshot, today)))
+        note_parts = []
+        if column == "hill_score_overall":
+            strength = value_of(snapshot["row"], "hill_score_strength")
+            endurance = value_of(snapshot["row"], "hill_score_endurance")
+            if strength is not None:
+                note_parts.append(f"Strength {fmt_num(strength)}")
+            if endurance is not None:
+                note_parts.append(f"Endurance {fmt_num(endurance)}")
+        note_parts.append(field_when(snapshot, today))
+        tiles.append((label, render(snapshot["value"]), " · ".join(note_parts)))
 if tiles:
     shown_any = True
     with st.container(horizontal=True):
@@ -75,6 +86,7 @@ if not predictions.empty:
     ]
     if any(in_range[col].notna().sum() >= 2 for col in ("time_5k_sec", "time_10k_sec")):
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
+        chart["วันที่"] = chart["calendar_date"]
         with st.container(border=True):
             st.markdown("**5K และ 10K ที่ Garmin คาดการณ์ในช่วงนี้**")
             st.caption("หน่วยเป็นนาที · ค่าที่ต่ำลงคือ Garmin คาดว่าวิ่งได้เร็วขึ้น")
@@ -82,9 +94,11 @@ if not predictions.empty:
             for column, label, holder in (("time_5k_sec", "5K", left),
                                           ("time_10k_sec", "10K", right)):
                 if in_range[column].notna().sum() >= 2:
-                    frame = pd.DataFrame({"วันที่": chart["calendar_date"], label: chart[column] / 60})
-                    holder.line_chart(frame, x="วันที่", y=label, x_label="",
-                                      y_label="นาที", height=CHART_HEIGHT)
+                    mins = chart[["วันที่"]].assign(**{column: chart[column] / 60})
+                    frame, spec = daily_line_frame_and_spec(
+                        mins, [column], [label], y_label="นาที", height=CHART_HEIGHT,
+                    )
+                    holder.vega_lite_chart(frame, spec, width="stretch")
                 else:
                     holder.caption(f"ยังไม่มีข้อมูล {label} พอวาดกราฟในช่วงนี้")
 
@@ -96,11 +110,13 @@ if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
     ]
     if in_range["vo2max_trend"].notna().sum() >= 2:
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
+        chart["วันที่"] = chart["calendar_date"]
         with st.container(border=True):
             st.markdown("**VO2max รายวันในช่วงนี้**")
-            chart = chart.rename(columns={"calendar_date": "วันที่", "vo2max_trend": "VO2max"})
-            st.line_chart(chart, x="วันที่", y="VO2max", x_label="",
-                          y_label="ml/kg/min", height=CHART_HEIGHT)
+            frame, spec = daily_line_frame_and_spec(
+                chart, ["vo2max_trend"], ["VO2max"], y_label="ml/kg/min", height=CHART_HEIGHT,
+            )
+            st.vega_lite_chart(frame, spec, width="stretch")
 
 records = load_personal_records(ctx.athlete_id)
 if not records.empty:

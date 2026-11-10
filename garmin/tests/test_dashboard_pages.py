@@ -313,6 +313,34 @@ class SessionPageTests(unittest.TestCase):
         self.assertEqual(list(laps["Lap"]), [1, 2, 3])
         self.assertEqual(laps["ระยะ (m)"].iloc[-1], 0)
 
+    def test_outdoor_weather_apparent_temp_and_steps_are_shown_when_garmin_sent_them(self):
+        def seed_weather(conn):
+            seed_team(conn)
+            conn.execute(
+                "UPDATE fact_activity SET weather_temp_c = 31.0, weather_apparent_temp_c = 37.0,"
+                " weather_humidity = 78.0, steps = 9850 WHERE activity_id = 101"
+            )
+
+        main, _ = render_page(SESSION_PAGE, seed_weather, state={"session_activity": 101})
+        metrics = {m.label: m.value for m in main.get("metric")}
+        self.assertEqual(metrics.get("อุณหภูมิ"), "31 °C")
+        self.assertEqual(metrics.get("อุณหภูมิที่รู้สึก"), "37 °C")
+        self.assertEqual(metrics.get("ก้าว"), "9,850")
+
+    def test_corrupted_infinite_activity_fields_never_crash_session_page(self):
+        def seed_inf(conn):
+            seed_team(conn)
+            conn.execute(
+                "UPDATE fact_activity SET steps = 9e999, avg_speed_mps = 9e999,"
+                " begin_stamina = 9e999, end_stamina = 9e999 WHERE activity_id = 101"
+            )
+
+        main, _ = render_page(SESSION_PAGE, seed_inf, state={"session_activity": 101})
+        metrics = {m.label: m.value for m in main.get("metric")}
+        self.assertNotIn("ก้าว", metrics)
+        self.assertNotIn("ความเร็วเฉลี่ย", metrics)
+        self.assertNotIn("Stamina เริ่ม → จบ", metrics)
+
 
 class EstimatesPageTests(unittest.TestCase):
     def test_latest_estimate_outside_the_selected_period_is_still_shown(self):
@@ -321,6 +349,22 @@ class EstimatesPageTests(unittest.TestCase):
         metrics = {m.label: m.value for m in main.get("metric")}
         self.assertEqual(metrics.get("VO2max"), "51")
         self.assertEqual(metrics.get("5K"), "21:45")
+
+    def test_hill_score_includes_garmin_strength_and_endurance_subscores(self):
+        def seed_hill(conn):
+            seed_team(conn)
+            conn.execute(
+                "UPDATE fact_daily_wellness SET hill_score_overall = 58,"
+                " hill_score_strength = 24, hill_score_endurance = 39"
+                " WHERE athlete_id = 1 AND calendar_date = ?",
+                (TODAY.isoformat(),),
+            )
+
+        main, _ = render_page(ESTIMATES_PAGE, seed_hill)
+        metrics = {m.label: (m.value, m.proto.delta) for m in main.get("metric")}
+        self.assertEqual(metrics["Hill Score"][0], "58")
+        self.assertIn("Strength 24", metrics["Hill Score"][1])
+        self.assertIn("Endurance 39", metrics["Hill Score"][1])
 
 
 class TrainingPageTests(unittest.TestCase):
@@ -350,6 +394,32 @@ class BodyPageTests(unittest.TestCase):
         self.assertEqual(metrics["RHR"][0], "50 bpm")
         self.assertEqual(metrics["RHR"][1],
                          (TODAY - datetime.timedelta(days=2)).strftime("%d/%m"))
+
+    def test_recovery_time_wake_battery_and_garmin_readiness_factors_are_shown(self):
+        def seed_rich_body(conn):
+            seed_team(conn)
+            conn.execute(
+                "UPDATE fact_daily_wellness SET recovery_time_min = 480,"
+                " bb_at_wake = 82, bb_during_sleep = 55,"
+                " training_readiness = 76, readiness_level = 'HIGH',"
+                " readiness_feedback = 'GOOD_SLEEP_LAST_NIGHT',"
+                " readiness_sleep_factor_pct = 88, recovery_time_factor_pct = 84,"
+                " hrv_factor_pct = 91, stress_history_pct = 79"
+                " WHERE athlete_id = 1 AND calendar_date = ?",
+                (TODAY.isoformat(),),
+            )
+
+        main, _ = render_page(BODY_PAGE, seed_rich_body, athlete=1)
+        metrics = {m.label: (m.value, m.proto.delta) for m in main.get("metric")}
+        self.assertEqual(metrics["Recovery Time"][0], "8 ชม.")
+        self.assertIn("ตื่น 82", metrics["Body Battery ล่าสุด"][1])
+        text = page_text(main)
+        self.assertIn("Good Sleep Last Night", text)
+        self.assertEqual(metrics["ปัจจัยการนอน (Garmin)"][0], "88%")
+        self.assertEqual(metrics["ปัจจัย HRV (Garmin)"][0], "91%")
+        daily_table = [frame.value for frame in main.get("dataframe")][-1]
+        self.assertIn("BB ตอนตื่น", daily_table.columns)
+        self.assertIn("BB ชาร์จตอนนอน", daily_table.columns)
 
 
 class SystemPageTests(unittest.TestCase):

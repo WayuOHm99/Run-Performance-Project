@@ -189,12 +189,12 @@ def load_data_availability(athlete_id, start_date, end_date):
 def athlete_has_training_readiness(athlete_id):
     """บัญชีนี้เคยได้รับ Training Readiness หรือไม่ (ไม่ใช้ฟันธงรุ่นนาฬิกา)."""
     with closing(connect_db()) as conn:
-        n = conn.execute(
-            "SELECT COUNT(*) FROM fact_daily_wellness "
-            "WHERE athlete_id = ? AND training_readiness IS NOT NULL",
+        row = conn.execute(
+            "SELECT 1 FROM fact_daily_wellness "
+            "WHERE athlete_id = ? AND training_readiness IS NOT NULL LIMIT 1",
             (athlete_id,),
-        ).fetchone()[0]
-    return n > 0
+        ).fetchone()
+    return row is not None
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_athlete_devices(athlete_id):
