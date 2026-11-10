@@ -22,6 +22,8 @@ CLAUDE.md เคยเขียนไว้เองว่าข้อนี้ 
 
 import asyncio
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,9 +32,20 @@ import urllib.request
 
 import websockets
 
-CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-APP_PORT = sys.argv[1]
-CDP_PORT = sys.argv[2]
+
+def _resolve_chrome() -> str:
+    candidates = [
+        os.environ.get("CHROME_PATH"),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        shutil.which("chrome"),
+        shutil.which("google-chrome"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    raise FileNotFoundError("ไม่พบ Google Chrome (ตั้งค่า CHROME_PATH ได้หากติดตั้งไว้ที่อื่น)")
 
 
 class Tab:
@@ -84,119 +97,176 @@ HEADING = ("(document.querySelector('[data-testid=stMain] h1, "
            ".innerText || ''")
 
 
-async def main():
-    profile = tempfile.mkdtemp(prefix="cdp-nav-")
-    chrome = subprocess.Popen(
-        [CHROME, "--headless=new", f"--remote-debugging-port={CDP_PORT}",
-         f"--user-data-dir={profile}", "--no-first-run", "--window-size=1440,900",
-         "about:blank"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        for _ in range(80):
-            try:
-                pages = json.loads(urllib.request.urlopen(
-                    f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=2).read())
-                target = next(p for p in pages if p["type"] == "page")
-                break
-            except Exception:
-                await asyncio.sleep(0.25)
-        else:
-            raise RuntimeError("Chrome ไม่ยอมเปิด CDP")
+async def main(app_port: str, cdp_port: str) -> int:
+    chrome_bin = _resolve_chrome()
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    with tempfile.TemporaryDirectory(prefix="cdp-nav-", ignore_cleanup_errors=True) as profile:
+        chrome = subprocess.Popen(
+            [chrome_bin, "--headless=new", f"--remote-debugging-port={cdp_port}",
+             f"--user-data-dir={profile}", "--no-first-run", "--window-size=1440,900",
+             "about:blank"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=creationflags)
+        try:
+            for _ in range(80):
+                try:
+                    pages = json.loads(urllib.request.urlopen(
+                        f"http://127.0.0.1:{cdp_port}/json/list", timeout=2).read())
+                    target = next(p for p in pages if p["type"] == "page")
+                    break
+                except Exception:
+                    await asyncio.sleep(0.25)
+            else:
+                raise RuntimeError("Chrome ไม่ยอมเปิด CDP")
 
-        async with websockets.connect(target["webSocketDebuggerUrl"],
-                                      max_size=None) as ws:
-            tab = Tab(ws)
-            await tab.send("Runtime.enable")
-            await tab.send("Page.enable")
-            await tab.send("Log.enable")
-            await tab.send("Page.navigate", url=f"http://127.0.0.1:{APP_PORT}")
+            async with websockets.connect(target["webSocketDebuggerUrl"],
+                                          max_size=None) as ws:
+                tab = Tab(ws)
+                await tab.send("Runtime.enable")
+                await tab.send("Page.enable")
+                await tab.send("Log.enable")
+                await tab.send("Page.navigate", url=f"http://127.0.0.1:{app_port}")
 
-            await settle(tab, HEADING, lambda v: bool(v and v.strip()))
-            names = await settle(tab, NAV_ITEMS, lambda v: v and len(v) >= 5)
-            print("แถบ navigation:", " | ".join(n.replace(chr(10), " ") for n in names))
+                await settle(tab, HEADING, lambda v: bool(v and v.strip()))
+                names = await settle(tab, NAV_ITEMS, lambda v: v and len(v) >= 6)
+                print("แถบ navigation:", " | ".join(n.replace(chr(10), " ") for n in names))
 
-            print("หน้าเริ่มต้น: path =", await tab.js("location.pathname"),
-                  "| หัวข้อรอง =", (await tab.js(SUBHEADS) or [""])[0][:44])
+                print("หน้าเริ่มต้น: path =", await tab.js("location.pathname"),
+                      "| หัวข้อรอง =", (await tab.js(SUBHEADS) or [""])[0][:44])
 
-            # กดทีละหน้าแล้วเก็บ (path, หัวข้อรอง) — หน้าเริ่มต้นมี path เป็น "/"
-            # จึงเช็คว่า "ได้ครบ 6 หน้าที่ต่างกัน" แทนที่จะบังคับว่าทุกคลิกต้องเปลี่ยน
-            visited = []
-            for index in range(len(names)):
-                clicked = await tab.js(f"""(() => {{
+                # กดทีละหน้าแล้วเก็บ (path, หัวข้อรอง) — หน้าเริ่มต้นมี path เป็น "/"
+                # จึงเช็คว่า "ได้ครบ 6 หน้าที่ต่างกัน" แทนที่จะบังคับว่าทุกคลิกต้องเปลี่ยน
+                visited = []
+                for index in range(len(names)):
+                    clicked = await tab.js(f"""(() => {{
+                      const links = [...document.querySelectorAll('a[data-testid="stTopNavLink"], '
+                        + '[data-testid="stNavLink"], nav a')].filter(a => a.innerText.trim());
+                      const target = links[{index}];
+                      if (!target) return null;
+                      target.click();
+                      return target.innerText.trim();
+                    }})()""")
+                    if not clicked:
+                        continue
+                    previous = visited[-1][1] if visited else None
+                    subhead = await settle(
+                        tab, SUBHEADS,
+                        lambda v, prev=previous: bool(v) and (prev is None or v[0] != prev),
+                        timeout=45)
+                    path = await tab.js("location.pathname")
+                    visited.append((path, subhead[0]))
+                    label = clicked.replace(chr(10), " ")
+                    print(f"  คลิก {label:26s} -> {path:26s} {subhead[0][:38]}")
+
+                paths = {path for path, _ in visited}
+                print(f"หน้าที่ไปถึงได้: {len(paths)} จาก {len(names)} รายการบนแถบ")
+
+                # ปุ่มบนการ์ดทีม: คลิกเดียวต้องเปลี่ยนทั้ง "คนที่เลือก" และ "หน้า"
+                # เลือกปุ่มคนที่ 2 เมื่อมีอย่างน้อย 2 คน เพื่อพิสูจน์ว่า sidebar เปลี่ยนจากค่าเริ่มต้นจริง
+                await tab.js("""(() => {
                   const links = [...document.querySelectorAll('a[data-testid="stTopNavLink"], '
                     + '[data-testid="stNavLink"], nav a')].filter(a => a.innerText.trim());
-                  const target = links[{index}];
+                  const team = links.find(a => a.innerText.trim().endsWith('ทีม'));
+                  if (team) team.click();
+                })()""")
+                await settle(tab, SUBHEADS, lambda v: bool(v) and "ทีม" in v[0], timeout=45)
+                await settle(
+                    tab,
+                    "document.querySelectorAll('[data-testid=stMain] "
+                    "[class*=\"st-key-open-athlete-\"] button').length",
+                    lambda v: bool(v) and v >= 1, timeout=45)
+
+                picked = await tab.js("""(() => {
+                  const buttons = [...document.querySelectorAll(
+                    '[data-testid=stMain] [class*="st-key-open-athlete-"] button')]
+                    .filter(b => b.innerText.trim());
+                  const target = buttons.length >= 2 ? buttons[1] : buttons[0];
                   if (!target) return null;
+                  const label = target.innerText.trim();
                   target.click();
-                  return target.innerText.trim();
-                }})()""")
-                if not clicked:
-                    continue
-                previous = visited[-1][1] if visited else None
-                subhead = await settle(
-                    tab, SUBHEADS,
-                    lambda v: bool(v) and (previous is None or v[0] != previous),
-                    timeout=45)
-                path = await tab.js("location.pathname")
-                visited.append((path, subhead[0]))
-                label = clicked.replace(chr(10), " ")
-                print(f"  คลิก {label:26s} -> {path:26s} {subhead[0][:38]}")
+                  return label;
+                })()""")
+                expected_name = ""
+                sidebar_line = "?"
+                if picked:
+                    if "ดูข้อมูลของ" in picked:
+                        expected_name = picked.split("ดูข้อมูลของ", 1)[-1].strip()
+                    path = await settle(tab, "location.pathname", lambda v: v == "/body", timeout=45)
+                    subhead = (await settle(
+                        tab,
+                        SUBHEADS,
+                        lambda v: bool(v) and "ร่างกาย" in v[0] and (not expected_name or expected_name in v[0]),
+                        timeout=45,
+                    ))[0]
+                    sidebar_line = await tab.js("""(() => {
+                      const inp = document.querySelector('.st-key-selected_athlete input')
+                        || document.querySelector('[data-testid="stSelectbox"] input');
+                      if (inp && typeof inp.value === 'string' && inp.value.trim()) {
+                        return inp.value.trim();
+                      }
+                      const sel = document.querySelector('.st-key-selected_athlete [data-baseweb="select"]')
+                        || document.querySelector('[data-testid="stSelectbox"] [data-baseweb="select"]')
+                        || document.querySelector('[data-testid="stSelectbox"]');
+                      if (!sel) return '?';
+                      const raw = (sel.innerText || sel.textContent || '').trim();
+                      return raw.replace(/keyboard_arrow_down$/i, '').trim() || '?';
+                    })()""") or "?"
+                    sidebar_clean = sidebar_line.replace(chr(10), " ")
+                    print(
+                        f"ปุ่มบนการ์ด {picked!r} -> path {path} · หัวข้อ {subhead[:40]} · "
+                        f"sidebar {sidebar_clean[:32]}"
+                    )
+                else:
+                    print("ปุ่มบนการ์ด: หาไม่เจอ")
 
-            paths = {path for path, _ in visited}
-            print(f"หน้าที่ไปถึงได้: {len(paths)} จาก {len(names)} รายการบนแถบ")
+                errors = await tab.js("""(() => {
+                  const boxes = [...document.querySelectorAll('[data-testid="stException"], '
+                    + '[data-testid="stAlertContainer"]')];
+                  return boxes.map(b => b.innerText.trim().slice(0, 120));
+                })()""")
+                exceptions = [e for e in (errors or []) if "Traceback" in e or "Error" in e]
+                print("กล่อง exception บนหน้า:", exceptions if exceptions else "ไม่มี")
 
-            # ปุ่มบนการ์ดทีม: คลิกเดียวต้องเปลี่ยนทั้ง "คนที่เลือก" และ "หน้า"
-            # เดิมเขียนป้ายแท็บลง session_state ตอนนี้เรียก st.switch_page — ชั้นนี้เท่านั้น
-            # ที่พิสูจน์ได้ว่ามันย้ายหน้าจริง ไม่ใช่แค่เขียนค่าลงไปแล้วเงียบ
-            await tab.js("""(() => {
-              const links = [...document.querySelectorAll('a[data-testid="stTopNavLink"], '
-                + '[data-testid="stNavLink"], nav a')].filter(a => a.innerText.trim());
-              const team = links.find(a => a.innerText.trim().endsWith('ทีม'));
-              if (team) team.click();
-            })()""")
-            await settle(tab, SUBHEADS, lambda v: bool(v) and "ทีม" in v[0], timeout=45)
-            # รอให้การ์ดวาดปุ่มดูข้อมูลรายคนเสร็จก่อน (ข้างบนมีปุ่มเลื่อนวันที่ team-prev-day)
-            await settle(
-                tab,
-                "document.querySelectorAll('[data-testid=stMain] "
-                "[class*=\"st-key-open-athlete-\"] button').length",
-                lambda v: bool(v) and v >= 1, timeout=45)
+                overflow = await tab.js(
+                    "document.documentElement.scrollWidth - document.documentElement.clientWidth")
+                print("ล้นแนวนอน:", f"{overflow}px" if overflow else "ไม่ล้น")
 
-            picked = await tab.js("""(() => {
-              const buttons = [...document.querySelectorAll(
-                '[data-testid=stMain] [class*="st-key-open-athlete-"] button')];
-              const target = buttons.find(b => b.innerText.trim());
-              if (!target) return null;
-              const label = target.innerText.trim();
-              target.click();
-              return label;
-            })()""")
-            if picked:
-                path = await settle(tab, "location.pathname", lambda v: v == "/body", timeout=45)
-                chosen = await tab.js(
-                    "(document.querySelector('[data-testid=stSelectbox]') || {})"
-                    ".innerText || ''") or ""
-                # รอให้หน้าใหม่วาดหัวข้อของตัวเองก่อน ไม่งั้นอ่านได้ค่าว่างของจังหวะกลางทาง
-                subhead = (await settle(tab, SUBHEADS,
-                                        lambda v: bool(v) and "ร่างกาย" in v[0],
-                                        timeout=45))[0]
-                print(f"ปุ่มบนการ์ด {picked!r} -> path {path} · หัวข้อ {subhead[:40]} · sidebar {chosen.strip().splitlines()[-1][:20] if chosen.strip() else "?"}")
-            else:
-                print("ปุ่มบนการ์ด: หาไม่เจอ")
-
-            errors = await tab.js("""(() => {
-              const boxes = [...document.querySelectorAll('[data-testid="stException"], '
-                + '[data-testid="stAlertContainer"]')];
-              return boxes.map(b => b.innerText.trim().slice(0, 120));
-            })()""")
-            exceptions = [e for e in (errors or []) if "Traceback" in e or "Error" in e]
-            print("กล่อง exception บนหน้า:", exceptions if exceptions else "ไม่มี")
-
-            overflow = await tab.js(
-                "document.documentElement.scrollWidth - document.documentElement.clientWidth")
-            print("ล้นแนวนอน:", f"{overflow}px" if overflow else "ไม่ล้น")
-    finally:
-        chrome.terminate()
+                failures: list[str] = []
+                if len(paths) < 6:
+                    failures.append(f"ไปไม่ครบ 6 หน้า (ได้ {len(paths)} จาก {len(names)})")
+                if not picked:
+                    failures.append("หาปุ่มดูข้อมูลบนการ์ดทีมไม่เจอ")
+                elif expected_name and expected_name not in sidebar_line:
+                    failures.append(
+                        f"sidebar ไม่เปลี่ยนเป็น {expected_name!r} (ได้ {sidebar_line!r})"
+                    )
+                if exceptions:
+                    failures.append(f"พบ exception บนหน้า: {exceptions}")
+                if (overflow or 0) > 0:
+                    failures.append(f"หน้าล้นแนวนอน {overflow}px")
+                if failures:
+                    for item in failures:
+                        print(f"FAIL: {item}", file=sys.stderr)
+                    return 1
+                return 0
+        finally:
+            chrome.terminate()
+            try:
+                chrome.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                chrome.kill()
+                chrome.wait(timeout=5)
 
 
-asyncio.run(main())
+def _cli() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    if len(sys.argv) < 3:
+        print("วิธีใช้: python .claude/hooks/browser_nav_check.py <app_port> <cdp_port>", file=sys.stderr)
+        return 2
+    return asyncio.run(main(sys.argv[1], sys.argv[2]))
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

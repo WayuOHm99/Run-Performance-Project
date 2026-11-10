@@ -14,7 +14,6 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="$ROOT/garmin/.venv/Scripts/python.exe"
 DRIVER="$ROOT/.claude/hooks/drive_session.py"
-PORT=8988
 
 payload=$(cat)
 case "$payload" in *'"stop_hook_active": true'*|*'"stop_hook_active":true'*) exit 0 ;; esac
@@ -22,15 +21,36 @@ case "$payload" in *'"stop_hook_active": true'*|*'"stop_hook_active":true'*) exi
 cd "$ROOT" || exit 0
 [ -x "$PY" ] || exit 0
 
-touched=$( { git status --porcelain -- garmin 2>/dev/null | sed 's/^...//'
+touched=$( { git status --porcelain -uall -- garmin 2>/dev/null | sed 's/^...//'
              git diff --name-only main...HEAD -- garmin 2>/dev/null
-           } | grep -E 'garmin/scripts/dashboard\.py$|garmin/\.streamlit/config\.toml$' )
+           } | grep -E 'garmin/scripts/(dashboard[^/]*\.py|app_pages/.*\.py|run_demo\.py)$|garmin/\.streamlit/config\.toml$' )
 [ -z "$touched" ] && exit 0
 
+PORT=$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 LOG=$(mktemp)
+TMP_DATA=""
+cleanup() {
+  rm -f "$LOG"
+  [ -n "$TMP_DATA" ] && rm -rf "$TMP_DATA"
+}
+trap cleanup EXIT
+
 cd "$ROOT/garmin" || exit 0
-"$PY" -m streamlit run scripts/dashboard.py \
-    --server.headless=true --server.port="$PORT" --server.fileWatcherType=none \
+if [ ! -f "$ROOT/garmin/data/garmin.db" ]; then
+  TMP_DATA=$(mktemp -d)
+  PYTHONUTF8=1 "$PY" -c '
+import sys
+sys.path.insert(0, "scripts")
+import run_demo
+run_demo.create_demo_database(sys.argv[1])
+' "$TMP_DATA" >/dev/null 2>&1
+  export GARMIN_DATA_DIR="$TMP_DATA"
+  export GARMIN_DASHBOARD_DEMO=1
+fi
+
+PYTHONUTF8=1 "$PY" -m streamlit run scripts/dashboard.py \
+    --server.headless=true --server.address=127.0.0.1 --server.port="$PORT" \
+    --server.fileWatcherType=none \
     > "$LOG" 2>&1 &
 pid=$!
 
@@ -50,7 +70,6 @@ kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 
 logged=$(grep -iE 'error|traceback|should have|exception' "$LOG" | head -10)
-rm -f "$LOG"
 bad=$(printf '%s\n%s' "$driven" "$logged" | grep -v '^$')
 [ -z "$bad" ] && exit 0
 

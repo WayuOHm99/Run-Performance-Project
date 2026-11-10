@@ -13,6 +13,10 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 try:  # รันปกติ (scripts/ อยู่ใน sys.path)
     import win_process
 except ModuleNotFoundError:  # ถูกโหลดตรงด้วย importlib จาก cwd ไหนก็ได้
@@ -43,7 +47,7 @@ def summarize(report: dict) -> dict:
     summary = {}
     for key in ("ok", "warning", "error", "total"):
         value = raw_summary.get(key)
-        if not isinstance(value, int) or value < 0:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise HeartbeatError("summary_invalid")
         summary[key] = value
     if summary["ok"] + summary["warning"] + summary["error"] != summary["total"]:
@@ -121,6 +125,26 @@ def _ensure_release(gh: str, repository: str) -> None:
     )
 
 
+def _find_gh() -> str:
+    override = os.environ.get("RUN_PERF_GH_EXECUTABLE")
+    if override and Path(override).is_file():
+        return override
+    found = shutil.which("gh")
+    if found:
+        return found
+    for candidate in (
+        Path(r"C:\Program Files\GitHub CLI\gh.exe"),
+        Path(r"C:\Program Files (x86)\GitHub CLI\gh.exe"),
+        *sorted(
+            (Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages")
+            .glob("GitHub.cli_*/**/gh.exe")
+        ),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    raise HeartbeatError("gh_missing")
+
+
 def record_publish(*, data_dir=None, now=None) -> Path:
     """บันทึกเวลาที่ส่ง heartbeat สำเร็จไว้ในเครื่อง.
 
@@ -132,14 +156,17 @@ def record_publish(*, data_dir=None, now=None) -> Path:
     target.mkdir(parents=True, exist_ok=True)
     stamp = (now or datetime.now().astimezone()).isoformat(timespec="seconds")
     marker = target / PUBLISH_MARKER
-    marker.write_text(stamp, encoding="ascii")
+    temporary = target / f".{PUBLISH_MARKER}.{os.getpid()}.tmp"
+    try:
+        temporary.write_text(stamp, encoding="ascii")
+        temporary.replace(marker)
+    finally:
+        temporary.unlink(missing_ok=True)
     return marker
 
 
 def publish() -> dict:
-    gh = shutil.which("gh")
-    if not gh:
-        raise HeartbeatError("gh_missing")
+    gh = _find_gh()
     report_result = _run(
         [sys.executable, str(HEALTH_REPORT), "--json"],
         cwd=GARMIN_ROOT,

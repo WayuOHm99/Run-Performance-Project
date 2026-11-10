@@ -13,8 +13,8 @@ SCRIPTS_DIR = GARMIN_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import dashboard_data  # noqa: E402
-import dashboard_domain  # noqa: E402
+import dashboard_data
+import dashboard_domain
 
 HELPERS = {
     name: value

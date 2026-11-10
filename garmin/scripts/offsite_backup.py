@@ -16,17 +16,37 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-import backup_db
-from validate_sqlite_backup import validate as validate_sqlite
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _load_sibling(module_name: str, filename: str):
+    spec = importlib.util.spec_from_file_location(
+        module_name, Path(__file__).with_name(filename)
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+try:
+    import backup_db
+except ModuleNotFoundError:
+    backup_db = _load_sibling("garmin_backup_db", "backup_db.py")
+
+try:
+    from validate_sqlite_backup import validate as validate_sqlite
+except ModuleNotFoundError:
+    validate_sqlite = _load_sibling(
+        "garmin_validate_sqlite_backup", "validate_sqlite_backup.py"
+    ).validate
 
 try:  # รันปกติ (scripts/ อยู่ใน sys.path)
     import win_process
 except ModuleNotFoundError:  # ถูกโหลดตรงด้วย importlib จาก cwd ไหนก็ได้
-    _wp_spec = importlib.util.spec_from_file_location(
-        "garmin_win_process", Path(__file__).with_name("win_process.py")
-    )
-    win_process = importlib.util.module_from_spec(_wp_spec)
-    _wp_spec.loader.exec_module(win_process)
+    win_process = _load_sibling("garmin_win_process", "win_process.py")
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -67,12 +87,16 @@ def _cleanup_restore_tree(root: Path) -> None:
     environment["RUN_PERF_RESTORE_CLEANUP_TARGET"] = str(resolved)
     completed = win_process.run(
         [
-            "powershell.exe", "-NoProfile", "-Command",
-            "$p=$env:RUN_PERF_RESTORE_CLEANUP_TARGET; "
-            "if (-not $p) { exit 2 }; "
-            "Get-ChildItem -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue | "
-            "ForEach-Object { if ($_.IsReadOnly) { $_.IsReadOnly=$false } }; "
-            "[IO.Directory]::Delete($p,$true)",
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            (
+                "$p=$env:RUN_PERF_RESTORE_CLEANUP_TARGET; "
+                "if (-not $p) { exit 2 }; "
+                "Get-ChildItem -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue | "
+                "ForEach-Object { if ($_.IsReadOnly) { $_.IsReadOnly=$false } }; "
+                "[IO.Directory]::Delete($p,$true)"
+            ),
         ],
         env=environment,
         capture_output=True,
@@ -118,6 +142,17 @@ def _find_executable(name: str) -> str:
         candidates = sorted(package_root.glob("restic.restic_*/*restic*_windows_amd64.exe"))
         if candidates:
             return str(candidates[-1])
+    if name == "gh":
+        for candidate in (
+            Path(r"C:\Program Files\GitHub CLI\gh.exe"),
+            Path(r"C:\Program Files (x86)\GitHub CLI\gh.exe"),
+            *sorted(
+                (Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages")
+                .glob("GitHub.cli_*/**/gh.exe")
+            ),
+        ):
+            if candidate.is_file():
+                return str(candidate)
     raise OffsiteBackupError(f"{name}_missing")
 
 
@@ -362,66 +397,73 @@ def _safe_extract(archive: Path, destination: Path) -> None:
 
 def run_restore_drill() -> dict:
     root = Path(tempfile.mkdtemp(prefix="run-performance-restore-drill-"))
+    payload: dict | None = None
+    cleanup_error: str | None = None
     try:
-        password = _get_password()
-        restic = _find_executable("restic")
-        gh = _find_executable("gh")
-        repo = _repository_name(gh)
-        asset_name = _latest_asset(gh, repo)
+        try:
+            password = _get_password()
+            restic = _find_executable("restic")
+            gh = _find_executable("gh")
+            repo = _repository_name(gh)
+            asset_name = _latest_asset(gh, repo)
 
-        _run(
-            [
-                gh, "release", "download", RELEASE_TAG, "--repo", repo,
-                "--pattern", asset_name, "--dir", str(root),
-            ],
-            timeout=14_400,
-        )
-        archive = root / asset_name
-        repository = root / "repository"
-        repository.mkdir()
-        _safe_extract(archive, repository)
-        environment = os.environ.copy()
-        environment["RESTIC_REPOSITORY"] = str(repository)
-        environment["RESTIC_PASSWORD"] = password
-        snapshots = _run([restic, "snapshots", "--json"], env=environment)
-        snapshot_rows = json.loads(snapshots.stdout)
-        if not snapshot_rows:
-            raise OffsiteBackupError("snapshot_missing")
-        target = root / "restored"
-        _run([restic, "restore", "latest", "--target", str(target)], env=environment)
-        databases = sorted(target.rglob("garmin-*.db"))
-        if not databases:
-            databases = sorted(target.rglob("garmin.db"))
-        if not databases:
-            raise OffsiteBackupError("restored_database_missing")
-        restored_database = databases[-1]
-        validation = validate_sqlite(restored_database, dashboard_probe=True)
-        if not validation["ok"]:
-            raise OffsiteBackupError("restored_database_invalid")
+            _run(
+                [
+                    gh, "release", "download", RELEASE_TAG, "--repo", repo,
+                    "--pattern", asset_name, "--dir", str(root),
+                ],
+                timeout=14_400,
+            )
+            archive = root / asset_name
+            repository = root / "repository"
+            repository.mkdir()
+            _safe_extract(archive, repository)
+            environment = os.environ.copy()
+            environment["RESTIC_REPOSITORY"] = str(repository)
+            environment["RESTIC_PASSWORD"] = password
+            snapshots = _run([restic, "snapshots", "--json"], env=environment)
+            snapshot_rows = json.loads(snapshots.stdout)
+            if not snapshot_rows:
+                raise OffsiteBackupError("snapshot_missing")
+            target = root / "restored"
+            _run([restic, "restore", "latest", "--target", str(target)], env=environment)
+            databases = sorted(target.rglob("garmin-*.db"))
+            if not databases:
+                databases = sorted(target.rglob("garmin.db"))
+            if not databases:
+                raise OffsiteBackupError("restored_database_missing")
+            restored_database = databases[-1]
+            validation = validate_sqlite(restored_database, dashboard_probe=True)
+            if not validation["ok"]:
+                raise OffsiteBackupError("restored_database_invalid")
 
-        payload = {
-            "ok": True,
-            "reason": "ok",
-            "asset": asset_name,
-            "snapshot_count": len(snapshot_rows),
-            "restored_database": restored_database.name,
-            "restored_size_bytes": validation["size_bytes"],
-            "latest_activity_date": validation["latest_activity_date"],
-            "latest_wellness_date": validation["latest_wellness_date"],
-            "data_age_days": validation["data_age_days"],
-            "athlete_count": validation["athlete_count"],
-            "active_activity_count": validation["active_activity_count"],
-            "wellness_count": validation["wellness_count"],
-            "dashboard_probe": validation["dashboard_probe"],
-            "data_stale": bool(validation.get("data_stale")),
-        }
-    except (OffsiteBackupError, OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
-        reason = str(exc) or exc.__class__.__name__
-        payload = {"ok": False, "reason": reason[:400]}
-    try:
-        _cleanup_restore_tree(root)
-    except (OffsiteBackupError, OSError, subprocess.SubprocessError) as exc:
-        payload = {"ok": False, "reason": str(exc)[:400] or "temp_cleanup_failed"}
+            payload = {
+                "ok": True,
+                "reason": "ok",
+                "asset": asset_name,
+                "snapshot_count": len(snapshot_rows),
+                "restored_database": restored_database.name,
+                "restored_size_bytes": validation["size_bytes"],
+                "latest_activity_date": validation["latest_activity_date"],
+                "latest_wellness_date": validation["latest_wellness_date"],
+                "data_age_days": validation["data_age_days"],
+                "athlete_count": validation["athlete_count"],
+                "active_activity_count": validation["active_activity_count"],
+                "wellness_count": validation["wellness_count"],
+                "dashboard_probe": validation["dashboard_probe"],
+                "data_stale": bool(validation.get("data_stale")),
+            }
+        except (OffsiteBackupError, OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+            reason = str(exc) or exc.__class__.__name__
+            payload = {"ok": False, "reason": reason[:400]}
+    finally:
+        try:
+            _cleanup_restore_tree(root)
+        except (OffsiteBackupError, OSError, subprocess.SubprocessError) as exc:
+            cleanup_error = str(exc)[:400] or "temp_cleanup_failed"
+    if cleanup_error is not None:
+        payload = {"ok": False, "reason": cleanup_error}
+    assert payload is not None
     _write_status(RESTORE_STATUS_FILE, payload)
     return payload
 

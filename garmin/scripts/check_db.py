@@ -4,6 +4,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("GARMIN_DATA_DIR", PROJECT_ROOT / "data"))
 DB = DATA_DIR / "garmin.db"

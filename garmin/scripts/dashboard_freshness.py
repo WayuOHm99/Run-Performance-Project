@@ -7,16 +7,8 @@ from contextlib import closing
 import pandas as pd
 import streamlit as st
 
-from dashboard_data import CACHE_TTL_SEC, connect_db, data_dir, load_latest_fetch
+from dashboard_data import BODY_FIELDS, CACHE_TTL_SEC, connect_db, data_dir, load_latest_fetch
 from dashboard_domain import to_bangkok_timestamp
-
-# Coverage means at least one displayed body metric, never completeness of every field.
-BODY_FIELDS = (
-    "resting_hr", "hrv_last_night", "hrv_weekly_avg", "hrv_status", "sleep_score",
-    "sleep_duration_sec", "body_battery_high", "body_battery_low", "bb_most_recent",
-    "stress_avg", "avg_waking_respiration", "avg_sleep_respiration",
-    "training_readiness", "recovery_time_min",
-)
 
 
 def summarize_dates(values, start, end, today):

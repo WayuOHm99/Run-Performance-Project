@@ -20,24 +20,38 @@ param(
 $ErrorActionPreference = "Stop"
 
 try {
-    $dir = Split-Path -Parent $LogPath
-    if ($dir -and -not (Test-Path $dir)) {
+    $logFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogPath)
+    $dir = Split-Path -Parent $logFull
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
     # หมุนไฟล์เมื่อโตเกินกำหนด — เก็บรุ่นก่อนหน้าไว้ 1 ชุด (.1) พอสำหรับไล่ย้อนปัญหา
-    if (Test-Path $LogPath) {
-        if ((Get-Item $LogPath).Length -gt ($MaxMB * 1MB)) {
-            $old = "$LogPath.1"
-            if (Test-Path $old) { Remove-Item $old -Force }
-            Move-Item $LogPath $old -Force
+    if (Test-Path -LiteralPath $logFull) {
+        if ((Get-Item -LiteralPath $logFull).Length -gt ($MaxMB * 1MB)) {
+            $old = "$logFull.1"
+            if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Force }
+            Move-Item -LiteralPath $logFull -Destination $old -Force
         }
     }
 
     # start-marker: เวลาเริ่มรอบนี้แบบ ISO — notify_sync ใช้ตัดสินว่า fetch_all
     # "เขียนสถานะรอบนี้จริงไหม" (ไม่ใช่เดาจากอายุไฟล์)
     if ($Marker) {
-        (Get-Date).ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $Marker
+        $markerFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Marker)
+        $markerDir = Split-Path -Parent $markerFull
+        if ($markerDir -and -not (Test-Path -LiteralPath $markerDir)) {
+            New-Item -ItemType Directory -Path $markerDir -Force | Out-Null
+        }
+        $markerLeaf = Split-Path -Leaf $markerFull
+        $markerTmp = Join-Path $markerDir ".${markerLeaf}.${PID}.$([guid]::NewGuid().ToString('N')).tmp"
+        try {
+            [System.IO.File]::WriteAllText($markerTmp, (Get-Date).ToString("o"), [System.Text.Encoding]::ASCII)
+            Move-Item -LiteralPath $markerTmp -Destination $markerFull -Force
+        }
+        finally {
+            Remove-Item -LiteralPath $markerTmp -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 catch {

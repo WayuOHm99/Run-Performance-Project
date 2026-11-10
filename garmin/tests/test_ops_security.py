@@ -450,7 +450,7 @@ class CiCoverageTests(unittest.TestCase):
         )
         windows_job = re.search(r"(?ms)^  windows-ops:\n(.*?)(?=^  \S|\Z)", source)[1]
         self.assertIn("runs-on: windows-latest", windows_job)
-        self.assertIn("astral-sh/setup-uv@v9.0.0", windows_job)
+        self.assertIn("astral-sh/setup-uv@v10.3.3", windows_job)
         self.assertRegex(windows_job, r"uv sync\b[^\n]*--frozen")
         self.assertIn('tzutil /s "SE Asia Standard Time"', windows_job)
         self.assertIn("GARMIN_DATA_DIR:", windows_job)

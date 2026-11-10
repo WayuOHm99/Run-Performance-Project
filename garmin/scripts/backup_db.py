@@ -224,9 +224,11 @@ def snapshot(src: Path, dest: Path) -> int:
     finally:
         source.close()
 
-    # สำเนาที่เปิดไม่ได้แย่กว่าไม่มีสำเนา — ตรวจก่อนเอาไปทับของเดิม
+    # สำเนาเป็นไฟล์นิ่งอ่านอย่างเดียว ไม่ต้องการ WAL — เปลี่ยนกลับเป็น rollback mode (DELETE)
+    # ตอนตรวจความสมบูรณ์ เพื่อไม่ให้ตัวอ่าน (health_report/offsite) สร้างไฟล์กำพร้า -wal/-shm ทิ้งไว้
     check = sqlite3.connect(str(tmp))
     try:
+        check.execute("PRAGMA journal_mode=DELETE")
         if check.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("สำเนาที่ได้ integrity_check ไม่ผ่าน")
         rows = check.execute("SELECT count(*) FROM fact_activity").fetchone()[0]

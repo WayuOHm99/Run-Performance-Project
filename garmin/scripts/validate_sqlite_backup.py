@@ -9,14 +9,17 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
-BANGKOK = ZoneInfo("Asia/Bangkok")
+BANGKOK = timezone(timedelta(hours=7), name="Asia/Bangkok")
 DEFAULT_MAX_AGE_DAYS = 7
 ESSENTIAL_TABLES = {
     "dim_athlete",

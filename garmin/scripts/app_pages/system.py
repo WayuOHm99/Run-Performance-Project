@@ -10,6 +10,7 @@ import streamlit as st
 
 import health_report
 from dashboard_context import page_context
+from dashboard_data import data_dir
 from dashboard_freshness import load_freshness, read_sync_summary
 
 ctx = page_context()
@@ -53,15 +54,18 @@ LEVEL_ORDER = {"ERROR": 0, "WARNING": 1, "OK": 2}
 
 
 @st.cache_data(ttl=120, show_spinner="กำลังตรวจสถานะระบบ…")
-def load_findings():
+def load_findings(current_data_dir: str):
     # เรียก schtasks ทีละ task จึงใช้เวลาราว 4 วินาที — แคช 2 นาทีพอสำหรับหน้าดูแลระบบ
+    previous = health_report.use_data_dir(current_data_dir)
     try:
         return [finding.to_dict() for finding in health_report.run_all_checks()], None
     except Exception as exc:  # หน้าดูแลระบบต้องไม่ล้มทั้งแอปเพราะตัวตรวจพัง
         return [], type(exc).__name__
+    finally:
+        health_report.use_data_dir(previous)
 
 
-findings, failure = ([], None) if ctx.demo_mode else load_findings()
+findings, failure = ([], None) if ctx.demo_mode else load_findings(str(data_dir()))
 if ctx.demo_mode:
     st.info("Demo ไม่ตรวจ Scheduled Task, token, backup หรือ heartbeat ของเครื่องจริง · "
             "ใช้สำหรับทดลองหน้าจอเท่านั้น")
@@ -75,12 +79,15 @@ else:
         st.metric("ต้องแก้", counts["ERROR"], border=True)
         st.metric("ควรดู", counts["WARNING"], border=True)
         st.metric("ปกติ", counts["OK"], border=True)
-    table = pd.DataFrame(sorted(findings, key=lambda f: (LEVEL_ORDER.get(f["level"], 3), f["check"])))
-    table = table.assign(ระดับ=table["level"].map(LEVEL_TEXT).fillna(table["level"]))
-    st.dataframe(
-        table[["ระดับ", "check", "message"]].rename(columns={"check": "รายการ", "message": "รายละเอียด"}),
-        hide_index=True, width="stretch",
-    )
+    if findings:
+        table = pd.DataFrame(sorted(findings, key=lambda f: (LEVEL_ORDER.get(f["level"], 3), f["check"])))
+        table = table.assign(ระดับ=table["level"].map(LEVEL_TEXT).fillna(table["level"]))
+        st.dataframe(
+            table[["ระดับ", "check", "message"]].rename(columns={"check": "รายการ", "message": "รายละเอียด"}),
+            hide_index=True, width="stretch",
+        )
+    else:
+        st.caption("ไม่มีรายการตรวจสถานะ")
 
 st.subheader("sync ล่าสุดรายคน", anchor=False)
 st.dataframe(pd.DataFrame(sync_rows), hide_index=True, width="stretch")

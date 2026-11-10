@@ -12,6 +12,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 try:
     import win_process
 except ModuleNotFoundError:

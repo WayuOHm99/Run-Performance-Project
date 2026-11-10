@@ -153,6 +153,18 @@ class NotificationPolicyTests(unittest.TestCase):
         stored = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertEqual(len(stored["conditions"]), 8)
 
+    def test_inactive_tombstones_older_than_thirty_days_are_pruned(self):
+        old_cond = self.condition("old:network")
+        fresh_cond = self.condition("fresh:network")
+        self.update([old_cond], minutes=0)
+        self.update([], minutes=10, observation_complete=True)  # old_cond becomes inactive at t+10m
+        self.update([fresh_cond], minutes=45 * 24 * 60, observation_complete=True)  # +45 days
+
+        stored = json.loads(self.state.read_text(encoding="utf-8"))
+        keys = [item["key"] for item in stored["conditions"]]
+        self.assertNotIn("old:network", keys)
+        self.assertIn("fresh:network", keys)
+
 
 if __name__ == "__main__":
     unittest.main()

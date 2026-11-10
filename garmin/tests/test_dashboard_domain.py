@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dashboard_modules import HELPERS  # noqa: E402
+from dashboard_modules import HELPERS
 
 
 class LatestPerFieldTests(unittest.TestCase):
@@ -109,7 +109,7 @@ class WeeklyTotalsTests(unittest.TestCase):
     def activity(when, kind, metres, seconds, zones=(0, 0, 0, 0, 0)):
         row = {"start_time_local": pd.Timestamp(when), "activity_type": kind,
                "distance_m": metres, "duration_sec": seconds}
-        row.update(dict(zip(HELPERS["HR_ZONE_COLUMNS"], zones)))
+        row.update(dict(zip(HELPERS["HR_ZONE_COLUMNS"], zones, strict=True)))
         return row
 
     def test_sums_are_plain_totals_of_what_garmin_recorded(self):
@@ -215,8 +215,12 @@ class DataAvailabilitySummaryTests(unittest.TestCase):
         fields = ("score", "recovery")
 
         def state(history, selected):
-            return summarize(fields, dict(zip(fields, history)), dict(zip(fields, selected)),
-                             {"score": "2026-08-17"})["state"]
+            return summarize(
+                fields,
+                dict(zip(fields, history, strict=True)),
+                dict(zip(fields, selected, strict=True)),
+                {"score": "2026-08-17"},
+            )["state"]
 
         self.assertEqual(state((5, 5), (1, 1)), "available")
         self.assertEqual(state((5, 0), (1, 0)), "partial")
@@ -267,10 +271,6 @@ class PersonalRecordTests(unittest.TestCase):
                          ["22:28", "21.22 km", "33,888 ก้าว"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class IntradaySeriesTests(unittest.TestCase):
     def test_a_long_gap_breaks_the_line_instead_of_bridging_it(self):
         points = pd.DataFrame({
@@ -290,3 +290,48 @@ class IntradaySeriesTests(unittest.TestCase):
                                "value": [30.0, None]})
         series = HELPERS["intraday_series"](points, "stress")
         self.assertTrue(pd.isna(series["ค่า"].iloc[1]))
+
+
+class NumericEdgeAndLocalTimestampTests(unittest.TestCase):
+    def test_infinite_and_boolean_values_never_crash_formatters(self):
+        for bad in (float("inf"), float("-inf"), True, False, float("nan")):
+            self.assertEqual(HELPERS["fmt_num"](bad), "–")
+            self.assertEqual(HELPERS["fmt_pace"](bad), "–")
+            self.assertEqual(HELPERS["fmt_sec"](bad), "–")
+            self.assertEqual(HELPERS["fmt_hours"](bad), "–")
+            self.assertEqual(HELPERS["fmt_recovery_time"](bad), "–")
+        row = pd.Series({"hr": float("inf"), "neg": float("-inf"), "ok": 52.0})
+        self.assertIsNone(HELPERS["value_of"](row, "hr"))
+        self.assertIsNone(HELPERS["value_of"](row, "neg"))
+        self.assertEqual(HELPERS["value_of"](row, "ok"), 52.0)
+
+    def test_naive_local_timestamp_is_interpreted_in_bangkok_not_utc(self):
+        # 2026-08-15 06:30 เวลาไทย = 2026-08-14T23:30:00Z ซึ่งเก่ากว่า 2026-08-15T00:30:00Z (07:30 ไทย)
+        # เดิม utc=True ตีความ 06:30 เป็น 06:30Z (ใหม่กว่า 00:30Z ผิดโซนไป 7 ชม.)
+        df = pd.DataFrame([
+            {
+                "calendar_date": date(2026, 8, 15),
+                "training_readiness": 65.0,
+                "readiness_timestamp_local": "2026-08-15T06:30:00.0",
+                "readiness_timestamp_utc": None,
+                "fetched_at": "2026-08-15T00:00:00Z",
+            },
+            {
+                "calendar_date": date(2026, 8, 15),
+                "training_readiness": 72.0,
+                "readiness_timestamp_local": None,
+                "readiness_timestamp_utc": "2026-08-15T00:30:00Z",
+                "fetched_at": "2026-08-15T00:31:00Z",
+            },
+        ])
+        snap = HELPERS["latest_field"](
+            df,
+            "training_readiness",
+            timestamp_columns=("readiness_timestamp_local", "readiness_timestamp_utc"),
+        )
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap["value"], 72.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

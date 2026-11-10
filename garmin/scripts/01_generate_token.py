@@ -16,6 +16,10 @@ import sys
 from getpass import getpass
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 try:  # normal run (scripts/ is on sys.path)
     import win_process
 except ModuleNotFoundError:  # loaded directly by importlib from any cwd

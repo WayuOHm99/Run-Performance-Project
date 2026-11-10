@@ -47,7 +47,8 @@ with st.container(horizontal=True):
     st.metric("วันที่ซ้อม", f"{days_trained} วัน", border=True)
 
 weeks = weekly_totals(activities, ctx.start_date, ctx.end_date)
-weeks["สัปดาห์"] = weeks["week"].dt.strftime("%d/%m")
+week_fmt = "%d/%m/%y" if weeks["week"].dt.year.nunique() > 1 else "%d/%m"
+weeks["สัปดาห์"] = weeks["week"].dt.strftime(week_fmt)
 weeks = weeks.rename(columns={"run_km": "ระยะวิ่ง (km)"})
 numeric_cols = ["ระยะวิ่ง (km)", "hours"]
 weeks[numeric_cols] = weeks[numeric_cols].round(1)

@@ -13,12 +13,15 @@ case "$payload" in *'"stop_hook_active": true'*|*'"stop_hook_active":true'*) exi
 cd "$ROOT" || exit 0
 [ -x "$PY" ] || exit 0
 
-changed=$( { git status --porcelain -- garmin 2>/dev/null | sed 's/^...//'
+changed=$( { git status --porcelain -uall -- garmin 2>/dev/null | sed 's/^...//'
              git diff --name-only main...HEAD -- garmin 2>/dev/null
            } | grep -E '\.py$' )
 [ -z "$changed" ] && exit 0
 
-out=$(cd "$ROOT/garmin" && "$PY" -m unittest discover -s tests 2>&1)
+TMP_DATA=$(mktemp -d)
+trap 'rm -rf "$TMP_DATA"' EXIT
+
+out=$(cd "$ROOT/garmin" && GARMIN_DATA_DIR="$TMP_DATA" PYTHONUTF8=1 "$PY" -m unittest discover -s tests 2>&1)
 status=$?
 [ $status -eq 0 ] && exit 0
 

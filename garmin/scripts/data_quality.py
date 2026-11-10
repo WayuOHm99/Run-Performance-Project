@@ -568,7 +568,7 @@ def partial_snapshot_findings(
     ).fetchone()
     row_missing = row is None
     if row_missing:
-        values = {field: None for field in monitored}
+        values = dict.fromkeys(monitored)
     else:
         values = dict(zip(monitored, row, strict=True))
 

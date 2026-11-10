@@ -12,6 +12,7 @@
 """
 
 import datetime
+import math
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -23,11 +24,29 @@ HR_ZONE_COLUMNS = ("hr_zone1_sec", "hr_zone2_sec", "hr_zone3_sec",
 HR_ZONE_LABELS = ("Z1", "Z2", "Z3", "Z4", "Z5")
 
 
+def _bad_num(value):
+    """True เมื่อค่าเป็น NULL, NaN, bool หรือ Inf/-Inf ที่แปลงเป็นตัวเลขปกติไม่ได้"""
+    if value is None or isinstance(value, bool) or pd.isna(value):
+        return True
+    try:
+        return not math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return True
+
+
+def _to_datetime(values, *, utc=False):
+    """แปลงวันที่/เวลาแบบผสม (' ', 'T', '.0', โซนเวลา) โดยไม่ล้มบน pandas 3"""
+    try:
+        return pd.to_datetime(values, format="ISO8601", errors="coerce", utc=utc)
+    except (TypeError, ValueError):
+        return pd.to_datetime(values, errors="coerce", utc=utc)
+
+
 # ---------------------------------------------------------------- รูปแบบค่า
 
 def fmt_num(value, suffix="", decimals=None):
-    """ตัวเลขที่ไม่โชว์ ``.0`` เกินจำเป็น และไม่รั่ว NaN ออกไปหน้าเว็บ"""
-    if value is None or pd.isna(value):
+    """ตัวเลขที่ไม่โชว์ ``.0`` เกินจำเป็น และไม่รั่ว NaN/Inf ออกไปหน้าเว็บ"""
+    if _bad_num(value):
         return "–"
     number = float(value)
     if decimals is None:
@@ -42,10 +61,11 @@ def fmt_text(value, fallback=""):
 
 def fmt_pace(pace_min_per_km):
     """เพซนาทีทศนิยมเป็น M:SS เช่น 5.75 -> 5:45"""
-    if pace_min_per_km is None or pd.isna(pace_min_per_km) or pace_min_per_km <= 0:
+    if _bad_num(pace_min_per_km) or float(pace_min_per_km) <= 0:
         return "–"
-    minutes = int(pace_min_per_km)
-    seconds = int(round((pace_min_per_km - minutes) * 60))
+    pace = float(pace_min_per_km)
+    minutes = int(pace)
+    seconds = int(round((pace - minutes) * 60))
     if seconds == 60:
         minutes, seconds = minutes + 1, 0
     return f"{minutes}:{seconds:02d}"
@@ -53,9 +73,9 @@ def fmt_pace(pace_min_per_km):
 
 def fmt_sec(sec):
     """วินาทีเป็น M:SS หรือ H:MM:SS เช่น 1323 -> 22:03, 14023 -> 3:53:43"""
-    if sec is None or pd.isna(sec):
+    if _bad_num(sec) or float(sec) < 0:
         return "–"
-    s = int(round(sec))
+    s = int(round(float(sec)))
     if s >= 3600:
         return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
     return f"{s // 60}:{s % 60:02d}"
@@ -63,7 +83,7 @@ def fmt_sec(sec):
 
 def fmt_hours(sec):
     """ระยะเวลายาว ๆ เช่นเวลานอน 27000 -> 7 ชม. 30 นาที"""
-    if sec is None or pd.isna(sec):
+    if _bad_num(sec):
         return "–"
     total_minutes = max(0, int(round(float(sec) / 60)))
     hours, minutes = divmod(total_minutes, 60)
@@ -76,7 +96,7 @@ def fmt_hours(sec):
 
 def fmt_recovery_time(minutes):
     """Garmin Recovery Time — หน่วยดิบจาก API คือนาที"""
-    if minutes is None or pd.isna(minutes):
+    if _bad_num(minutes):
         return "–"
     return fmt_hours(float(minutes) * 60)
 
@@ -110,7 +130,7 @@ def bangkok_date(now_utc=None):
 
 def to_bangkok_timestamp(value):
     """เวลา UTC ใน DB (รวมรูปแบบเก่าที่ไม่มีโซน) เป็นเวลาไทย"""
-    stamp = pd.to_datetime(value, errors="coerce", utc=True)
+    stamp = _to_datetime(value, utc=True)
     if pd.isna(stamp):
         return pd.NaT
     return stamp.tz_convert(BANGKOK)
@@ -122,7 +142,7 @@ def calendar_aligned_frame(df, date_column, period_start, period_end):
     if df is None or date_column not in getattr(df, "columns", ()):
         return pd.DataFrame({date_column: index})
     aligned = df.copy()
-    aligned[date_column] = pd.to_datetime(aligned[date_column], errors="coerce").dt.normalize()
+    aligned[date_column] = _to_datetime(aligned[date_column]).dt.normalize()
     aligned = aligned.dropna(subset=[date_column]).drop_duplicates(date_column, keep="last")
     return (
         aligned.set_index(date_column)
@@ -133,6 +153,25 @@ def calendar_aligned_frame(df, date_column, period_start, period_end):
 
 
 # ---------------------------------------------------------------- ค่าล่าสุดรายช่อง
+
+def _parse_source_timestamp_utc(series, column_name):
+    """แปลงเวลาต้นทางเป็น UTC โดยตีความคอลัมน์ ``*_local`` ที่ไม่มีโซนเป็นเวลาไทย"""
+    is_local = str(column_name).endswith("_local")
+    default_tz = BANGKOK if is_local else datetime.timezone.utc
+    values = []
+    for raw in series:
+        if raw is None or pd.isna(raw):
+            values.append(pd.NaT)
+            continue
+        stamp = _to_datetime(raw)
+        if pd.isna(stamp):
+            values.append(pd.NaT)
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize(default_tz)
+        values.append(stamp.tz_convert(datetime.timezone.utc))
+    return pd.Series(values, index=series.index, dtype="datetime64[ns, UTC]")
+
 
 def latest_field(df, column, timestamp_columns=()):
     """ค่าล่าสุดที่ไม่ใช่ NULL ของช่องเดียว เลือกแยกจากช่องอื่น
@@ -148,9 +187,7 @@ def latest_field(df, column, timestamp_columns=()):
     if candidates.empty:
         return None
 
-    candidates["_sort_calendar"] = pd.to_datetime(
-        candidates["calendar_date"], errors="coerce", utc=True
-    )
+    candidates["_sort_calendar"] = _to_datetime(candidates["calendar_date"], utc=True)
     candidates["_sort_source"] = pd.Series(
         pd.NaT, index=candidates.index, dtype="datetime64[ns, UTC]"
     )
@@ -158,12 +195,12 @@ def latest_field(df, column, timestamp_columns=()):
     for name in timestamp_columns:
         if name not in candidates.columns:
             continue
-        parsed = pd.to_datetime(candidates[name], errors="coerce", utc=True)
+        parsed = _parse_source_timestamp_utc(candidates[name], name)
         fill = candidates["_sort_source"].isna() & parsed.notna()
         candidates.loc[fill, "_sort_source"] = parsed[fill]
         candidates.loc[fill, "_source_column_used"] = name
     candidates["_sort_fetched"] = (
-        pd.to_datetime(candidates["fetched_at"], errors="coerce", utc=True)
+        _to_datetime(candidates["fetched_at"], utc=True)
         if "fetched_at" in candidates.columns else pd.NaT
     )
 
@@ -171,12 +208,12 @@ def latest_field(df, column, timestamp_columns=()):
         ["_sort_calendar", "_sort_source", "_sort_fetched"], na_position="first"
     ).iloc[-1]
     source_column = row.get("_source_column_used")
-    calendar = pd.to_datetime(row.get("calendar_date"), errors="coerce")
+    calendar = _to_datetime(row.get("calendar_date"))
     return {
         "value": row[column],
         "date": calendar.date() if pd.notna(calendar) else None,
-        "fetched_at": pd.to_datetime(row.get("fetched_at"), errors="coerce", utc=True),
-        "source_timestamp": (pd.to_datetime(row.get(source_column), errors="coerce")
+        "fetched_at": _to_datetime(row.get("fetched_at"), utc=True),
+        "source_timestamp": (_to_datetime(row.get(source_column))
                              if source_column else pd.NaT),
         "source_column": source_column,
         "row": row,
@@ -191,24 +228,32 @@ def day_row(df, day):
     """
     if df is None or df.empty or "calendar_date" not in df.columns:
         return None
-    dates = pd.to_datetime(df["calendar_date"], errors="coerce").dt.date
+    dates = _to_datetime(df["calendar_date"]).dt.date
     rows = df.loc[dates == pd.Timestamp(day).date()]
     return rows.iloc[-1] if not rows.empty else None
 
 
 def value_of(row, column):
-    """ค่าของช่องในแถว หรือ None — ไม่เปลี่ยน NULL เป็นศูนย์"""
+    """ค่าของช่องในแถว หรือ None — ไม่เปลี่ยน NULL/Inf เป็นศูนย์"""
     if row is None or column not in row.index:
         return None
     value = row[column]
-    return None if value is None or pd.isna(value) else value
+    if value is None or pd.isna(value):
+        return None
+    if not isinstance(value, (str, bytes, bool)):
+        try:
+            if not math.isfinite(float(value)):
+                return None
+        except (TypeError, ValueError):
+            pass
+    return value
 
 
 def last_before(df, column, day):
     """ค่าล่าสุดของช่องนี้ที่อยู่ *ก่อน* วันที่เลือก — ใช้แสดงแยก พร้อมวันที่ของมันเอง"""
     if df is None or df.empty or "calendar_date" not in df.columns:
         return None
-    dates = pd.to_datetime(df["calendar_date"], errors="coerce").dt.date
+    dates = _to_datetime(df["calendar_date"]).dt.date
     return latest_field(df.loc[dates < pd.Timestamp(day).date()], column)
 
 
@@ -284,12 +329,12 @@ def weekly_totals(activity_df, period_start, period_end):
         return result
 
     frame = activity_df.copy()
-    when = pd.to_datetime(frame["start_time_local"], errors="coerce")
-    frame["week"] = (when - pd.to_timedelta(when.dt.weekday, unit="D")).dt.normalize()
+    when = _to_datetime(frame["start_time_local"])
+    frame["week"] = (when - pd.to_timedelta(when.dt.day_of_week, unit="D")).dt.normalize()
     is_run = frame.get("activity_type", pd.Series(index=frame.index, dtype=object)).isin(RUN_TYPES)
     frame["run_km"] = pd.to_numeric(frame.get("distance_m"), errors="coerce").where(is_run) / 1000
     frame["hours"] = pd.to_numeric(frame.get("duration_sec"), errors="coerce") / 3600
-    for column, label in zip(HR_ZONE_COLUMNS, HR_ZONE_LABELS):
+    for column, label in zip(HR_ZONE_COLUMNS, HR_ZONE_LABELS, strict=True):
         frame[label] = (pd.to_numeric(frame[column], errors="coerce") / 60
                         if column in frame.columns else float("nan"))
     sums = frame.groupby("week")[columns[1:]].sum(min_count=1)
@@ -402,16 +447,17 @@ def personal_record_rows(records):
     rows = []
     for _, record in records.iterrows():
         type_id, value = int(record["record_type_id"]), record["value"]
+        valid = not _bad_num(value)
         if type_id in time_ids:
             shown = fmt_sec(value)
         elif type_id in km_ids:
-            shown = f"{value / 1000:.2f} km" if pd.notna(value) else "–"
+            shown = f"{float(value) / 1000:.2f} km" if valid else "–"
         elif type_id in meter_ids:
-            shown = f"{value:,.0f} m" if pd.notna(value) else "–"
+            shown = f"{float(value):,.0f} m" if valid else "–"
         elif type_id in step_ids:
-            shown = f"{value:,.0f} ก้าว" if pd.notna(value) else "–"
+            shown = f"{float(value):,.0f} ก้าว" if valid else "–"
         else:
-            shown = f"{value:,.0f}" if pd.notna(value) else "–"
+            shown = f"{float(value):,.0f}" if valid else "–"
         achieved = record["achieved_date"]
         rows.append({
             "รายการ": personal_record_label(type_id, record["record_label"]),
@@ -434,11 +480,13 @@ def activity_rows(activity_df):
     """
     if activity_df is None or activity_df.empty:
         return pd.DataFrame()
-    frame = activity_df.sort_values("start_time_local", ascending=False)
-    when = pd.to_datetime(frame["start_time_local"], errors="coerce")
+    frame = activity_df.copy()
+    frame["_when"] = _to_datetime(frame["start_time_local"])
+    frame = frame.sort_values("_when", ascending=False, na_position="last", kind="stable")
+    when = frame["_when"]
     distance = pd.to_numeric(frame["distance_m"], errors="coerce")
     return pd.DataFrame({
-        "วันเวลา": when.dt.strftime("%d/%m %H:%M"),
+        "วันเวลา": when.dt.strftime("%d/%m %H:%M").fillna("–"),
         "กิจกรรม": [activity_title(row) for _, row in frame.iterrows()],
         "ระยะ (km)": (distance / 1000).where(distance > 0).round(2),
         "เวลา": frame["duration_sec"].map(fmt_sec),
@@ -470,7 +518,7 @@ def intraday_series(points, metric):
     gap = pd.Timedelta(minutes=INTRADAY_GAP_MINUTES)
     for athlete_id, group in frame.groupby("athlete_id"):
         previous = None
-        for ts, value in zip(group["ts"], group["value"]):
+        for ts, value in zip(group["ts"], group["value"], strict=True):
             if previous is not None and ts - previous > gap:
                 rows.append((athlete_id, previous + gap / 2, float("nan")))
             rows.append((athlete_id, ts, value))

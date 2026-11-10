@@ -9,9 +9,7 @@
 เคสที่สองจะได้ข้อมูลของเคสแรก (เจอตอน readiness=True ให้ผลเท่ากับ readiness=False เป๊ะ)
 """
 
-import datetime
 import importlib.util
-import math
 import os
 import sqlite3
 import tempfile
@@ -28,7 +26,7 @@ TRAINING_PAGE = "app_pages/training.py"
 ESTIMATES_PAGE = "app_pages/estimates.py"
 SESSION_PAGE = "app_pages/session.py"
 SYSTEM_PAGE = "app_pages/system.py"
-ALL_PAGES = (TEAM_PAGE, BODY_PAGE, TRAINING_PAGE, ESTIMATES_PAGE, SESSION_PAGE)
+ALL_PAGES = (TEAM_PAGE, BODY_PAGE, TRAINING_PAGE, ESTIMATES_PAGE, SESSION_PAGE, SYSTEM_PAGE)
 
 
 
@@ -53,35 +51,6 @@ schema = load_script("garmin_schema_for_dashboard_tabs", "02_init_schema.py")
 # วันของเครื่องจะช้ากว่าวันไทยหนึ่งวัน ข้อมูลที่ปั้นเลื่อนไปทั้งชุด แล้วหน้าต่างย้อนหลัง
 # นับได้ 27/28 คืนแทน 28/28 (CI แดงจริง 29 ส.ค. 69 ตอน 21:13 UTC)
 LAST_DAY = load_script("garmin_dashboard_domain_for_tests", "dashboard_domain.py").bangkok_date()
-
-
-def is_missing(value):
-    """ช่องว่างบนเส้นกราฟมาถึงเทสในรูป ``None`` หรือ ``NaN`` แล้วแต่ชนิดคอลัมน์"""
-    return value is None or (isinstance(value, float) and math.isnan(value))
-
-
-def visible(block, kind):
-    """คืนของชนิด ``kind`` ที่โค้ชเห็นทันทีโดยไม่ต้องกางอะไร
-
-    ``tab.get(kind)`` แผ่ของที่อยู่ใน ``st.expander`` ออกมาปนด้วย ทำให้นับ "ของที่เห็น
-    ตอนเปิดหน้า" ไม่ได้ — ตัวที่พับอยู่โผล่มาเป็น block ชนิด ``Status`` ในผัง element
-    ของ Streamlit 1.61 ฟังก์ชันนี้จึงเดินผังเองแล้วหยุดที่ block นั้น
-    """
-    found = []
-
-    def walk(node):
-        children = getattr(node, "children", None)
-        if isinstance(children, dict):
-            children = list(children.values())
-        for child in children or []:
-            if type(child).__name__ in ("Status", "Expander"):
-                continue
-            if type(child).__name__.lower() == kind.lower():
-                found.append(child)
-            walk(child)
-
-    walk(block)
-    return found
 
 
 def new_test_db(directory):

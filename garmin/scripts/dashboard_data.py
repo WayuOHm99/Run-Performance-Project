@@ -5,6 +5,7 @@
 ไม่ใช่สำเนาต่อหน้า
 """
 
+from contextlib import closing
 import datetime
 import os
 import sqlite3
@@ -13,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from dashboard_domain import RUN_TYPES, device_inventory_labels  # noqa: F401
+from dashboard_domain import RUN_TYPES, _to_datetime, device_inventory_labels  # noqa: F401
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -41,12 +42,23 @@ def connect_db():
     conn.execute("PRAGMA query_only = ON")
     return conn
 
+def _next_day_str(value):
+    return (datetime.date.fromisoformat(str(value)[:10]) + datetime.timedelta(days=1)).isoformat()
+
+
+# ช่องข้อมูลในหน้าร่างกาย — มีอย่างน้อยหนึ่งช่องถือว่าวันนั้นได้รับข้อมูลสุขภาพจริง
+BODY_FIELDS = (
+    "resting_hr", "hrv_last_night", "hrv_weekly_avg", "hrv_status", "sleep_score",
+    "sleep_duration_sec", "body_battery_high", "body_battery_low", "bb_most_recent",
+    "stress_avg", "avg_waking_respiration", "avg_sleep_respiration",
+    "training_readiness", "recovery_time_min",
+)
+
+
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_athletes():
-    conn = connect_db()
-    df = pd.read_sql_query("SELECT athlete_id, display_name, slug FROM dim_athlete", conn)
-    conn.close()
-    return df
+    with closing(connect_db()) as conn:
+        return pd.read_sql_query("SELECT athlete_id, display_name, slug FROM dim_athlete", conn)
 
 # คอลัมน์ที่เป็นข้อความ (ที่เหลือ coerce เป็นตัวเลขทั้งหมด กัน object dtype ตอนคอลัมน์ NULL ล้วน)
 _WELLNESS_TEXT = {
@@ -97,14 +109,13 @@ DATA_AVAILABILITY_GROUPS = (
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_wellness_data(athlete_id, start_date, end_date):
-    conn = connect_db()
     query = """
         SELECT * FROM fact_daily_wellness
         WHERE athlete_id = ? AND calendar_date >= ? AND calendar_date <= ?
         ORDER BY calendar_date ASC
     """
-    df = pd.read_sql_query(query, conn, params=(athlete_id, start_date, end_date))
-    conn.close()
+    with closing(connect_db()) as conn:
+        df = pd.read_sql_query(query, conn, params=(athlete_id, start_date, end_date))
     for col in df.columns:
         if col not in _WELLNESS_TEXT:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -112,15 +123,16 @@ def load_wellness_data(athlete_id, start_date, end_date):
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_activity_data(athlete_id, start_date, end_date):
-    conn = connect_db()
     query = """
         SELECT * FROM fact_activity
-        WHERE athlete_id = ? AND start_time_local >= ? AND start_time_local <= ?
+        WHERE athlete_id = ? AND start_time_local >= ? AND start_time_local < ?
           AND deleted_at IS NULL
-        ORDER BY start_time_local ASC
+        ORDER BY REPLACE(start_time_local, 'T', ' ') ASC
     """
-    df = pd.read_sql_query(query, conn, params=(athlete_id, start_date, f"{end_date} 23:59:59"))
-    conn.close()
+    with closing(connect_db()) as conn:
+        df = pd.read_sql_query(
+            query, conn, params=(athlete_id, str(start_date)[:10], _next_day_str(end_date))
+        )
     for col in df.columns:
         if col not in _ACTIVITY_TEXT:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -129,9 +141,8 @@ def load_activity_data(athlete_id, start_date, end_date):
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_data_availability(athlete_id, start_date, end_date):
     """Return all-history and selected-range evidence for Dashboard metric groups."""
-    conn = connect_db()
     result = {}
-    try:
+    with closing(connect_db()) as conn:
         for table in {group["table"] for group in DATA_AVAILABILITY_GROUPS}:
             fields = tuple(
                 field
@@ -146,10 +157,10 @@ def load_data_availability(athlete_id, start_date, end_date):
             for field in fields:
                 expressions.extend((
                     f'COUNT({field}) AS "{field}__history"',
-                    f'COUNT(CASE WHEN {date_expr} >= ? AND {date_expr} <= ? '
-                    f'THEN {field} END) AS "{field}__selected"',
-                    f'MAX(CASE WHEN {field} IS NOT NULL THEN {date_expr} END) '
-                    f'AS "{field}__latest"',
+                    (f'COUNT(CASE WHEN {date_expr} >= ? AND {date_expr} <= ? '
+                     f'THEN {field} END) AS "{field}__selected"'),
+                    (f'MAX(CASE WHEN {field} IS NOT NULL THEN {date_expr} END) '
+                     f'AS "{field}__latest"'),
                 ))
             active_filter = " AND deleted_at IS NULL" if table == "fact_activity" else ""
             params = []
@@ -163,7 +174,7 @@ def load_data_availability(athlete_id, start_date, end_date):
             )
             columns = [description[0] for description in cursor.description]
             row = cursor.fetchone()
-            values = dict(zip(columns, row))
+            values = dict(zip(columns, row, strict=True))
             result[table] = {
                 field: {
                     "history_count": values[f"{field}__history"],
@@ -172,26 +183,23 @@ def load_data_availability(athlete_id, start_date, end_date):
                 }
                 for field in fields
             }
-    finally:
-        conn.close()
     return result
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def athlete_has_training_readiness(athlete_id):
     """บัญชีนี้เคยได้รับ Training Readiness หรือไม่ (ไม่ใช้ฟันธงรุ่นนาฬิกา)."""
-    conn = connect_db()
-    n = conn.execute(
-        "SELECT COUNT(*) FROM fact_daily_wellness "
-        "WHERE athlete_id = ? AND training_readiness IS NOT NULL",
-        (athlete_id,)).fetchone()[0]
-    conn.close()
+    with closing(connect_db()) as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM fact_daily_wellness "
+            "WHERE athlete_id = ? AND training_readiness IS NOT NULL",
+            (athlete_id,),
+        ).fetchone()[0]
     return n > 0
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_athlete_devices(athlete_id):
     """Load recently seen device labels when the optional inventory table exists."""
-    conn = connect_db()
-    try:
+    with closing(connect_db()) as conn:
         exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dim_athlete_device'"
         ).fetchone()
@@ -215,12 +223,8 @@ def load_athlete_devices(athlete_id):
             f"SELECT {select_columns} FROM dim_athlete_device WHERE athlete_id = ?{order}",
             (athlete_id,),
         ).fetchall()
-    finally:
-        conn.close()
 
-    records = []
-    for row in rows:
-        records.append(dict(zip(selected_columns, row)))
+    records = [dict(zip(selected_columns, row, strict=True)) for row in rows]
     return device_inventory_labels(records, stale_days=90)
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
@@ -230,30 +234,28 @@ def load_first_dashboard_date(athlete_id):
     รวม activity, wellness และ race prediction; PR/body composition มีตรรกะโหลด
     ทั้งประวัติแยกอยู่แล้ว จึงไม่ดึงวันเก่ามากของสองตารางนั้นมาขยายกราฟสุขภาพให้ว่าง.
     """
-    conn = connect_db()
-    row = conn.execute(
-        """SELECT MIN(calendar_date) FROM (
-               SELECT SUBSTR(start_time_local, 1, 10) AS calendar_date
-               FROM fact_activity
-               WHERE athlete_id = ? AND deleted_at IS NULL
-               UNION ALL
-               SELECT calendar_date FROM fact_daily_wellness WHERE athlete_id = ?
-               UNION ALL
-               SELECT calendar_date FROM fact_race_prediction WHERE athlete_id = ?
-           )
-           WHERE calendar_date IS NOT NULL""",
-        (athlete_id, athlete_id, athlete_id),
-    ).fetchone()
-    conn.close()
+    with closing(connect_db()) as conn:
+        row = conn.execute(
+            """SELECT MIN(calendar_date) FROM (
+                   SELECT SUBSTR(start_time_local, 1, 10) AS calendar_date
+                   FROM fact_activity
+                   WHERE athlete_id = ? AND deleted_at IS NULL
+                   UNION ALL
+                   SELECT calendar_date FROM fact_daily_wellness WHERE athlete_id = ?
+                   UNION ALL
+                   SELECT calendar_date FROM fact_race_prediction WHERE athlete_id = ?
+               )
+               WHERE calendar_date IS NOT NULL""",
+            (athlete_id, athlete_id, athlete_id),
+        ).fetchone()
     return datetime.date.fromisoformat(row[0]) if row and row[0] else None
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_splits(activity_id):
-    conn = connect_db()
-    df = pd.read_sql_query(
-        "SELECT * FROM fact_activity_split WHERE activity_id = ? ORDER BY split_num ASC",
-        conn, params=(activity_id,))
-    conn.close()
+    with closing(connect_db()) as conn:
+        df = pd.read_sql_query(
+            "SELECT * FROM fact_activity_split WHERE activity_id = ? ORDER BY split_num ASC",
+            conn, params=(activity_id,))
     for col in df.columns:
         if col not in ("intensity_type",):  # text
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -262,28 +264,26 @@ def load_splits(activity_id):
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_race_predictions(athlete_id, start_date, end_date):
     """Garmin ทำนายเวลาแข่ง 5K/10K/HM/FM รายวัน (จาก fact_race_prediction)"""
-    conn = connect_db()
-    df = pd.read_sql_query(
-        """SELECT calendar_date, time_5k_sec, time_10k_sec, time_half_sec, time_full_sec
-           FROM fact_race_prediction
-           WHERE athlete_id = ? AND calendar_date >= ? AND calendar_date <= ?
-           ORDER BY calendar_date ASC""",
-        conn, params=(athlete_id, start_date, end_date))
-    conn.close()
+    with closing(connect_db()) as conn:
+        df = pd.read_sql_query(
+            """SELECT calendar_date, time_5k_sec, time_10k_sec, time_half_sec, time_full_sec
+               FROM fact_race_prediction
+               WHERE athlete_id = ? AND calendar_date >= ? AND calendar_date <= ?
+               ORDER BY calendar_date ASC""",
+            conn, params=(athlete_id, start_date, end_date))
     for col in df.columns:
         if col != "calendar_date":
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["calendar_date"] = pd.to_datetime(df["calendar_date"])
+    df["calendar_date"] = _to_datetime(df["calendar_date"])
     return df
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_personal_records(athlete_id):
-    conn = connect_db()
-    df = pd.read_sql_query(
-        """SELECT record_type_id, record_label, value, achieved_date
-           FROM fact_personal_record WHERE athlete_id = ? ORDER BY record_type_id ASC""",
-        conn, params=(athlete_id,))
-    conn.close()
+    with closing(connect_db()) as conn:
+        df = pd.read_sql_query(
+            """SELECT record_type_id, record_label, value, achieved_date
+               FROM fact_personal_record WHERE athlete_id = ? ORDER BY record_type_id ASC""",
+            conn, params=(athlete_id,))
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     return df
 
@@ -291,59 +291,37 @@ def load_personal_records(athlete_id):
 def load_body_composition(athlete_id):
     """น้ำหนัก/BMI/ไขมันที่ Garmin เคยส่ง — โหลดทั้งประวัติเพื่อไม่ซ่อนค่าล่าสุด
     เพียงเพราะอยู่นอกช่วงวิเคราะห์ 30 วันที่เลือกใน sidebar."""
-    conn = connect_db()
-    df = pd.read_sql_query(
-        """SELECT calendar_date, weight_kg, bmi, body_fat_pct
-           FROM fact_body_composition
-           WHERE athlete_id = ?
-           ORDER BY calendar_date ASC""",
-        conn,
-        params=(athlete_id,),
-    )
-    conn.close()
+    with closing(connect_db()) as conn:
+        df = pd.read_sql_query(
+            """SELECT calendar_date, weight_kg, bmi, body_fat_pct
+               FROM fact_body_composition
+               WHERE athlete_id = ?
+               ORDER BY calendar_date ASC""",
+            conn,
+            params=(athlete_id,),
+        )
     if not df.empty:
-        df["calendar_date"] = pd.to_datetime(df["calendar_date"], errors="coerce")
+        df["calendar_date"] = _to_datetime(df["calendar_date"])
         for column in ("weight_kg", "bmi", "body_fat_pct"):
             df[column] = pd.to_numeric(df[column], errors="coerce")
     return df
 
 
-
-
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def load_team_activities(start_date, end_date):
     """กิจกรรมของทุกคนในช่วงวันที่ — ฟีดกิจกรรมล่าสุดบนหน้าทีม"""
-    conn = connect_db()
-    df = pd.read_sql_query(
-        """SELECT a.display_name, f.*
-           FROM fact_activity f JOIN dim_athlete a ON a.athlete_id = f.athlete_id
-           WHERE f.start_time_local >= ? AND f.start_time_local <= ?
-             AND f.deleted_at IS NULL
-           ORDER BY f.start_time_local DESC""",
-        conn, params=(start_date, f"{end_date} 23:59:59"))
-    conn.close()
+    with closing(connect_db()) as conn:
+        df = pd.read_sql_query(
+            """SELECT a.display_name, f.*
+               FROM fact_activity f JOIN dim_athlete a ON a.athlete_id = f.athlete_id
+               WHERE f.start_time_local >= ? AND f.start_time_local < ?
+                 AND f.deleted_at IS NULL
+               ORDER BY REPLACE(f.start_time_local, 'T', ' ') DESC""",
+            conn, params=(str(start_date)[:10], _next_day_str(end_date)))
     for col in df.columns:
         if col not in _ACTIVITY_TEXT and col != "display_name":
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
-
-
-@st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
-def load_latest_activity(athlete_id):
-    """กิจกรรมล่าสุดหนึ่งรายการ ไม่ว่าจะเก่าแค่ไหน — None ถ้ายังไม่เคยมี"""
-    conn = connect_db()
-    df = pd.read_sql_query(
-        """SELECT * FROM fact_activity
-           WHERE athlete_id = ? AND deleted_at IS NULL
-           ORDER BY start_time_local DESC LIMIT 1""",
-        conn, params=(athlete_id,))
-    conn.close()
-    if df.empty:
-        return None
-    for col in df.columns:
-        if col not in _ACTIVITY_TEXT:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.iloc[0].to_dict()
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
@@ -355,18 +333,15 @@ def load_latest_fetch(athlete_id=None):
     """
     where = "athlete_id = ? AND " if athlete_id is not None else ""
     params = (athlete_id,) if athlete_id is not None else ()
-    conn = connect_db()
-    activity = conn.execute(
-        f"SELECT MAX(fetched_at) FROM fact_activity WHERE {where}deleted_at IS NULL",
-        params).fetchone()[0]
-    wellness = conn.execute(
-        f"""SELECT MAX(fetched_at) FROM fact_daily_wellness
-            WHERE {where}(resting_hr IS NOT NULL OR sleep_score IS NOT NULL
-                          OR body_battery_high IS NOT NULL OR hrv_last_night IS NOT NULL
-                          OR bb_most_recent IS NOT NULL)""",
-        params).fetchone()[0]
-    conn.close()
-    stamps = [pd.to_datetime(value, errors="coerce", utc=True) for value in (activity, wellness)]
+    present = " OR ".join(f"{field} IS NOT NULL" for field in BODY_FIELDS)
+    with closing(connect_db()) as conn:
+        activity = conn.execute(
+            f"SELECT MAX(fetched_at) FROM fact_activity WHERE {where}deleted_at IS NULL",
+            params).fetchone()[0]
+        wellness = conn.execute(
+            f"SELECT MAX(fetched_at) FROM fact_daily_wellness WHERE {where}({present})",
+            params).fetchone()[0]
+    stamps = [_to_datetime(value, utc=True) for value in (activity, wellness)]
     stamps = [stamp for stamp in stamps if pd.notna(stamp)]
     return max(stamps) if stamps else None
 
@@ -378,8 +353,7 @@ def load_intraday(day, athlete_ids=None):
     คืน DataFrame ว่างถ้าฐานยังไม่มีตาราง (ยังไม่ได้รัน 02_init_schema.py รุ่นใหม่)
     เวลาแปลงเป็นเวลาไทยสำหรับแสดงผล ค่า NULL คงเป็น NULL (ช่วงที่วัดไม่ได้)
     """
-    conn = connect_db()
-    try:
+    with closing(connect_db()) as conn:
         exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='fact_wellness_intraday'"
         ).fetchone()
@@ -393,8 +367,6 @@ def load_intraday(day, athlete_ids=None):
         df = pd.read_sql_query(
             "SELECT athlete_id, metric, ts_utc, value FROM fact_wellness_intraday "
             f"WHERE calendar_date = ?{where} ORDER BY ts_utc", conn, params=params)
-    finally:
-        conn.close()
-    df["ts"] = pd.to_datetime(df["ts_utc"], utc=True).dt.tz_convert("Asia/Bangkok").dt.tz_localize(None)
+    df["ts"] = _to_datetime(df["ts_utc"], utc=True).dt.tz_convert("Asia/Bangkok").dt.tz_localize(None)
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     return df.drop(columns="ts_utc")

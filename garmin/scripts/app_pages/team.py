@@ -22,6 +22,7 @@ from dashboard_data import (
 )
 from dashboard_domain import (
     INTRADAY_METRICS,
+    _to_datetime,
     activity_rows,
     activity_title,
     day_row,
@@ -67,9 +68,10 @@ with st.container(horizontal=True, vertical_alignment="bottom"):
     st.button("วันนี้", icon=":material/today:", on_click=go_today, key="team-today",
               disabled=st.session_state[DAY_KEY] == today)
 day = st.session_state[DAY_KEY]
+day_word = "วันนี้" if day == today else "วันนั้น"
 st.caption(
     f"ข้อมูลของวันที่ {day.strftime('%d/%m/%Y')} ตามปฏิทินของ Garmin (เวลาไทย) · "
-    "Sleep/HRV คือคืนที่ตื่นเช้าวันนี้ · ค่าที่ไม่มีของวันนี้จะบอกค่าครั้งก่อนแยกพร้อมวันที่")
+    f"Sleep/HRV คือคืนที่ตื่นเช้า{day_word} · ค่าที่ไม่มีของ{day_word}จะบอกค่าครั้งก่อนแยกพร้อมวันที่")
 
 day_activities = load_team_activities(day.isoformat(), day.isoformat())
 suspects = duplicate_suspects(day_activities)
@@ -81,11 +83,11 @@ def metric(label, value, note=None):
 
 
 def missing_note(wellness, column, unit=""):
-    """ค่าของวันนี้ไม่มี → บอกค่าครั้งก่อนพร้อมวันที่ ให้เห็นว่าเป็นคนละวันชัด ๆ"""
+    """ค่าของวันที่เลือกไม่มี → บอกค่าครั้งก่อนพร้อมวันที่ ให้เห็นว่าเป็นคนละวันชัด ๆ"""
     previous = last_before(wellness, column, day)
     if not previous:
-        return "ไม่มีของวันนี้"
-    return f"ไม่มีของวันนี้ · ครั้งก่อน {fmt_num(previous['value'], unit)} ({previous['date']:%d/%m})"
+        return f"ไม่มีของ{day_word}"
+    return f"ไม่มีของ{day_word} · ครั้งก่อน {fmt_num(previous['value'], unit)} ({previous['date']:%d/%m})"
 
 
 def athlete_card(athlete, order):
@@ -152,11 +154,16 @@ def athlete_card(athlete, order):
         mine = day_activities[day_activities["athlete_id"] == aid] if not day_activities.empty \
             else day_activities
         if mine.empty:
-            st.caption(":material/directions_run: ไม่มีกิจกรรมในวันนี้")
-        for _, activity in mine.sort_values("start_time_local").iterrows():
+            st.caption(f":material/directions_run: ไม่มีกิจกรรมใน{day_word}")
+        else:
+            mine = mine.assign(_when=_to_datetime(mine["start_time_local"])).sort_values(
+                "_when", na_position="last"
+            )
+        for _, activity in mine.iterrows():
             distance = activity.get("distance_m")
+            when = activity.get("_when")
             parts = [
-                pd.to_datetime(activity["start_time_local"]).strftime("%H:%M"),
+                when.strftime("%H:%M") if pd.notna(when) else None,
                 activity_title(activity),
                 f"{distance / 1000:.2f} km" if pd.notna(distance) and distance > 0 else None,
                 fmt_sec(activity.get("duration_sec")),
@@ -177,35 +184,39 @@ athletes = ctx.athletes_df.to_dict("records")
 for row_start in range(0, len(athletes), 3):
     columns = st.columns(3)
     for column, (order, athlete) in zip(
-            columns, enumerate(athletes[row_start:row_start + 3], start=row_start)):
+            columns, enumerate(athletes[row_start:row_start + 3], start=row_start), strict=False):
         with column:
             athlete_card(athlete, order)
 
 st.subheader("เทียบระหว่างวันทั้งทีม", anchor=False)
 intraday = load_intraday(day)
 if intraday.empty:
-    st.caption("ยังไม่มีข้อมูลระหว่างวันของวันนี้")
+    st.caption(f"ยังไม่มีข้อมูลระหว่างวันของ{day_word}")
 else:
     labels = {key: label for key, (label, _) in INTRADAY_METRICS.items()}
     chosen = st.segmented_control("ค่า", options=list(labels), format_func=labels.get,
                                   default="heart_rate", required=True, key="team_intraday_metric",
                                   label_visibility="collapsed")
-    names = dict(zip(ctx.athletes_df["athlete_id"], ctx.athletes_df["display_name"]))
+    names = ctx.athlete_labels
     series = intraday_series(intraday, chosen)
     if series["ค่า"].notna().any():
         st.altair_chart(intraday_chart(series, day, y_title=INTRADAY_METRICS[chosen][1],
                                        names=names, height=240), width="stretch")
         st.caption("แกนเวลาเดียวกัน 00:00–24:00 · เส้นขาด = ช่วงที่ไม่มีข้อมูลจากนาฬิกา")
     else:
-        st.caption(f"ไม่มีข้อมูล {labels[chosen]} ระหว่างวันของวันนี้")
+        st.caption(f"ไม่มีข้อมูล {labels[chosen]} ระหว่างวันของ{day_word}")
 
-st.subheader("กิจกรรมของทีมในวันนี้", anchor=False)
+st.subheader(f"กิจกรรมของทีมใน{day_word}", anchor=False)
 if day_activities.empty:
-    st.caption("ไม่มีกิจกรรมที่ Garmin บันทึกในวันนี้")
+    st.caption(f"ไม่มีกิจกรรมที่ Garmin บันทึกใน{day_word}")
 else:
-    ordered = day_activities.sort_values("start_time_local", ascending=False)
+    ordered = day_activities.assign(_when=_to_datetime(day_activities["start_time_local"])).sort_values(
+        ["_when", "activity_id"], ascending=[False, False], na_position="last", kind="stable"
+    )
     table = activity_rows(ordered)
-    table.insert(1, "นักกีฬา", ordered["display_name"].reset_index(drop=True))
+    table.insert(1, "นักกีฬา", ordered["athlete_id"].map(ctx.athlete_labels).fillna(
+        ordered["display_name"]
+    ).reset_index(drop=True))
     table["ตรวจสอบ"] = ["อาจซ้ำ" if int(aid) in suspects else ""
                         for aid in ordered["activity_id"]]
     st.dataframe(

@@ -310,63 +310,65 @@ def init_schema(db_path: Path | None = None):
         db_path = DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
-    # WAL mode: อ่าน (dashboard) กับ เขียน (sync) ทำพร้อมกันได้ ไม่ล็อกกัน —
-    # เป็นคุณสมบัติของไฟล์ ตั้งครั้งเดียวติดถาวร (แก้อาการ "database is locked"
-    # ตอนเปิด dashboard ค้างแล้ว sync อัตโนมัติเขียนไม่ได้ 22 ก.ค. 69)
-    wal_mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-    conn.execute("PRAGMA busy_timeout=30000")   # ถ้าล็อกจริง รอ 30 วิ แทนล้มทันที
-    cur = conn.cursor()
+    try:
+        # WAL mode: อ่าน (dashboard) กับ เขียน (sync) ทำพร้อมกันได้ ไม่ล็อกกัน —
+        # เป็นคุณสมบัติของไฟล์ ตั้งครั้งเดียวติดถาวร (แก้อาการ "database is locked"
+        # ตอนเปิด dashboard ค้างแล้ว sync อัตโนมัติเขียนไม่ได้ 22 ก.ค. 69)
+        wal_mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        conn.execute("PRAGMA busy_timeout=30000")   # ถ้าล็อกจริง รอ 30 วิ แทนล้มทันที
+        cur = conn.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS dim_athlete (
-        athlete_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        slug             TEXT    NOT NULL UNIQUE,
-        display_name     TEXT    NOT NULL,
-        garmin_full_name TEXT,
-        created_at       TEXT    DEFAULT (datetime('now'))
-    )
-    """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS dim_athlete (
+            athlete_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            slug             TEXT    NOT NULL UNIQUE,
+            display_name     TEXT    NOT NULL,
+            garmin_full_name TEXT,
+            created_at       TEXT    DEFAULT (datetime('now'))
+        )
+        """)
 
-    _create(cur, "dim_athlete_device", ATHLETE_DEVICE_COLUMNS,
-            ",\n        PRIMARY KEY (athlete_id, device_id)")
-    _create(cur, "fact_activity", ACTIVITY_COLUMNS, ",\n        UNIQUE(activity_id) ON CONFLICT REPLACE")
-    _create(cur, "fact_activity_split", SPLIT_COLUMNS,
-            ",\n        PRIMARY KEY (activity_id, split_num) ON CONFLICT REPLACE")
-    _create(cur, "fact_daily_wellness", WELLNESS_COLUMNS,
-            ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
-    _create(cur, "fact_wellness_intraday", WELLNESS_INTRADAY_COLUMNS,
-            ",\n        PRIMARY KEY (athlete_id, metric, ts_utc)")
-    _create(cur, "fact_race_prediction", RACE_PREDICTION_COLUMNS,
-            ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
-    _create(cur, "fact_personal_record", PERSONAL_RECORD_COLUMNS,
-            ",\n        PRIMARY KEY (athlete_id, record_type_id) ON CONFLICT REPLACE")
-    _create(cur, "fact_gear", GEAR_COLUMNS,
-            ",\n        PRIMARY KEY (athlete_id, gear_uuid) ON CONFLICT REPLACE")
-    _create(cur, "fact_body_composition", BODY_COMPOSITION_COLUMNS,
-            ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
+        _create(cur, "dim_athlete_device", ATHLETE_DEVICE_COLUMNS,
+                ",\n        PRIMARY KEY (athlete_id, device_id)")
+        _create(cur, "fact_activity", ACTIVITY_COLUMNS, ",\n        UNIQUE(activity_id) ON CONFLICT REPLACE")
+        _create(cur, "fact_activity_split", SPLIT_COLUMNS,
+                ",\n        PRIMARY KEY (activity_id, split_num) ON CONFLICT REPLACE")
+        _create(cur, "fact_daily_wellness", WELLNESS_COLUMNS,
+                ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
+        _create(cur, "fact_wellness_intraday", WELLNESS_INTRADAY_COLUMNS,
+                ",\n        PRIMARY KEY (athlete_id, metric, ts_utc)")
+        _create(cur, "fact_race_prediction", RACE_PREDICTION_COLUMNS,
+                ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
+        _create(cur, "fact_personal_record", PERSONAL_RECORD_COLUMNS,
+                ",\n        PRIMARY KEY (athlete_id, record_type_id) ON CONFLICT REPLACE")
+        _create(cur, "fact_gear", GEAR_COLUMNS,
+                ",\n        PRIMARY KEY (athlete_id, gear_uuid) ON CONFLICT REPLACE")
+        _create(cur, "fact_body_composition", BODY_COMPOSITION_COLUMNS,
+                ",\n        PRIMARY KEY (athlete_id, calendar_date) ON CONFLICT REPLACE")
 
-    # migration สำหรับ DB ที่มีอยู่แล้ว (เพิ่มคอลัมน์ใหม่)
-    added_a = _migrate(cur, "fact_activity", ACTIVITY_COLUMNS)
-    added_s = _migrate(cur, "fact_activity_split", SPLIT_COLUMNS)
-    added_w = _migrate(cur, "fact_daily_wellness", WELLNESS_COLUMNS)
-    added_d = _migrate(cur, "dim_athlete_device", ATHLETE_DEVICE_COLUMNS)
-    migrated_recovery = _migrate_recovery_minutes(cur)
-    for table, cols in (("fact_wellness_intraday", WELLNESS_INTRADAY_COLUMNS),
-                        ("fact_race_prediction", RACE_PREDICTION_COLUMNS),
-                        ("fact_personal_record", PERSONAL_RECORD_COLUMNS),
-                        ("fact_gear", GEAR_COLUMNS),
-                        ("fact_body_composition", BODY_COMPOSITION_COLUMNS)):
-        _migrate(cur, table, cols)
+        # migration สำหรับ DB ที่มีอยู่แล้ว (เพิ่มคอลัมน์ใหม่)
+        added_a = _migrate(cur, "fact_activity", ACTIVITY_COLUMNS)
+        added_s = _migrate(cur, "fact_activity_split", SPLIT_COLUMNS)
+        added_w = _migrate(cur, "fact_daily_wellness", WELLNESS_COLUMNS)
+        added_d = _migrate(cur, "dim_athlete_device", ATHLETE_DEVICE_COLUMNS)
+        migrated_recovery = _migrate_recovery_minutes(cur)
+        for table, cols in (("fact_wellness_intraday", WELLNESS_INTRADAY_COLUMNS),
+                            ("fact_race_prediction", RACE_PREDICTION_COLUMNS),
+                            ("fact_personal_record", PERSONAL_RECORD_COLUMNS),
+                            ("fact_gear", GEAR_COLUMNS),
+                            ("fact_body_composition", BODY_COMPOSITION_COLUMNS)):
+            _migrate(cur, table, cols)
 
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date ON fact_wellness_intraday(athlete_id, calendar_date)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_date_ts ON fact_wellness_intraday(calendar_date, ts_utc)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_ts ON fact_wellness_intraday(ts_utc)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_device_athlete ON dim_athlete_device(athlete_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date ON fact_wellness_intraday(athlete_id, calendar_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_date_ts ON fact_wellness_intraday(calendar_date, ts_utc)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_ts ON fact_wellness_intraday(ts_utc)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_device_athlete ON dim_athlete_device(athlete_id)")
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
 
     print(f"✅ Schema initialized: {db_path}")
     print(f"   journal_mode = {wal_mode} (WAL = อ่าน/เขียนพร้อมกันได้)")

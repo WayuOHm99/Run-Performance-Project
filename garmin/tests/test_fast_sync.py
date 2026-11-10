@@ -1722,7 +1722,7 @@ class SanityWellnessGapTests(unittest.TestCase):
                                      include_activities=False, include_wellness=True)
 
     def test_recent_empty_day_still_warns(self):
-        today = backfill.date.today()
+        today = backfill.datetime.now(backfill.BANGKOK_TZ).date()
         gap = today - backfill.timedelta(days=2)
         warns = self._check(self._db_with_empty_days([gap]),
                             today - backfill.timedelta(days=45), today)
@@ -1730,14 +1730,14 @@ class SanityWellnessGapTests(unittest.TestCase):
         self.assertIn(gap.isoformat(), warns[0])
 
     def test_old_empty_day_is_not_worth_a_warning(self):
-        today = backfill.date.today()
+        today = backfill.datetime.now(backfill.BANGKOK_TZ).date()
         gap = today - backfill.timedelta(days=WELLNESS_GAP_OLD_DAYS)
         warns = self._check(self._db_with_empty_days([gap]),
                             today - backfill.timedelta(days=45), today)
         self.assertEqual(warns, [])
 
     def test_long_gap_list_is_summarised(self):
-        today = backfill.date.today()
+        today = backfill.datetime.now(backfill.BANGKOK_TZ).date()
         days = [today - backfill.timedelta(days=n) for n in range(1, 11)]
         warns = self._check(self._db_with_empty_days(days),
                             today - backfill.timedelta(days=45), today)
@@ -1974,6 +1974,59 @@ class CheckDbCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("active_probe", result.stdout)
         self.assertNotIn("deleted_probe", result.stdout)
+
+
+class SkipFlagsAndSplitZeroTests(unittest.TestCase):
+    def test_skip_activities_and_skip_wellness_gate_sanity_check_scope(self):
+        source = (GARMIN_ROOT / "scripts" / "03_backfill.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "include_wellness=not (args.activities_only or args.skip_wellness)", source
+        )
+        self.assertIn(
+            "include_activities=not (args.wellness_fast or args.skip_activities)", source
+        )
+
+    def test_zero_cadence_and_zero_power_in_splits_are_not_treated_as_missing(self):
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute(
+            "CREATE TABLE fact_activity_split ("
+            "activity_id INTEGER, split_num INTEGER, distance_m REAL, duration_sec REAL,"
+            "avg_hr REAL, max_hr REAL, avg_cadence REAL, max_cadence REAL,"
+            "avg_power REAL, max_power REAL, normalized_power REAL, avg_speed_mps REAL,"
+            "avg_stride_length_cm REAL, ground_contact_time_ms REAL,"
+            "vertical_oscillation_cm REAL, vertical_ratio REAL,"
+            "elevation_gain_m REAL, elevation_loss_m REAL, intensity_type TEXT,"
+            "avg_pace_min_km REAL, PRIMARY KEY (activity_id, split_num))"
+        )
+
+        class FakeGarmin:
+            def get_activity_splits(self, _activity_id):
+                return [{
+                    "distance": 0.0,
+                    "duration": 0.0,
+                    "elapsedDuration": 30.0,
+                    "averageRunCadence": 0.0,
+                    "averageRunningCadenceInStepsPerMinute": 170.0,
+                    "maxRunCadence": 0.0,
+                    "maxRunningCadenceInStepsPerMinute": 180.0,
+                    "normalizedPower": 0.0,
+                    "normPower": 250.0,
+                }]
+
+        backfill.fetch_and_insert_splits(FakeGarmin(), conn, 777)
+        row = conn.execute(
+            "SELECT duration_sec, avg_cadence, max_cadence, normalized_power "
+            "FROM fact_activity_split WHERE activity_id = 777 AND split_num = 1"
+        ).fetchone()
+        self.assertEqual(row, (0.0, 0.0, 0.0, 0.0))
+
+    def test_f_to_c_rejects_booleans_and_non_finite_floats(self):
+        self.assertIsNone(backfill._f_to_c(True))
+        self.assertIsNone(backfill._f_to_c(False))
+        self.assertIsNone(backfill._f_to_c(float("inf")))
+        self.assertIsNone(backfill._f_to_c(float("nan")))
+        self.assertEqual(backfill._f_to_c(68.0), 20.0)
 
 
 if __name__ == "__main__":

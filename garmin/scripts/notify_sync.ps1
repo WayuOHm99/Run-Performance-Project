@@ -75,12 +75,13 @@ function Get-WarningLabel([string]$Warning) {
 
 function Show-Toast([string]$Title, [string]$Body) {
     if ($NotificationLog) {
-        $parent = Split-Path $NotificationLog -Parent
+        $logFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($NotificationLog)
+        $parent = Split-Path $logFull -Parent
         if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
         $entry = [ordered]@{
             at = $script:Now.ToString("o"); title = $Title; body = $Body
         } | ConvertTo-Json -Compress
-        [System.IO.File]::AppendAllText($NotificationLog, $entry + [Environment]::NewLine, $utf8NoBom)
+        [System.IO.File]::AppendAllText($logFull, $entry + [Environment]::NewLine, $utf8NoBom)
         Write-Output "notification-sink: $Title"
         return
     }
@@ -107,7 +108,7 @@ function Publish-Scope([string]$Scope, [string]$DataRoot) {
     $items = @($script:Conditions | Where-Object { $_.scope -eq $Scope } |
         Select-Object key, title, body)
     $safeScope = $Scope -replace "[^a-zA-Z0-9_.-]", "_"
-    $conditionPath = Join-Path $DataRoot "notify_conditions_$safeScope.json"
+    $conditionPath = Join-Path $DataRoot "notify_conditions_${safeScope}_${PID}_$([guid]::NewGuid().ToString('N')).json"
     $statePath = Join-Path $DataRoot "notify_state.json"
     $json = ConvertTo-Json -InputObject @($items) -Depth 4 -Compress
     [System.IO.Directory]::CreateDirectory($DataRoot) | Out-Null
@@ -194,6 +195,9 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
     try {
         $s = Get-Content $StatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if (-not $s.run_at) { throw "status ไม่มี run_at" }
+        if ($Lane -and $s.lane -and ([string]$s.lane -ne $Lane)) {
+            throw "status lane '$($s.lane)' ไม่ตรงกับ '$Lane'"
+        }
         $statusTime = [datetime]$s.run_at
         $results = @($s.results)
         if ($results.Count -eq 0) { throw "status ไม่มี results" }
@@ -257,7 +261,7 @@ function Test-Round([string]$StatusPath, [string]$StartPath) {
             "Garmin sync ล้มเหลว" "$($f.slug): $why"
     }
     foreach ($w in $warned) {
-        $safeSlug = ([string]$w.slug) -replace '[^a-zA-Z0-9_.-]', '_'
+        $safeSlug = ([string]$w.slug) -replace "[^a-zA-Z0-9_.:'-]", '_'
         $seenWarnings = @{}
         foreach ($warning in @($w.warnings)) {
             $warningText = [string]$warning
@@ -308,6 +312,23 @@ function Read-TimeFile([string]$Path) {
     try { return [datetime]::Parse((Get-Content $Path -Raw).Trim()) } catch { return $null }
 }
 
+function Write-TimeFile([string]$Path, [string]$Value) {
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $dir = Split-Path -Parent $fullPath
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $leaf = Split-Path -Leaf $fullPath
+    $tmp = Join-Path $dir ".${leaf}.${PID}.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($tmp, $Value, [System.Text.Encoding]::ASCII)
+        Move-Item -LiteralPath $tmp -Destination $fullPath -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-StaleLanes([string]$DataDir) {
     # เครื่องปิด/หลับ = ทุกสายเก่าหมดโดยธรรมชาติ ไม่ใช่ความผิดพลาด → ใช้ heartbeat ของ
     # รอบก่อนหน้าดูว่าเพิ่งกลับมาไหม ถ้าใช่ ข้ามรอบนี้ (รอบหน้าอีก 30 นาทีค่อยว่ากัน)
@@ -317,18 +338,18 @@ function Test-StaleLanes([string]$DataDir) {
     $now = $script:Now.LocalDateTime
     $awakePath = Join-Path $DataDir "notify_awake_since.txt"
     $prev = Read-TimeFile $hbPath
-    $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $hbPath
+    Write-TimeFile $hbPath $now.ToString("o")
     if ($null -eq $prev -or ($now - $prev).TotalMinutes -gt 45) {
         # เพิ่งกลับมา — เวลาที่หายไปคือเวลาที่เครื่องหลับ ไม่ใช่เวลาที่ระบบพัง ต้องรีเซ็ต
         # นาฬิกา "ตื่นตั้งแต่" ด้วย ไม่งั้นรอบถัดไป (อีก 30 นาที) จะเอาอายุที่สะสมตอนหลับ
         # ไปตัดสินว่า publisher พัง = เตือนหลอกแบบเดียวกับที่ GitHub เคยทำ
-        $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $awakePath
+        Write-TimeFile $awakePath $now.ToString("o")
         return
     }
     $awakeSince = Read-TimeFile $awakePath
     if ($null -eq $awakeSince) {
         $awakeSince = $now
-        $now.ToString("o") | Set-Content -NoNewline -Encoding ASCII -Path $awakePath
+        Write-TimeFile $awakePath $now.ToString("o")
     }
     $awakeMin = ($now - $awakeSince).TotalMinutes
 
@@ -420,11 +441,12 @@ function Test-StaleLanes([string]$DataDir) {
 }
 
 try {
-    $dataDir = if ($DataDir) { $DataDir }
-               else { Join-Path (Split-Path $PSScriptRoot -Parent) "data" }
-    # สถานะของสายตัวเอง — ไม่ระบุ -Lane (เช่นรันมือ) ค่อย fallback ไฟล์รวมแบบเดิม
-    $lanePath = if ($Lane) { Join-Path (Join-Path $dataDir "sync_lane") "$Lane.json" } else { $null }
-    $statusPath = if ($lanePath -and (Test-Path $lanePath)) { $lanePath }
+    $rawDataDir = if ($DataDir) { $DataDir }
+                  else { Join-Path (Split-Path $PSScriptRoot -Parent) "data" }
+    $dataDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($rawDataDir)
+    # สถานะของสายตัวเอง — ถ้าระบุ -Lane ต้องอ่านเฉพาะ sync_lane/<lane>.json เท่านั้น
+    # ห้าม fallback ไป sync_status.json เพราะจะหลงเอาผลที่ผ่านของสายอื่นมากลบสายที่ตายก่อนเขียน
+    $statusPath = if ($Lane) { Join-Path (Join-Path $dataDir "sync_lane") "$Lane.json" }
                   else { Join-Path $dataDir "sync_status.json" }
     $startPath = Join-Path $dataDir $StartMarker
 

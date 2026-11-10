@@ -1,4 +1,4 @@
-"""เรนเดอร์ทั้ง 5 หน้าจริงผ่าน ``AppTest`` บน DB ที่ปั้นเอง แล้วอ่านสิ่งที่ออกไปหน้าเว็บ
+"""เรนเดอร์ทั้ง 6 หน้าจริงผ่าน ``AppTest`` บน DB ที่ปั้นเอง แล้วอ่านสิ่งที่ออกไปหน้าเว็บ
 
 ``AppTest`` เขียว = สคริปต์รันจบและ element ออกมาครบ **แค่นั้น** (CLAUDE.md ชั้นที่ 2)
 หน้าย้ายจริงไหม ฟอนต์ถูกวาดไหม ต้องดูในเบราว์เซอร์ (ชั้นที่ 4–5)
@@ -9,11 +9,14 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dashboard_tab_harness import (  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import health_report
+from dashboard_tab_harness import (
     ALL_PAGES,
     BODY_PAGE,
     DASHBOARD_PATH,
@@ -115,13 +118,23 @@ def seed_nothing_for_tong(conn):
 class EveryPageRendersTests(unittest.TestCase):
     def test_every_page_renders_for_an_athlete_with_data(self):
         for page in ALL_PAGES:
-            with self.subTest(page=page):
+            ctx = (
+                patch.object(health_report, "run_all_checks", return_value=[])
+                if page == SYSTEM_PAGE
+                else nullcontext()
+            )
+            with self.subTest(page=page), ctx:
                 render_page(page, seed_team)
 
     def test_every_page_renders_for_an_athlete_with_no_data_yet(self):
         # นักกีฬาใหม่ที่เพิ่งได้ token ยังไม่มีอะไรเลย — หน้าต้องบอก ไม่ใช่พัง
         for page in ALL_PAGES:
-            with self.subTest(page=page):
+            ctx = (
+                patch.object(health_report, "run_all_checks", return_value=[])
+                if page == SYSTEM_PAGE
+                else nullcontext()
+            )
+            with self.subTest(page=page), ctx:
                 main, _ = render_page(page, seed_nothing_for_tong)
                 self.assertTrue(page_text(main))
 
@@ -197,7 +210,12 @@ class GarminOnlyOnScreenTests(unittest.TestCase):
 
     def test_no_page_shows_a_metric_the_system_invented(self):
         for page in ALL_PAGES:
-            with self.subTest(page=page):
+            ctx = (
+                patch.object(health_report, "run_all_checks", return_value=[])
+                if page == SYSTEM_PAGE
+                else nullcontext()
+            )
+            with self.subTest(page=page), ctx:
                 main, _ = render_page(page, seed_team)
                 text = page_text(main)
                 for word in self.REMOVED:
@@ -341,6 +359,76 @@ class SystemPageTests(unittest.TestCase):
         text = page_text(main)
         self.assertIn("sync ล่าสุดรายคน", text)
         self.assertNotIn("Traceback", text)
+
+
+class IsoTimestampAndDisambiguationRegressionTests(unittest.TestCase):
+    def test_iso_t_activity_on_end_date_reaches_team_training_and_session(self):
+        def seed_iso(conn):
+            seed_team(conn)
+            conn.execute(
+                "INSERT INTO fact_activity (activity_id, athlete_id, activity_type, activity_name,"
+                " start_time_local, duration_sec, distance_m, avg_hr)"
+                " VALUES (999, 1, 'running', 'ISO Evening Run', ?, 1800, 5000, 145)",
+                (f"{TODAY.isoformat()}T18:30:00.0",),
+            )
+
+        for page in (TEAM_PAGE, TRAINING_PAGE, SESSION_PAGE):
+            with self.subTest(page=page):
+                main, app = render_page(page, seed_iso)
+                if page == SESSION_PAGE:
+                    options = app.selectbox(key="session_activity").options
+                    self.assertTrue(any("ISO Evening Run" in opt for opt in options))
+                else:
+                    self.assertIn("ISO Evening Run", page_text(main))
+
+    def test_duplicate_display_names_are_disambiguated_in_team_activity_table(self):
+        def seed_dup(conn):
+            conn.executemany(
+                "INSERT INTO dim_athlete (athlete_id, slug, display_name) VALUES (?, ?, ?)",
+                [(1, "a1", "Same"), (2, "a2", "Same")],
+            )
+            conn.executemany(
+                "INSERT INTO fact_activity (activity_id, athlete_id, activity_type, activity_name,"
+                " start_time_local, duration_sec, distance_m)"
+                " VALUES (?, ?, 'running', 'Morning', ?, 1200, 3000)",
+                [(11, 1, f"{TODAY} 06:00:00"), (12, 2, f"{TODAY} 06:30:00")],
+            )
+
+        main, _ = render_page(TEAM_PAGE, seed_dup)
+        text = page_text(main)
+        self.assertIn("Same (a1)", text)
+        self.assertIn("Same (a2)", text)
+
+    def test_past_day_on_team_page_says_that_day_not_today(self):
+        main, _ = render_page(TEAM_PAGE, seed_team, state={"team_day": YESTERDAY})
+        text = page_text(main)
+        self.assertIn("กิจกรรมของทีมในวันนั้น", text)
+        self.assertNotIn("กิจกรรมของทีมในวันนี้", text)
+
+    def test_tied_activity_timestamps_keep_athlete_and_duplicate_flag_aligned(self):
+        # >= 17 แถวทำให้ introsort ของ pandas ไม่รักษาความเสถียรถ้าไม่ระบุ kind="stable"
+        def seed_ties(conn):
+            conn.executemany(
+                "INSERT INTO dim_athlete (athlete_id, slug, display_name) VALUES (?, ?, ?)",
+                [(1, "tong", "Tong"), (2, "dan", "Dan")],
+            )
+            rows = []
+            for idx in range(18):
+                aid = 1 if idx % 2 == 0 else 2
+                owner = "Tong" if aid == 1 else "Dan"
+                rows.append((100 + idx, aid, f"{owner}-run-{idx}", f"{TODAY} 06:00:00"))
+            conn.executemany(
+                "INSERT INTO fact_activity (activity_id, athlete_id, activity_type, activity_name,"
+                " start_time_local, duration_sec, distance_m)"
+                " VALUES (?, ?, 'running', ?, ?, 1800, 5000)",
+                rows,
+            )
+
+        main, _ = render_page(TEAM_PAGE, seed_ties)
+        df = main.dataframe[0].value
+        for _, row in df.iterrows():
+            self.assertTrue(str(row["กิจกรรม"]).startswith(f"{row['นักกีฬา']}-run-"))
+            self.assertEqual(row["ตรวจสอบ"], "อาจซ้ำ")
 
 
 if __name__ == "__main__":

@@ -419,6 +419,14 @@ def main():
             print("⏭️  มี Garmin sync อีกรอบทำงานอยู่ — ข้ามรอบนี้")
             sys.exit(75)
 
+        if slots is not None:
+            now_after_lock = datetime.now()
+            if not pending_slots(lane, slots, now_after_lock):
+                passed = passed_slots(slots, now_after_lock)
+                done_label = f" {passed[-1]:%H:%M} ({passed[-1]:%d/%m})" if passed else ""
+                print(f"⏭️  ช่อง{done_label} ถูกสายก่อนหน้าทำครบระหว่างรอ lock — ข้ามรอบนี้")
+                sys.exit(75)
+
         # truncate microseconds เพราะไฟล์สถานะบันทึก finished_at ความละเอียดวินาที
         run_started = datetime.now().replace(microsecond=0)
         workers = min(args.max_workers, len(athletes))

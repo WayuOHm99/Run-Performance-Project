@@ -31,7 +31,7 @@ class GarminConnectDependencyTests(unittest.TestCase):
     # แทนชื่อคงที่ที่เปิดด้วย O_TRUNC และเลิกปล่อยเนื้อ token ลง log
     # helper ตัวนี้คือสิ่งที่นักกีฬารันบนเครื่องตัวเอง จึงห้ามไหลกลับไปต่ำกว่านี้
     def test_helper_pins_the_release_with_the_symlink_and_o_excl_token_fixes(self):
-        self.assertEqual(TOKEN_SCRIPT.GARMINCONNECT_VERSION, "0.3.11")
+        self.assertEqual(TOKEN_SCRIPT.GARMINCONNECT_VERSION, "0.3.20")
 
     def test_helper_installs_the_same_version_the_project_itself_runs(self):
         """นักกีฬาต้องได้เวอร์ชันเดียวกับที่เทสชุดนี้รันจริง ไม่ใช่เวอร์ชันที่ค้างอยู่ใน helper.

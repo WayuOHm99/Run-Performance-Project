@@ -2,7 +2,7 @@
 """Backfill 90 days of Garmin data into SQLite.
 
 Usage:
-    python scripts/03_backfill.py [--athlete wayuo] [--days 90]
+    python scripts/03_backfill.py --athlete <slug> [--days 90]
 
 Fetches activities + daily wellness data and inserts into garmin.db.
 Requires token to already exist in tokens/<athlete>/.
@@ -18,6 +18,10 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ⚠️ path ที่เขียนได้ต้องแตกจาก DATA_DIR ที่เดียว (เหมือน fetch_all.py) — เทสจะได้ย้าย
@@ -303,7 +307,7 @@ def _sync_intraday_day(garmin, conn, athlete_id, day, failures):
             garmin, conn, athlete_id, day.isoformat(),
             call=safe_call, failures=failures,
         )
-    except Exception as exc:  # noqa: BLE001 — intraday เป็นของแถม ไม่บล็อก sync หลัก
+    except Exception as exc:  # intraday เป็นของแถม ไม่บล็อก sync หลัก
         conn.rollback()
         _record_endpoint_failure(failures, None, exc, endpoint="intraday_store")
 
@@ -315,7 +319,7 @@ def _prune_intraday(conn, failures):
         removed = intraday.prune(conn)
         if removed:
             print(f"   🧹 ลบจุด intraday เก่ากว่า {intraday.INTRADAY_RETENTION_DAYS} วัน: {removed} จุด")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         conn.rollback()
         print(f"   ⚠️  prune intraday ล้ม ({type(exc).__name__})")
         _record_endpoint_failure(failures, None, exc, endpoint="intraday_prune")
@@ -381,9 +385,19 @@ ACTIVITY_WRITE_COLUMNS = (
     "weather_apparent_temp_c", "weather_humidity", "weather_wind_kph",
 )
 
+def _first_not_none(*values):
+    """คืนค่าแรกที่ไม่ใช่ None โดยไม่กลืนเลข 0 ที่มีความหมายทางกายภาพ."""
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def _f_to_c(f):
     """แปลงองศา F → C (Garmin คืนอุณหภูมิเป็น Fahrenheit)"""
-    return round((f - 32) * 5.0 / 9.0, 1) if isinstance(f, (int, float)) else None
+    if isinstance(f, bool) or not isinstance(f, (int, float)) or not math.isfinite(f):
+        return None
+    return round((f - 32) * 5.0 / 9.0, 1)
 
 
 def fetch_weather(garmin, activity_id):
@@ -569,7 +583,7 @@ def fetch_and_insert_splits(garmin, conn, activity_id):
 
     cur = conn.cursor()
     for i, lap in enumerate(laps, 1):
-        duration = lap.get("duration") or lap.get("elapsedDuration")
+        duration = _first_not_none(lap.get("duration"), lap.get("elapsedDuration"))
         distance = lap.get("distance")
         avg_pace = None
         if duration and distance and distance > 0:
@@ -619,11 +633,18 @@ def fetch_and_insert_splits(garmin, conn, activity_id):
             duration,
             lap.get("averageHR"),
             lap.get("maxHR"),
-            lap.get("averageRunCadence") or lap.get("averageRunningCadenceInStepsPerMinute") or lap.get("averageCadence"),
-            lap.get("maxRunCadence") or lap.get("maxRunningCadenceInStepsPerMinute"),
+            _first_not_none(
+                lap.get("averageRunCadence"),
+                lap.get("averageRunningCadenceInStepsPerMinute"),
+                lap.get("averageCadence"),
+            ),
+            _first_not_none(
+                lap.get("maxRunCadence"),
+                lap.get("maxRunningCadenceInStepsPerMinute"),
+            ),
             lap.get("averagePower"),
             lap.get("maxPower"),
-            lap.get("normalizedPower") or lap.get("normPower"),
+            _first_not_none(lap.get("normalizedPower"), lap.get("normPower")),
             lap.get("averageSpeed"),
             lap.get("strideLength"),
             lap.get("groundContactTime"),
@@ -1260,7 +1281,7 @@ def _previous_day_repair_due(conn, athlete_id, repair_date, *, now_utc=None):
     if row is None:
         return True, ["row_missing"]
 
-    values = dict(zip(_REPAIR_CHECK_FIELDS, row))
+    values = dict(zip(_REPAIR_CHECK_FIELDS, row, strict=True))
     attempted = _api_datetime(values["repair_attempted_at_utc"])
     if attempted is not None:
         elapsed = now_utc - attempted
@@ -1382,7 +1403,7 @@ def fetch_and_settle_review_previous_day_wellness(
     after = cur.execute(
         f"SELECT * FROM fact_daily_wellness {key}", (athlete_id, date_str)).fetchone()
     changed = sum(
-        1 for name, old, new in zip(columns, before, after)
+        1 for name, old, new in zip(columns, before, after, strict=True)
         if name != "fetched_at" and old != new
     )
     if not changed:
@@ -2071,7 +2092,7 @@ def sanity_check(conn, athlete_id, start_date, end_date, *,
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill Garmin data")
-    parser.add_argument("--athlete", default="wayuo", help="Athlete slug (default: wayuo)")
+    parser.add_argument("--athlete", required=True, help="Athlete slug (e.g. dan, tong)")
     parser.add_argument("--days", type=int, default=90, help="Days to backfill (default: 90)")
     parser.add_argument("--skip-activities", action="store_true",
                         help="ข้ามการดึงกิจกรรม+splits (ใช้ตอน re-backfill เฉพาะ wellness/extras "
@@ -2117,6 +2138,7 @@ def main():
     garmin = Garmin()
     try:
         garmin.login(str(token_dir))
+        full_name = garmin.get_full_name()
     except Exception as e:
         if classify_login_error(e) == "token":
             print(f"❌ TOKEN ใช้ไม่ได้ (หมดอายุ/ถูก revoke): {e}")
@@ -2129,159 +2151,167 @@ def main():
         write_status(args.athlete, ok=False, reason="network", error=str(e))
         sys.exit(1)
 
-    full_name = garmin.get_full_name()
     print(f"✅ Logged in as: {full_name}")
 
     # Connect to database — busy_timeout 30 วิ + WAL (idempotent) กัน "database is locked"
     # ตอน dashboard เปิดค้างอ่านพร้อมกัน (เจอจริง 22 ก.ค. 69 รอบ 21:43 ล้มทั้ง 3 คน)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    athlete_id = get_athlete_id(conn, args.athlete)
-
-    # Update garmin_full_name
-    conn.execute(
-        "UPDATE dim_athlete SET garmin_full_name = ? WHERE athlete_id = ?",
-        (full_name, athlete_id),
-    )
-    conn.commit()
-
-    # Date range
-    # Business dates are Thai calendar days regardless of the Windows/Task
-    # Scheduler host timezone.  Thailand has no daylight-saving transition.
-    end_date = datetime.now(BANGKOK_TZ).date()
-    start_date = end_date - timedelta(days=args.days)
-
-    print(f"\n🗓️  Backfill range: {start_date} → {end_date} ({args.days} days)")
-    print(f"👤 Athlete: {args.athlete} (id={athlete_id})")
-
-    # โหมด reconcile อย่างเดียว (ไม่ดึงกิจกรรม/wellness ใหม่) — สำหรับ task รายสัปดาห์
-    if args.reconcile:
-        try:
-            result = reconcile_only(garmin, conn, athlete_id, start_date, end_date)
-        except RequiredEndpointError as exc:
-            conn.close()
-            print(f"   ❌ Reconcile ใช้ response นี้ไม่ได้: {exc}")
-            write_status(
-                args.athlete, ok=False, reason=exc.status_reason, error=str(exc)
-            )
-            sys.exit(1)
-        conn.close()
-        marked, restored, imported = result
-        write_status(args.athlete, ok=True, reason="ok",
-                     activities=len(imported),
-                     warnings=([f"reconcile: mark กิจกรรมถูกลบ {len(marked)} รายการ"] if marked else []))
-        print("\n" + "=" * 50)
-        print(f"🎉 Reconcile complete! imported +{len(imported)} | "
-              f"deleted +{len(marked)} | restored +{len(restored)}")
-        print("=" * 50)
-        return
-
-    # Fetch data.  A mandatory collection which is unavailable or malformed is
-    # a failed sync, never a successful zero-row round.
-    wellness_endpoint_failures = []
-    wellness_terminal_errors = []
+    conn = None
     try:
-        if args.skip_activities or args.wellness_fast:
-            _why = "--skip-activities" if args.skip_activities else "--wellness-fast"
-            print(f"\n📊 (ข้ามการดึงกิจกรรม — {_why})")
-            activity_count = 0
-        else:
-            # reconcile ที่หน้าต่างกว้างหลายปีคือกับดัก ไม่ใช่การกู้คืน (2 ก.ย. 69):
-            # `present_ids` ถูกเก็บจาก list ครั้งเดียวตอนเริ่ม แล้วลูปเดินต่ออีกเป็นชั่วโมง
-            # (แดน 2,738 รายการ × sleep 0.8 วิ/รายการ) — กิจกรรมที่ fast sync
-            # ทุก 15 นาทีใส่เข้าระหว่างทางจึงไม่อยู่ใน `present_ids` แล้วโดน mark ว่าถูกลบ
-            # สาย `--reconcile` รายสัปดาห์ (90 วัน) คุมการลบอยู่แล้ว ตัดกิ่งนี้ทิ้งจึงไม่เสียอะไร
-            activity_count = fetch_and_insert_activities(
-                garmin, conn, athlete_id, start_date, end_date,
-                fast=args.activities_only,
-                reconcile=not args.skip_wellness,
-            )
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        athlete_id = get_athlete_id(conn, args.athlete)
 
-        if args.activities_only:
-            wellness_count = None
-            print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
-        elif args.skip_wellness:
-            wellness_count = None
-            print("\n⚡ ข้าม wellness/extras (--skip-wellness) — สั่ง --skip-activities อีกรอบเพื่อเติมช่วงที่ต้องการ")
-        elif args.wellness_fast:
-            wellness_count = fetch_and_update_wellness_fast(
-                garmin, conn, athlete_id, start_date, end_date,
-                endpoint_failures=wellness_endpoint_failures,
-                terminal_errors=wellness_terminal_errors,
+        # Update garmin_full_name
+        conn.execute(
+            "UPDATE dim_athlete SET garmin_full_name = ? WHERE athlete_id = ?",
+            (full_name, athlete_id),
+        )
+        conn.commit()
+
+        # Date range
+        # Business dates are Thai calendar days regardless of the Windows/Task
+        # Scheduler host timezone.  Thailand has no daylight-saving transition.
+        end_date = datetime.now(BANGKOK_TZ).date()
+        start_date = end_date - timedelta(days=args.days)
+
+        print(f"\n🗓️  Backfill range: {start_date} → {end_date} ({args.days} days)")
+        print(f"👤 Athlete: {args.athlete} (id={athlete_id})")
+
+        # โหมด reconcile อย่างเดียว (ไม่ดึงกิจกรรม/wellness ใหม่) — สำหรับ task รายสัปดาห์
+        if args.reconcile:
+            try:
+                result = reconcile_only(garmin, conn, athlete_id, start_date, end_date)
+            except RequiredEndpointError as exc:
+                print(f"   ❌ Reconcile ใช้ response นี้ไม่ได้: {exc}")
+                write_status(
+                    args.athlete, ok=False, reason=exc.status_reason, error=str(exc)
+                )
+                sys.exit(1)
+            marked, restored, imported = result
+            write_status(
+                args.athlete,
+                ok=True,
+                reason="ok",
+                activities=len(imported),
+                warnings=([f"reconcile: mark กิจกรรมถูกลบ {len(marked)} รายการ"] if marked else []),
             )
-            # The scheduled lane uses --days 0.  A manual wider fast range already
-            # fetched yesterday in the loop, so do not duplicate those calls.
-            if start_date == end_date:
-                wellness_count += fetch_and_repair_previous_day_wellness(
-                    garmin, conn, athlete_id, end_date - timedelta(days=1),
+            print("\n" + "=" * 50)
+            print(f"🎉 Reconcile complete! imported +{len(imported)} | "
+                  f"deleted +{len(marked)} | restored +{len(restored)}")
+            print("=" * 50)
+            return
+
+        # Fetch data.  A mandatory collection which is unavailable or malformed is
+        # a failed sync, never a successful zero-row round.
+        wellness_endpoint_failures = []
+        wellness_terminal_errors = []
+        try:
+            if args.skip_activities or args.wellness_fast:
+                _why = "--skip-activities" if args.skip_activities else "--wellness-fast"
+                print(f"\n📊 (ข้ามการดึงกิจกรรม — {_why})")
+                activity_count = 0
+            else:
+                # reconcile ที่หน้าต่างกว้างหลายปีคือกับดัก ไม่ใช่การกู้คืน (2 ก.ย. 69):
+                # `present_ids` ถูกเก็บจาก list ครั้งเดียวตอนเริ่ม แล้วลูปเดินต่ออีกเป็นชั่วโมง
+                # (แดน 2,738 รายการ × sleep 0.8 วิ/รายการ) — กิจกรรมที่ fast sync
+                # ทุก 15 นาทีใส่เข้าระหว่างทางจึงไม่อยู่ใน `present_ids` แล้วโดน mark ว่าถูกลบ
+                # สาย `--reconcile` รายสัปดาห์ (90 วัน) คุมการลบอยู่แล้ว ตัดกิ่งนี้ทิ้งจึงไม่เสียอะไร
+                activity_count = fetch_and_insert_activities(
+                    garmin, conn, athlete_id, start_date, end_date,
+                    fast=args.activities_only,
+                    reconcile=not args.skip_wellness,
+                )
+
+            if args.activities_only:
+                wellness_count = None
+                print("\n⚡ Fast sync: ข้าม wellness/extras (full sync จะเติมตามรอบเดิม)")
+            elif args.skip_wellness:
+                wellness_count = None
+                print("\n⚡ ข้าม wellness/extras (--skip-wellness) — สั่ง --skip-activities อีกรอบเพื่อเติมช่วงที่ต้องการ")
+            elif args.wellness_fast:
+                wellness_count = fetch_and_update_wellness_fast(
+                    garmin, conn, athlete_id, start_date, end_date,
                     endpoint_failures=wellness_endpoint_failures,
                     terminal_errors=wellness_terminal_errors,
                 )
-            # intraday HR/stress ของวันนี้ 1 ครั้ง/รอบ (2 call × 30 นาที = 96 call/คน/วัน)
-            _sync_intraday_day(
-                garmin, conn, athlete_id, end_date, wellness_endpoint_failures
+                # The scheduled lane uses --days 0.  A manual wider fast range already
+                # fetched yesterday in the loop, so do not duplicate those calls.
+                if start_date == end_date:
+                    wellness_count += fetch_and_repair_previous_day_wellness(
+                        garmin, conn, athlete_id, end_date - timedelta(days=1),
+                        endpoint_failures=wellness_endpoint_failures,
+                        terminal_errors=wellness_terminal_errors,
+                    )
+                # intraday HR/stress ของวันนี้ 1 ครั้ง/รอบ (2 call × 30 นาที = 96 call/คน/วัน)
+                _sync_intraday_day(
+                    garmin, conn, athlete_id, end_date, wellness_endpoint_failures
+                )
+            else:
+                wellness_count = fetch_and_insert_wellness(
+                    garmin, conn, athlete_id, start_date, end_date,
+                    endpoint_failures=wellness_endpoint_failures,
+                    terminal_errors=wellness_terminal_errors,
+                )
+                fetch_and_insert_extras(
+                    garmin, conn, athlete_id, start_date, end_date,
+                    endpoint_failures=wellness_endpoint_failures,
+                )
+                # full sync: intraday ของเมื่อวาน (จุดท้ายวัน) + prune >180 วัน รอบละครั้ง
+                _sync_intraday_day(
+                    garmin, conn, athlete_id, end_date - timedelta(days=1),
+                    wellness_endpoint_failures,
+                )
+                _prune_intraday(conn, wellness_endpoint_failures)
+            if wellness_terminal_errors:
+                raise CoreWellnessUnavailableError(
+                    failure
+                    for error in wellness_terminal_errors
+                    for failure in error.failures
+                )
+        except RequiredEndpointError as exc:
+            print(f"\n❌ Sync ใช้ response จาก Garmin ไม่ได้: {exc}")
+            write_status(
+                args.athlete,
+                ok=False,
+                reason=exc.status_reason,
+                error=str(exc),
+                endpoint_failures=(
+                    wellness_endpoint_failures or getattr(exc, "failures", None)
+                ),
             )
-        else:
-            wellness_count = fetch_and_insert_wellness(
-                garmin, conn, athlete_id, start_date, end_date,
-                endpoint_failures=wellness_endpoint_failures,
-                terminal_errors=wellness_terminal_errors,
-            )
-            fetch_and_insert_extras(
-                garmin, conn, athlete_id, start_date, end_date,
-                endpoint_failures=wellness_endpoint_failures,
-            )
-            # full sync: intraday ของเมื่อวาน (จุดท้ายวัน) + prune >180 วัน รอบละครั้ง
-            _sync_intraday_day(
-                garmin, conn, athlete_id, end_date - timedelta(days=1),
-                wellness_endpoint_failures,
-            )
-            _prune_intraday(conn, wellness_endpoint_failures)
-        if wellness_terminal_errors:
-            raise CoreWellnessUnavailableError(
-                failure
-                for error in wellness_terminal_errors
-                for failure in error.failures
-            )
-    except RequiredEndpointError as exc:
-        conn.close()
-        print(f"\n❌ Sync ใช้ response จาก Garmin ไม่ได้: {exc}")
-        write_status(
-            args.athlete,
-            ok=False,
-            reason=exc.status_reason,
-            error=str(exc),
-            endpoint_failures=(
-                wellness_endpoint_failures or getattr(exc, "failures", None)
-            ),
-        )
-        sys.exit(2 if exc.status_reason == "token" else 1)
+            sys.exit(2 if exc.status_reason == "token" else 1)
 
-    sanity_start_date = (
-        min(start_date, end_date - timedelta(days=1))
-        if args.wellness_fast else start_date
-    )
-    warnings = sanity_check(
-        conn, athlete_id, sanity_start_date, end_date,
-        include_wellness=not args.activities_only,
-        include_activities=not args.wellness_fast,
-    )
-    unique_endpoint_failures = _unique_endpoint_failures(
-        wellness_endpoint_failures
-    )
-    if unique_endpoint_failures:
-        summary = ", ".join(
-            f"{item['endpoint']}:{item['reason']}"
-            for item in unique_endpoint_failures
+        sanity_start_date = (
+            min(start_date, end_date - timedelta(days=1))
+            if args.wellness_fast else start_date
         )
-        warnings.append(f"wellness endpoint degraded: {summary}")
-    if warnings:
-        print("\n⚠️  Sanity check พบจุดน่าสงสัย:")
-        for w in warnings:
-            print(f"   - {w}")
+        warnings = sanity_check(
+            conn, athlete_id, sanity_start_date, end_date,
+            include_wellness=not (args.activities_only or args.skip_wellness),
+            include_activities=not (args.wellness_fast or args.skip_activities),
+        )
+        unique_endpoint_failures = _unique_endpoint_failures(
+            wellness_endpoint_failures
+        )
+        if unique_endpoint_failures:
+            summary = ", ".join(
+                f"{item['endpoint']}:{item['reason']}"
+                for item in unique_endpoint_failures
+            )
+            warnings.append(f"wellness endpoint degraded: {summary}")
+        if warnings:
+            print("\n⚠️  Sanity check พบจุดน่าสงสัย:")
+            for w in warnings:
+                print(f"   - {w}")
+    except sqlite3.Error as exc:
+        print(f"\n❌ SQLite error: {exc}")
+        write_status(args.athlete, ok=False, reason="error", error=f"sqlite: {exc}")
+        sys.exit(1)
+    finally:
+        if conn is not None:
+            conn.close()
 
-    conn.close()
     write_status(args.athlete, ok=True, reason="ok",
                  activities=activity_count, wellness_days=wellness_count,
                  warnings=warnings,

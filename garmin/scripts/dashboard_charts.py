@@ -21,9 +21,12 @@ def intraday_chart(series, day, *, y_title, names=None, height=180):
               axis=alt.Axis(format="%H:%M", title=None, tickCount=8))
     y = alt.Y("ค่า:Q", title=y_title)
     color = alt.Color("นักกีฬา:N", legend=alt.Legend(orient="top", title=None))
-    line = alt.Chart(frame).mark_line(strokeWidth=1.6).encode(x=x, y=y, color=color)
+    detail = alt.Detail("athlete_id:N")
+    line = alt.Chart(frame).mark_line(strokeWidth=1.6).encode(
+        x=x, y=y, color=color, detail=detail,
+    )
     points = alt.Chart(frame.dropna(subset=["ค่า"])).mark_circle(size=40, opacity=0).encode(
-        x=x, y=y, color=color,
+        x=x, y=y, color=color, detail=detail,
         tooltip=["นักกีฬา", alt.Tooltip("เวลา:T", format="%H:%M"), alt.Tooltip("ค่า:Q", format=".0f")],
     )
     return (line + points).properties(height=height)

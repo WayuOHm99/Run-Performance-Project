@@ -94,7 +94,7 @@ def chart_card(title, caption=None):
 
 
 def line(card, columns, labels, y_label):
-    frame = daily[["วันที่", *columns]].rename(columns=dict(zip(columns, labels)))
+    frame = daily[["วันที่", *columns]].rename(columns=dict(zip(columns, labels, strict=True)))
     card.line_chart(frame, x="วันที่", y=list(labels), x_label="",
                     y_label=y_label, height=CHART_HEIGHT)
 
@@ -137,11 +137,14 @@ with right:
         line(chart_card("Training Readiness"), ["training_readiness"], ["Readiness"], "คะแนน")
 
 st.subheader("ระหว่างวัน", anchor=False)
+if "body_intraday_day" in st.session_state and st.session_state["body_intraday_day"] > today:
+    st.session_state["body_intraday_day"] = today
 intraday_day = st.date_input("วันที่", value=today, max_value=today, format="DD/MM/YYYY",
                              key="body_intraday_day", width=170)
+intraday_word = "วันนี้" if intraday_day == today else "วันนั้น"
 points = load_intraday(intraday_day, [ctx.athlete_id])
 if points.empty:
-    st.caption("ยังไม่มีข้อมูลระหว่างวันของวันนี้ — ระบบเริ่มเก็บ HR/Stress/Body Battery รายจุด"
+    st.caption(f"ยังไม่มีข้อมูลระหว่างวันของ{intraday_word} — ระบบเริ่มเก็บ HR/Stress/Body Battery รายจุด"
                "ตั้งแต่ 30 ก.ย. 69 และเก็บย้อนหลัง 180 วัน")
 else:
     st.caption("จุดละ 2–3 นาทีตามที่นาฬิกาส่งมา · เส้นขาด = ช่วงที่ไม่มีข้อมูล "
@@ -155,20 +158,31 @@ else:
                                                names={ctx.athlete_id: ctx.selected_name}),
                                 width="stretch")
 
+
+def _formatted_or_none(frame, column, formatter):
+    if column not in frame:
+        return None
+    return frame[column].map(
+        lambda v: None if v is None or pd.isna(v) else (
+            None if (out := formatter(v)) in ("", "–") else out
+        )
+    )
+
+
 with st.expander("ตารางค่ารายวันทั้งหมด", icon=":material/table_view:"):
     table = wellness.sort_values("calendar_date", ascending=False)
     shown = pd.DataFrame({
         "วันที่": table["calendar_date"].astype(str).str[:10],
         "Sleep": table.get("sleep_score"),
-        "นอน": table.get("sleep_duration_sec").map(fmt_hours),
+        "นอน": _formatted_or_none(table, "sleep_duration_sec", fmt_hours),
         "HRV (ms)": table.get("hrv_last_night"),
-        "HRV status": table.get("hrv_status").map(garmin_label),
+        "HRV status": _formatted_or_none(table, "hrv_status", garmin_label),
         "RHR": table.get("resting_hr"),
         "BB สูงสุด": table.get("body_battery_high"),
         "BB ต่ำสุด": table.get("body_battery_low"),
         "Stress": table.get("stress_avg"),
         "Readiness": table.get("training_readiness"),
-        "Training Status": table.get("training_status").map(garmin_label),
+        "Training Status": _formatted_or_none(table, "training_status", garmin_label),
         "ก้าว": table.get("steps"),
     })
     st.dataframe(shown.dropna(axis=1, how="all"), hide_index=True, width="stretch")

@@ -796,5 +796,66 @@ class ProductionDataIsolationTests(unittest.TestCase):
             self.assertEqual(before, after, "garmin/data ของจริงถูกแตะระหว่างรันเทส!")
 
 
+class BackupRollbackModeAndFutureSkewTests(unittest.TestCase):
+    def test_snapshot_writes_rollback_mode_and_immutable_check_creates_no_sidecars(self):
+        backup_db = load_script("garmin_backup_db_rollback_test", "backup_db.py")
+        schema = load_script("garmin_schema_rollback_test", "02_init_schema.py")
+        with tempfile.TemporaryDirectory(prefix="backup-rollback-") as raw:
+            root = Path(raw)
+            src = root / "src" / "garmin.db"
+            dest = root / "daily" / "garmin-20260817.db"
+            schema.init_schema(src)
+            backup_db.snapshot(src, dest)
+
+            conn = sqlite3.connect(dest)
+            try:
+                mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(mode.lower(), "delete")
+
+            prev_backup = hr.use_backup_dir(dest.parent)
+            try:
+                ok, _ = hr._quick_check_sqlite_file(dest, immutable=True)
+                self.assertTrue(ok)
+            finally:
+                hr.use_backup_dir(prev_backup)
+
+            sidecars = list(dest.parent.glob("garmin-*.db-*"))
+            self.assertEqual(sidecars, [], f"พบ sidecar กำพร้า: {sidecars}")
+
+    def test_future_unfinished_marker_and_future_backup_mtime_are_flagged_as_error(self):
+        with tempfile.TemporaryDirectory(prefix="health-future-") as raw:
+            root = Path(raw)
+            data_dir = root / "data"
+            backup_dir = root / "backup"
+            data_dir.mkdir()
+            backup_dir.mkdir()
+            (data_dir / "sync_fast_run_start.txt").write_text(
+                "2026-08-17T15:00:00+07:00", encoding="ascii"
+            )
+            snap = backup_dir / "garmin-20260817.db"
+            conn = sqlite3.connect(snap)
+            conn.execute("CREATE TABLE t (x TEXT)")
+            conn.execute("INSERT INTO t VALUES (?)", ("x" * 20_000,))
+            conn.commit()
+            conn.close()
+            future_epoch = datetime(2026, 8, 17, 15, 0, tzinfo=timezone.utc).timestamp()
+            os.utime(snap, (future_epoch, future_epoch))
+
+            now = datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc)
+            prev_data = hr.use_data_dir(data_dir)
+            prev_backup = hr.use_backup_dir(backup_dir)
+            try:
+                unfinished = hr.check_unfinished_runs(now=now)
+                backups = hr.check_backup(now=now)
+            finally:
+                hr.use_data_dir(prev_data)
+                hr.use_backup_dir(prev_backup)
+
+            self.assertTrue(any(f.level == hr.ERROR and "อนาคต" in f.message for f in unfinished))
+            self.assertTrue(any(f.level == hr.ERROR and "อนาคต" in f.message for f in backups))
+
+
 if __name__ == "__main__":
     unittest.main()

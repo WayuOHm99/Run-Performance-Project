@@ -16,6 +16,7 @@ from dashboard_data import (
     load_wellness_data,
 )
 from dashboard_domain import (
+    _to_datetime,
     calendar_aligned_frame,
     field_when,
     fmt_num,
@@ -72,7 +73,7 @@ if not predictions.empty:
         (predictions["calendar_date"] >= pd.Timestamp(ctx.start_date))
         & (predictions["calendar_date"] <= pd.Timestamp(ctx.end_date))
     ]
-    if len(in_range) >= 2:
+    if any(in_range[col].notna().sum() >= 2 for col in ("time_5k_sec", "time_10k_sec")):
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
         with st.container(border=True):
             st.markdown("**5K และ 10K ที่ Garmin คาดการณ์ในช่วงนี้**")
@@ -80,12 +81,19 @@ if not predictions.empty:
             left, right = st.columns(2)
             for column, label, holder in (("time_5k_sec", "5K", left),
                                           ("time_10k_sec", "10K", right)):
-                frame = pd.DataFrame({"วันที่": chart["calendar_date"], label: chart[column] / 60})
-                holder.line_chart(frame, x="วันที่", y=label, x_label="",
-                                  y_label="นาที", height=CHART_HEIGHT)
+                if in_range[column].notna().sum() >= 2:
+                    frame = pd.DataFrame({"วันที่": chart["calendar_date"], label: chart[column] / 60})
+                    holder.line_chart(frame, x="วันที่", y=label, x_label="",
+                                      y_label="นาที", height=CHART_HEIGHT)
+                else:
+                    holder.caption(f"ยังไม่มีข้อมูล {label} พอวาดกราฟในช่วงนี้")
 
 if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
-    in_range = history[(pd.to_datetime(history["calendar_date"]) >= pd.Timestamp(ctx.start_date))]
+    history_dates = _to_datetime(history["calendar_date"])
+    in_range = history[
+        (history_dates >= pd.Timestamp(ctx.start_date))
+        & (history_dates <= pd.Timestamp(ctx.end_date))
+    ]
     if in_range["vo2max_trend"].notna().sum() >= 2:
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
         with st.container(border=True):

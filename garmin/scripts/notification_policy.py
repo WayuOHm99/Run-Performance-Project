@@ -14,9 +14,14 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 _IDENTIFIER = re.compile(r"[a-zA-Z0-9_.:'-]{1,200}\Z")
 _FUTURE_SKEW = timedelta(minutes=10)
+_INACTIVE_RETENTION = timedelta(days=30)
 
 
 class PolicyError(ValueError):
@@ -159,7 +164,7 @@ def update_state(
         # Missing conditions mean recovered only when the caller completed a
         # trustworthy observation.  Sleep/parse failures are unknown, not healthy.
         if observation_complete:
-            for identity, record in list(records.items()):
+            for _identity, record in list(records.items()):
                 if record.get("scope") != scope or not record.get("active"):
                     continue
                 key = record.get("key")
@@ -171,6 +176,19 @@ def update_state(
                     })
                     record["active"] = False
                     record["changed_at"] = now_text
+
+        # Prune inactive tombstones older than 30 days so state never grows unboundedly.
+        for record_id, record in list(records.items()):
+            if record.get("active"):
+                continue
+            stamp_raw = record.get("changed_at") or record.get("last_notified")
+            if not stamp_raw:
+                continue
+            try:
+                if now - _aware(stamp_raw) >= _INACTIVE_RETENTION:
+                    del records[record_id]
+            except PolicyError:
+                del records[record_id]
 
         for key, item in current.items():
             identity = f"{scope}|{key}"

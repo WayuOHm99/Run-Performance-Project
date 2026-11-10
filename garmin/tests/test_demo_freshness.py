@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import os
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import sys
@@ -46,11 +47,12 @@ class CoverageTests(unittest.TestCase):
         import streamlit as st
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             path = run_demo.create_demo_database(directory, LAST_DAY)
-            with sqlite3.connect(path) as conn:
+            with closing(sqlite3.connect(path)) as conn:
                 conn.execute("INSERT INTO fact_daily_wellness (athlete_id, calendar_date) VALUES (3, ?)",
                              (LAST_DAY.isoformat(),))
                 conn.execute("INSERT INTO fact_activity (activity_id, athlete_id, fetched_at, deleted_at)"
                              " VALUES (999, 3, ?, 'deleted')", (f"{LAST_DAY}T01:00:00Z",))
+                conn.commit()
             with patch.dict(os.environ, {"GARMIN_DATA_DIR": directory}):
                 st.cache_data.clear()
                 result = load_freshness(3, LAST_DAY - dt.timedelta(days=29), LAST_DAY, LAST_DAY)

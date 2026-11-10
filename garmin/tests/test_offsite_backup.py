@@ -70,17 +70,12 @@ def load_validator():
 
 
 def load_offsite_backup():
-    scripts_dir = str(OFFSITE_SCRIPT.parent)
-    sys.path.insert(0, scripts_dir)
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "offsite_backup_under_test", OFFSITE_SCRIPT
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        sys.path.remove(scripts_dir)
+    spec = importlib.util.spec_from_file_location(
+        "offsite_backup_under_test", OFFSITE_SCRIPT
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class SqliteBackupValidationTests(unittest.TestCase):
@@ -446,7 +441,7 @@ class OffsiteBackupCliTests(unittest.TestCase):
         self.assertIn("restic restore latest", source)
         self.assertIn("uv sync --project garmin --frozen", source)
         self.assertIn("--dashboard-probe", source)
-        self.assertIn("actions/upload-artifact@v4", source)
+        self.assertIn("actions/upload-artifact@v7", source)
         self.assertIn("upload_recovered_files:", source)
         self.assertIn("if: ${{ inputs.upload_recovered_files }}", source)
         self.assertRegex(
@@ -530,25 +525,19 @@ class OffsiteBackupCliTests(unittest.TestCase):
             self.assertTrue(validate.call_args.kwargs["dashboard_probe"])
             cleanup.assert_called_once_with(root)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-def load_offsite_module():
-    # สคริปต์ import เพื่อนบ้านในโฟลเดอร์เดียวกัน (backup_db) จึงต้องมี scripts/ ใน sys.path
-    scripts_dir = str(OFFSITE_SCRIPT.parent)
-    added = scripts_dir not in sys.path
-    if added:
-        sys.path.insert(0, scripts_dir)
-    try:
-        spec = importlib.util.spec_from_file_location("offsite_backup_under_test", OFFSITE_SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        if added:
-            sys.path.remove(scripts_dir)
+    def test_restore_drill_cleans_up_temp_tree_even_on_keyboard_interrupt(self):
+        offsite = load_offsite_backup()
+        with tempfile.TemporaryDirectory(prefix="restore-interrupt-") as raw:
+            root = Path(raw) / "run-performance-restore-drill-interrupt"
+            root.mkdir()
+            with (
+                mock.patch.object(offsite.tempfile, "mkdtemp", return_value=str(root)),
+                mock.patch.object(offsite, "_get_password", side_effect=KeyboardInterrupt()),
+                mock.patch.object(offsite, "_cleanup_restore_tree") as cleanup,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    offsite.run_restore_drill()
+            cleanup.assert_called_once_with(root)
 
 
 class _FakeCompleted:
@@ -560,7 +549,7 @@ class EnsureReleaseTests(unittest.TestCase):
     """The release only has to exist; creating it is a means, not the goal."""
 
     def setUp(self):
-        self.module = load_offsite_module()
+        self.module = load_offsite_backup()
         self.calls = []
 
     def _patched_run(self, responses):
@@ -606,3 +595,7 @@ class EnsureReleaseTests(unittest.TestCase):
         }):
             self.module._ensure_release("gh", "owner/repo")
         self.assertIn("create", [c[2] for c in self.calls])
+
+
+if __name__ == "__main__":
+    unittest.main()

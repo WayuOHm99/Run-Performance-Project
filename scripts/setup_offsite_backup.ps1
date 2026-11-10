@@ -107,8 +107,15 @@ function Test-SuccessfulProof([string]$Path) {
 }
 
 function Invoke-OffsiteWorker([string]$Python, [string]$Worker, [string]$Command) {
-    $output = & $Python $Worker $Command --json
-    $code = $LASTEXITCODE
+    $previousEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    try {
+        $output = & $Python -X utf8 $Worker $Command --json
+        $code = $LASTEXITCODE
+    }
+    finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
     if ($code -ne 0) {
         throw "พิสูจน์ $Command ไม่สำเร็จ: $($output | Select-Object -Last 1)"
     }

@@ -8,12 +8,16 @@
   "files.watcherExclude": {
     "**/__pycache__/**": true,
     "garmin/.venv/**": true,
-    "garmin/data/**": true
+    "garmin/data/**": true,
+    "garmin/tokens/**": true
   },
   "git.confirmSync": true,
   "git.enableSmartCommit": false,
+  "python.defaultInterpreterPath": "${workspaceFolder}/garmin/.venv/Scripts/python.exe",
   "search.exclude": {
     "**/__pycache__": true,
-    "garmin/.venv": true
+    "garmin/.venv": true,
+    "garmin/data/**": true,
+    "garmin/tokens/**": true
   }
 }

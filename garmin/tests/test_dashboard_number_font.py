@@ -21,7 +21,7 @@ import sys
 GARMIN_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_PATH = GARMIN_ROOT / "scripts" / "dashboard.py"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dashboard_modules import ALL_SRC  # noqa: E402
+from dashboard_modules import ALL_SRC
 
 # CSS ของตัวเลขย้ายไปนิยามที่ dashboard_view.py แต่ยังถูกฉีดที่ระดับบนสุดของ dashboard.py
 # ยามชุดนี้จึงต้องอ่านทั้งสี่ไฟล์ ไม่งั้นมันจะรายงานว่า "ไม่มีกฎไหนใช้ Plex Mono เลย"
@@ -100,12 +100,12 @@ class NumbersUseMonoTests(unittest.TestCase):
             self.assertEqual([MONO_FAMILY, THAI_FAMILY, "monospace"], stack)
 
     def test_mono_rule_for_metrics_runs_outside_the_tab_blocks(self):
-        """`st.metric` กระจายอยู่ทุกแท็บ และแท็บที่ไม่ได้เปิดไม่รัน (lazy `tab.open`)
+        """`st.metric` กระจายอยู่ทุกหน้าของแอป จึงต้องฉีด CSS ที่ระดับบนสุดของ ``dashboard.py`` เสมอ
 
-        ถ้า CSS ของ metric ถูกฉีดอยู่ในบล็อกแท็บใดแท็บหนึ่ง แท็บอื่นจะไม่ได้ฟอนต์เลย
-        ข้อนี้จึงยืนยันว่ามันเป็นคำสั่งระดับบนสุดของสคริปต์ = รันทุกรอบไม่ว่าเปิดแท็บไหน
+        ต้องตรวจเฉพาะ ``DASHBOARD_PATH`` ไม่ใช่ ``ALL_SRC`` เพราะคำสั่งใน ``app_pages/*.py``
+        ก็เป็นคำสั่งระดับบนสุดของไฟล์หน้านั้นเหมือนกัน ถ้าย้ายไปไว้ในหน้าเดียวอีก 5 หน้าจะหลุดทันที
         """
-        tree = ast.parse(DASHBOARD_SRC)
+        tree = ast.parse(DASHBOARD_PATH.read_text(encoding="utf-8"))
         top_level_names = set()
         for node in tree.body:
             if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):

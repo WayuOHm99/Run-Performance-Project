@@ -738,13 +738,18 @@ def check_unfinished_runs(now=None) -> list:
 
         grace = RUN_GRACE_MIN.get(lane, 60)
         elapsed_min = (now - started_at).total_seconds() / 60
-        if elapsed_min > grace:
+        if elapsed_min < -MAX_FUTURE_MINUTES:
+            findings.append(Finding(
+                f"unfinished_run:{lane}", ERROR,
+                f"{label}: เวลาเริ่มรอบใน {marker_name} อยู่ในอนาคต {-elapsed_min:.0f} นาที",
+            ))
+        elif elapsed_min > grace:
             findings.append(Finding(f"unfinished_run:{lane}", ERROR,
                                      f"{label}: เริ่มรอบ {_fmt_local(started_at)} แล้วไม่จบ "
                                      f"(เกิน grace {grace} นาที — โดนปิด/เครื่องดับกลางทาง)"))
         else:
             findings.append(Finding(f"unfinished_run:{lane}", OK,
-                                     f"{label}: รอบกำลังรันอยู่ (เริ่มมา {elapsed_min:.0f} นาที ยังอยู่ในช่วง grace)"))
+                                     f"{label}: รอบกำลังรันอยู่ (เริ่มมา {max(elapsed_min, 0):.0f} นาที ยังอยู่ในช่วง grace)"))
     if not findings:
         findings.append(Finding("unfinished_run", OK, "ไม่มีรอบไหนเริ่มแล้วไม่จบ"))
     return findings
@@ -752,10 +757,10 @@ def check_unfinished_runs(now=None) -> list:
 
 # ── ตัวช่วยเปิด sqlite แบบ read-only ล้วนแล้วรัน quick_check (ใช้ทั้งเช็ค 5 และ 6) ──
 
-def _quick_check_sqlite_file(path: Path):
+def _quick_check_sqlite_file(path: Path, *, immutable: bool = False):
     """เปิดไฟล์ sqlite แบบ read-only เท่านั้นแล้วรัน PRAGMA quick_check
     คืน (ok: bool, detail: str) — ไม่มีทางเขียน/แก้ไฟล์เป้าหมายได้เลยจากฟังก์ชันนี้"""
-    uri = f"file:{Path(path).as_posix()}?mode=ro"
+    uri = f"file:{Path(path).resolve().as_posix()}?mode=ro" + ("&immutable=1" if immutable else "")
     try:
         conn = sqlite3.connect(uri, uri=True)
     except sqlite3.OperationalError as e:
@@ -806,9 +811,8 @@ def check_backup(now=None) -> list:
     size = latest.stat().st_size
     mtime = _to_utc(datetime.fromtimestamp(latest.stat().st_mtime))
     age_hours = (now - mtime).total_seconds() / 3600
-    # ขนาดไฟล์อย่างเดียวไม่พอ — ไฟล์ขนาดปกติก็เสียได้ (ตัด/คัดลอกครึ่งเดียวแล้วพอดีขนาดใกล้เคียง)
-    # ต้องเปิดจริงด้วย quick_check ยืนยันว่าเป็น sqlite ที่สมบูรณ์ ไม่ใช่แค่ "ไฟล์ไม่เล็กเกินไป"
-    integrity_ok, integrity_detail = _quick_check_sqlite_file(latest)
+    # สำเนารายวันเป็นไฟล์นิ่ง เปิดแบบ immutable=1 เพื่อไม่สร้าง sidecar -wal/-shm ข้างไฟล์สำรอง
+    integrity_ok, integrity_detail = _quick_check_sqlite_file(latest, immutable=True)
 
     if not integrity_ok:
         findings.append(Finding("backup:daily_files", ERROR,
@@ -817,6 +821,9 @@ def check_backup(now=None) -> list:
     elif size < BACKUP_MIN_BYTES:
         findings.append(Finding("backup:daily_files", ERROR,
                                  f"{latest.name} เล็กผิดปกติ ({size} bytes) — สงสัยคัดลอกไม่สำเร็จ"))
+    elif age_hours * 60 < -MAX_FUTURE_MINUTES:
+        findings.append(Finding("backup:daily_files", ERROR,
+                                 f"{latest.name} มีเวลาแก้ไขอยู่ในอนาคต {-age_hours * 60:.0f} นาที"))
     elif age_hours > BACKUP_ERROR_HOURS:
         findings.append(Finding("backup:daily_files", ERROR,
                                  f"{latest.name} เก่ามาก ({age_hours:.1f} ชม., {size / 1024:.0f} KB, {integrity_detail})"))

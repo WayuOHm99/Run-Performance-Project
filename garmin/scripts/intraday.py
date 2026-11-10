@@ -196,7 +196,7 @@ def store_intraday(conn, athlete_id, payloads, *, failures=None, date_str=None):
     value/source_code เป็นสถานะเดียวกัน: ค่าใหม่หรือรหัสใหม่แทนทั้งคู่;
     ถ้าทั้งคู่เป็น NULL แปลว่าไม่มีข้อมูลใหม่ จึงเก็บสถานะเดิมไว้.
     """
-    counts = {m: 0 for m in METRICS}
+    counts = dict.fromkeys(METRICS, 0)
     jobs = (
         ("heart_rate", "heart_rate", parse_heart_rate, HEART_RATE_ENDPOINT),
         ("stress", "stress", parse_stress, STRESS_ENDPOINT),

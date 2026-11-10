@@ -13,7 +13,7 @@ from pathlib import Path
 
 GARMIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dashboard_modules import ALL_SRC as DASHBOARD_SRC  # noqa: E402
+from dashboard_modules import ALL_SRC as DASHBOARD_SRC
 
 PROJECT_SRC = (GARMIN_ROOT.parent / "docs" / "PROJECT.md").read_text(encoding="utf-8")
 TREE = ast.parse(DASHBOARD_SRC)
@@ -46,7 +46,7 @@ class GarminOnlyDashboardPolicyTests(unittest.TestCase):
             self.assertIn(statement, PROJECT_SRC)
 
     def test_dashboard_has_no_manual_health_or_training_entry_widgets(self):
-        """ตัวเลือกนักกีฬา/ช่วงวันที่คือ filter — ช่องกรอกข้อมูลไม่อนุญาต"""
+        """ตัวเลือกนักกีฬา/ช่วงวันที่คือ filter — ช่องกรอกข้อมูลไม่อนุญาตไม่ว่าจะเรียกผ่าน st หรือ container"""
         forbidden = {
             "form", "form_submit_button", "data_editor", "text_input", "text_area",
             "number_input", "slider", "toggle", "checkbox", "chat_input", "file_uploader",
@@ -54,7 +54,6 @@ class GarminOnlyDashboardPolicyTests(unittest.TestCase):
         calls = [
             (node.func.attr, node.lineno) for node in ast.walk(TREE)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name) and node.func.value.id == "st"
             and node.func.attr in forbidden
         ]
         self.assertEqual([], calls, f"พบ widget สำหรับกรอกข้อมูล: {calls}")

@@ -300,7 +300,7 @@ class HealthcheckPingUnitTests(EnvVarIsolatedMixin, unittest.TestCase):
 
     def test_timeout_is_swallowed(self):
         os.environ[backup_db.HEALTHCHECK_ENV_VAR] = "https://hc-ping.com/abc123"
-        with mock.patch("urllib.request.urlopen", side_effect=socket.timeout("timed out")):
+        with mock.patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
             try:
                 backup_db.notify_healthcheck("start")
             except Exception as e:
@@ -436,7 +436,7 @@ class MainExitCodeUnaffectedByHealthcheckOutageTests(EnvVarIsolatedMixin, unitte
              mock.patch.object(backup_db, "write_status"), \
              mock.patch.object(backup_db, "snapshot", **snapshot_kwargs), \
              mock.patch.object(backup_db, "rotate_daily"), \
-             mock.patch("urllib.request.urlopen", side_effect=socket.timeout("simulated outage")):
+             mock.patch("urllib.request.urlopen", side_effect=TimeoutError("simulated outage")):
             return backup_db.main()
 
     def test_success_path_same_exit_code_when_healthchecks_is_down(self):

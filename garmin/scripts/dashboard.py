@@ -9,10 +9,10 @@
 
 import datetime
 import os
-import time
 
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 
 from dashboard_context import honour_pending_page, set_page_context
 from dashboard_data import (
@@ -26,7 +26,12 @@ from dashboard_data import (
     load_latest_fetch,
     load_wellness_data,
 )
-from dashboard_domain import bangkok_date, summarize_metric_group, to_bangkok_timestamp
+from dashboard_domain import (
+    _to_datetime,
+    bangkok_date,
+    summarize_metric_group,
+    to_bangkok_timestamp,
+)
 from dashboard_freshness import load_freshness
 
 AUTO_REFRESH_SEC = 60
@@ -75,16 +80,13 @@ def auto_refresh_dashboard():
     """รันทั้งแอปใหม่ทุก 60 วินาทีให้ตัวเลขสดอยู่เสมอไม่ว่าจะค้างหน้าไหน
 
     ไม่ล้าง cache เอง — loader ทุกตัวมี ttl 30 วิ ซึ่งสั้นกว่ารอบนี้อยู่แล้ว
+    สั่ง rerun เฉพาะตอนที่ถูกปลุกจากรอบ fragment timer (`fragment_ids_this_run`)
+    เพื่อไม่ให้คลิกของผู้ใช้หลังครบ 60 วิเกิด double-rerun และไม่ข้ามรอบเพราะ jitter มิลลิวินาที
     **ต้องเรียกนอกทุกเงื่อนไขท้ายไฟล์** เคยถูกเยื้องเข้าไปใต้แท็บเดียวแล้ว
     อีกห้าแท็บค้างข้อมูลเดิมเงียบ ๆ (c9f4b07)
     """
-    now = time.monotonic()
-    last_refresh = st.session_state.get("_dashboard_auto_refresh_at")
-    if last_refresh is None:
-        st.session_state["_dashboard_auto_refresh_at"] = now
-        return
-    if now - last_refresh >= AUTO_REFRESH_SEC:
-        st.session_state["_dashboard_auto_refresh_at"] = now
+    ctx = get_script_run_ctx()
+    if ctx is not None and ctx.fragment_ids_this_run:
         st.rerun(scope="app")
 
 
@@ -151,6 +153,13 @@ with st.sidebar:
     if period == "ทั้งหมด":
         start_date, end_date = load_first_dashboard_date(athlete_id) or today, today
     elif period == "กำหนดเอง":
+        existing_range = st.session_state.get("custom_history_range")
+        if isinstance(existing_range, (tuple, list)):
+            clamped = tuple(min(today, d) for d in existing_range if isinstance(d, datetime.date))
+            if clamped:
+                st.session_state["custom_history_range"] = clamped
+        elif isinstance(existing_range, datetime.date) and existing_range > today:
+            st.session_state["custom_history_range"] = today
         picked = st.date_input(
             "เลือกช่วงวันที่", value=(today - datetime.timedelta(days=29), today),
             max_value=today, key="custom_history_range",
@@ -200,7 +209,7 @@ with st.sidebar:
 wellness_df = load_wellness_data(athlete_id, start_date.isoformat(), end_date.isoformat())
 activity_df = load_activity_data(athlete_id, start_date.isoformat(), end_date.isoformat())
 if not activity_df.empty:
-    activity_df["start_time_local"] = pd.to_datetime(activity_df["start_time_local"])
+    activity_df["start_time_local"] = _to_datetime(activity_df["start_time_local"])
 
 set_page_context(
     demo_mode=demo_mode,

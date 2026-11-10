@@ -28,9 +28,13 @@ from getpass import getpass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 MIN_PY = (3, 12)
-GARMINCONNECT_VERSION = "0.3.11"
+GARMINCONNECT_VERSION = "0.3.20"
 GARMINCONNECT_REQUIREMENT = f"garminconnect=={GARMINCONNECT_VERSION}"
 
 _WINDOWS_PRIVATE_ACL = r"""
@@ -184,7 +188,7 @@ def ensure_garminconnect():
                 GARMINCONNECT_REQUIREMENT,
             ]
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"❌ ติดตั้งอัตโนมัติไม่สำเร็จ: {e}")
         print("   ลองรันคำสั่งนี้เองในเทอร์มินัลก่อน แล้วรันสคริปต์ใหม่:")
         print(f"   {sys.executable} -m pip install {GARMINCONNECT_REQUIREMENT}")
@@ -243,7 +247,7 @@ def main() -> None:
     try:
         try:
             harden_private_path(token_dir, directory=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"❌ สร้างพื้นที่เก็บ token แบบส่วนตัวไม่สำเร็จ: {e}")
             _pause_exit(1)
 
@@ -261,7 +265,7 @@ def main() -> None:
             )
             garmin.login(str(token_dir))
             full_name = garmin.get_full_name()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"❌ เข้าสู่ระบบไม่สำเร็จ: {e}")
             print()
             print("สาเหตุที่พบบ่อย:")
@@ -277,7 +281,7 @@ def main() -> None:
             _pause_exit(1)
         try:
             harden_private_path(token_file, directory=False)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"❌ ล็อกสิทธิ์ไฟล์ token ไม่สำเร็จ: {e}")
             _pause_exit(1)
 
@@ -293,7 +297,7 @@ def main() -> None:
             published = True
             # Verify/apply again after rename; never trust the destination parent ACL.
             harden_private_path(zip_path, directory=False)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if published:
                 zip_path.unlink(missing_ok=True)
             print(f"❌ สร้างไฟล์ ZIP แบบส่วนตัวไม่สำเร็จ: {e}")

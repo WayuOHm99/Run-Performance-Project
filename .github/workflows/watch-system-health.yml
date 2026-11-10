@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
@@ -37,17 +37,26 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          gh release download system-health
-          --repo "$GITHUB_REPOSITORY"
-          --pattern system-health.json
-          --dir "$RUNNER_TEMP"
+        run: |
+          for attempt in 1 2 3; do
+            if gh release download system-health \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern system-health.json \
+              --dir "$RUNNER_TEMP" \
+              --clobber; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 5))
+            fi
+          done
+          exit 1
 
       # exit 2 = "เงียบแต่ยังไม่ตัดสิน" (โน้ตบุ๊กอาจหลับอยู่) ซึ่งต้องแยกจาก exit 1 ให้ได้
       # แต่ steps.<id>.outcome บอกได้แค่ success/failure จึงต้องส่ง exit code ออกมาเอง
       - name: Validate heartbeat
         id: validate
-        if: always()
+        if: always() && !cancelled()
         continue-on-error: true
         run: |
           set +e
@@ -63,7 +72,7 @@ jobs:
 
       - name: Decide the incident verdict
         id: verdict
-        if: always()
+        if: always() && !cancelled()
         env:
           FORCED: ${{ inputs.force_failure }}
           DOWNLOAD: ${{ steps.download.outcome }}
@@ -82,7 +91,7 @@ jobs:
       # โกหกว่า "recovered" ทั้งที่ยังไม่มี heartbeat ใหม่มายืนยันสักรอบ
       - name: Open or recover the system incident
         id: incident
-        if: always() && steps.verdict.outputs.status != 'quiet'
+        if: always() && !cancelled() && steps.verdict.outputs.status != 'quiet'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEARTBEAT_STATUS: ${{ steps.verdict.outputs.status }}
@@ -98,12 +107,12 @@ jobs:
       # เปิด incident หรือส่ง incident ไม่สำเร็จ · output ว่าง (สคริปต์ล้มก่อนเขียน) = แดง
       - name: Fail after incident delivery
         if: >-
-          always() && steps.verdict.outputs.status == 'failure'
+          always() && !cancelled() && steps.verdict.outputs.status == 'failure'
           && steps.incident.outputs.fail_run != 'false'
         run: exit 1
 
       - name: Note the incident that is still open
         if: >-
-          always() && steps.verdict.outputs.status == 'failure'
+          always() && !cancelled() && steps.verdict.outputs.status == 'failure'
           && steps.incident.outputs.fail_run == 'false'
         run: echo "::warning::Heartbeat still unhealthy; tracked in the open 'Run Performance system alert' issue."
