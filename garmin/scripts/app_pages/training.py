@@ -48,10 +48,13 @@ with st.container(horizontal=True):
 
 weeks = weekly_totals(activities, ctx.start_date, ctx.end_date)
 weeks["สัปดาห์"] = weeks["week"].dt.strftime("%d/%m")
-weeks = weeks.rename(columns={"run_km": "ระยะวิ่ง (km)"}).round(1)
+weeks = weeks.rename(columns={"run_km": "ระยะวิ่ง (km)"})
+numeric_cols = ["ระยะวิ่ง (km)", "hours"]
+weeks[numeric_cols] = weeks[numeric_cols].round(1)
 # กราฟซ้อนต้องเป็นตารางยาว ไม่งั้น tooltip ขึ้นชื่อคอลัมน์ภายในอย่าง "value"/"color"
 zones_long = weeks.melt(id_vars="สัปดาห์", value_vars=list(HR_ZONE_LABELS),
-                        var_name="โซน", value_name="นาที").round(0)
+                        var_name="โซน", value_name="นาที")
+zones_long["นาที"] = zones_long["นาที"].round(0)
 
 left, right = st.columns(2)
 with left, st.container(border=True):

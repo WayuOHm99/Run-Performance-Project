@@ -1,9 +1,12 @@
 {
   "recommendations": [
     "anthropic.claude-code",
+    "charliermarsh.ruff",
     "davidanson.vscode-markdownlint",
     "ms-python.python",
-    "openai.chatgpt"
+    "ms-vscode.powershell",
+    "openai.chatgpt",
+    "tamasfe.even-better-toml"
   ],
   "unwantedRecommendations": ["ritwickdey.liveserver"]
 }

@@ -353,10 +353,6 @@ class MainLaneTests(unittest.TestCase):
         self.assertEqual(remaining, [66.0])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PruneFailureVisibilityTests(IntradayBase):
     def test_a_failed_prune_is_recorded_not_swallowed(self):
         # เดิม except แล้ว rollback เงียบ ๆ — ถ้าล้มถาวร ตารางจะโตไม่หยุดโดยไม่มีใครรู้
@@ -365,3 +361,31 @@ class PruneFailureVisibilityTests(IntradayBase):
                 mock.patch.object(backfill, "_intraday_module", return_value=intraday):
             backfill._prune_intraday(self.conn, failures)
         self.assertEqual([f.get("endpoint") for f in failures], ["intraday_prune"])
+
+
+class IntradayQueryPlanTests(IntradayBase):
+    """คิวรีหน้าทีมและ prune ต้องใช้ index ตรง ไม่กวาดทั้งตารางเมื่อเก็บครบ 180 วัน (~830k แถว)."""
+
+    def _plan_details(self, sql, params):
+        rows = self.conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+        return " | ".join(str(row[-1]) for row in rows)
+
+    def test_team_day_query_uses_date_timestamp_index_without_temp_sort(self):
+        details = self._plan_details(
+            "SELECT athlete_id, metric, ts_utc, value FROM fact_wellness_intraday "
+            "WHERE calendar_date = ? ORDER BY ts_utc",
+            (DAY,),
+        )
+        self.assertNotIn("SCAN fact_wellness_intraday", details)
+        self.assertNotIn("TEMP B-TREE", details)
+
+    def test_prune_delete_uses_timestamp_index_without_full_scan(self):
+        details = self._plan_details(
+            "DELETE FROM fact_wellness_intraday WHERE ts_utc < ?",
+            ("2030-01-01T00:00:00Z",),
+        )
+        self.assertNotIn("SCAN fact_wellness_intraday", details)
+
+
+if __name__ == "__main__":
+    unittest.main()

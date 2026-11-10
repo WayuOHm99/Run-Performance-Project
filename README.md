@@ -57,7 +57,7 @@ Garmin Connect API  ──►  SQLite (garmin.db)  ──►  Streamlit Coach Da
 
 - `garmin.db` และ token ของบัญชี Garmin **อยู่นอก git ทั้งหมด** และจำกัดสิทธิ์ไฟล์ด้วย ACL
 - รหัสผ่าน Garmin **ไม่ถูกเก็บที่ใดเลย** ใช้แค่ครั้งเดียวตอนขอ token
-- Dashboard เปิดเฉพาะ `127.0.0.1` คือดูได้จากเครื่องโค้ชเท่านั้น
+- Dashboard เปิดเฉพาะ `127.0.0.1` คือดูได้จากเครื่องโค้ชเท่านั้น (ถ้าต้องการเปิดดูส่วนตัวจากมือถือผ่าน Tailscale แบบไม่เปิดสู่สาธารณะ ดู `docs/PRIVATE_ACCESS.md`)
 - Backup ที่ออกนอกเครื่องถูกเข้ารหัสก่อนเสมอ
 
 ## 🧰 เทคโนโลยี
@@ -67,7 +67,7 @@ Garmin Connect API  ──►  SQLite (garmin.db)  ──►  Streamlit Coach Da
 | ภาษา | Python 3.14, จัดการ dependency ด้วย [uv](https://docs.astral.sh/uv/) |
 | ดึงข้อมูล | [`garminconnect`](https://github.com/cyberjunky/python-garminconnect) |
 | ฐานข้อมูล | SQLite (โหมด WAL) |
-| Dashboard | Streamlit (multipage และกราฟมาตรฐาน), pandas |
+| Dashboard | Streamlit (multipage และกราฟมาตรฐาน), Altair, pandas |
 | งานอัตโนมัติ | Windows Task Scheduler, PowerShell |
 | Backup | Restic, GitHub Releases (private) |
 | CI | GitHub Actions: unittest, py_compile และตรวจว่าเทสไม่แตะข้อมูลจริง |

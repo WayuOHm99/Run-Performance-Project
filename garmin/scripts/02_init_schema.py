@@ -351,7 +351,8 @@ def init_schema(db_path: Path | None = None):
     added_w = _migrate(cur, "fact_daily_wellness", WELLNESS_COLUMNS)
     added_d = _migrate(cur, "dim_athlete_device", ATHLETE_DEVICE_COLUMNS)
     migrated_recovery = _migrate_recovery_minutes(cur)
-    for table, cols in (("fact_race_prediction", RACE_PREDICTION_COLUMNS),
+    for table, cols in (("fact_wellness_intraday", WELLNESS_INTRADAY_COLUMNS),
+                        ("fact_race_prediction", RACE_PREDICTION_COLUMNS),
                         ("fact_personal_record", PERSONAL_RECORD_COLUMNS),
                         ("fact_gear", GEAR_COLUMNS),
                         ("fact_body_composition", BODY_COMPOSITION_COLUMNS)):
@@ -360,6 +361,8 @@ def init_schema(db_path: Path | None = None):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_activity_athlete_date ON fact_activity(athlete_id, start_time_local)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date ON fact_wellness_intraday(athlete_id, calendar_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_date_ts ON fact_wellness_intraday(calendar_date, ts_utc)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_ts ON fact_wellness_intraday(ts_utc)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_device_athlete ON dim_athlete_device(athlete_id)")
 
     conn.commit()
@@ -379,8 +382,9 @@ def init_schema(db_path: Path | None = None):
         print(f"   ↪ ย้าย Recovery Time เดิมเป็นหน่วยนาที {migrated_recovery} แถว")
     if not (added_a or added_s or added_w or added_d or migrated_recovery):
         print("   (ไม่มีคอลัมน์ใหม่ต้องเพิ่ม)")
-    print("Tables: dim_athlete | dim_athlete_device | fact_activity | fact_activity_split | fact_daily_wellness"
-          " | fact_race_prediction | fact_personal_record | fact_gear | fact_body_composition")
+    print("Tables: dim_athlete | dim_athlete_device | fact_activity | fact_activity_split"
+          " | fact_daily_wellness | fact_wellness_intraday | fact_race_prediction"
+          " | fact_personal_record | fact_gear | fact_body_composition")
 
 
 if __name__ == "__main__":

@@ -312,6 +312,18 @@ class TrainingPageTests(unittest.TestCase):
         self.assertEqual(metrics["ระยะวิ่งรวม"], "10.3 km")      # 10 km + 0.3 km วิ่ง
         self.assertEqual(metrics["จำนวนกิจกรรม"], "3")          # รวมเวท
 
+    def test_training_page_emits_no_pandas_datetime_round_warning(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            render_page(TRAINING_PAGE, seed_team)
+        round_warnings = [
+            str(item.message) for item in caught
+            if "obj.round has no effect with datetime" in str(item.message)
+        ]
+        self.assertEqual(round_warnings, [])
+
 
 class BodyPageTests(unittest.TestCase):
     def test_athlete_whose_watch_stopped_still_sees_their_last_values(self):

@@ -155,16 +155,16 @@ async def main():
               if (team) team.click();
             })()""")
             await settle(tab, SUBHEADS, lambda v: bool(v) and "ทีม" in v[0], timeout=45)
-            # รอให้การ์ดวาดปุ่มเสร็จก่อน ไม่งั้นบางรอบจะไปถึงตอนหน้ายังว่าง
+            # รอให้การ์ดวาดปุ่มดูข้อมูลรายคนเสร็จก่อน (ข้างบนมีปุ่มเลื่อนวันที่ team-prev-day)
             await settle(
                 tab,
                 "document.querySelectorAll('[data-testid=stMain] "
-                "[data-testid=\"stButton\"] button').length",
+                "[class*=\"st-key-open-athlete-\"] button').length",
                 lambda v: bool(v) and v >= 1, timeout=45)
 
             picked = await tab.js("""(() => {
               const buttons = [...document.querySelectorAll(
-                '[data-testid=stMain] [data-testid="stButton"] button')];
+                '[data-testid=stMain] [class*="st-key-open-athlete-"] button')];
               const target = buttons.find(b => b.innerText.trim());
               if (!target) return null;
               const label = target.innerText.trim();

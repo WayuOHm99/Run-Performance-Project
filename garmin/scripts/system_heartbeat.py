@@ -185,6 +185,8 @@ def main(argv=None) -> int:
         print(json.dumps({"ok": False, "reason": str(exc)}, ensure_ascii=False))
         return 1
     print(json.dumps(heartbeat, ensure_ascii=False))
+    if args.command == "publish":
+        return 0
     return 1 if heartbeat["status"] == "error" else 0
 
 
