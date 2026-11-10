@@ -317,6 +317,30 @@ class SystemHeartbeatCliTests(unittest.TestCase):
         # หลักฐานว่าสำเร็จไว้ แล้ว watchdog ในเครื่องจะเงียบทั้งที่ publisher พังอยู่
         self.assertLess(body.index("--clobber"), body.index("record_publish("))
 
+    def test_publish_exits_zero_when_delivery_succeeds_even_for_unhealthy_payload(self):
+        """Task SystemHealth มีหน้าที่ส่งสาร ไม่ใช่ล้มตามสารที่ส่ง:
+        ถ้าอัปโหลดขึ้น GitHub Release สำเร็จแล้วต้องคืน 0 เพื่อไม่ให้ Task Scheduler ยิงซ้ำ 2 รอบ
+        และไม่ให้ health_report ฟ้อง LastTaskResult=1 ซ้อนเป็น ERROR ใบที่สอง"""
+        unhealthy = self.heartbeat("2026-08-17T03:00:00+00:00", status="error", errors=1)
+        with patch.object(heartbeat_script, "publish", return_value=unhealthy):
+            self.assertEqual(heartbeat_script.main(["publish"]), 0)
+        with patch.object(
+            heartbeat_script, "publish", side_effect=heartbeat_script.HeartbeatError("upload_failed")
+        ):
+            self.assertEqual(heartbeat_script.main(["publish"]), 1)
+        with tempfile.TemporaryDirectory(prefix="heartbeat-summarize-") as raw:
+            report_path = Path(raw) / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-08-17T03:00:00+00:00",
+                        "summary": {"ok": 28, "warning": 0, "error": 1},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(heartbeat_script.main(["summarize", str(report_path)]), 1)
+
     @unittest.skipUnless(os.name == "nt", "Windows Scheduled Task contract")
     def test_scheduler_publishes_heartbeat_every_two_hours_with_retry(self):
         scheduler = PROJECT_ROOT / "scripts" / "setup_scheduled_tasks.ps1"

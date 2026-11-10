@@ -27,6 +27,7 @@ garmin/.streamlit/secrets.toml
 
 # ── ค่าเฉพาะเครื่องของ Claude Code ──
 .claude/settings.local.json
+.claude/launch.json
 
 # ── ข้อมูลดิบนักกีฬา (ข้อมูลสุขภาพส่วนบุคคล) ──
 # คลัง athletes\ + team_data\ ยุค LINE ถูกลบทิ้งแล้ว 16 ส.ค. 69 แต่กฎนี้ยังอยู่:
