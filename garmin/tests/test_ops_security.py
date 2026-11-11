@@ -515,6 +515,26 @@ class PowerShellEncodingTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(PROJECT_ROOT)):
                 self.assertEqual(path.read_bytes()[:3], b"\xef\xbb\xbf")
 
+    def test_editor_configs_preserve_powershell_utf8_bom_and_crlf(self):
+        vscode_settings = json.loads(
+            (PROJECT_ROOT / ".vscode" / "settings.json").read_text(encoding="utf-8")
+        )
+        ps_settings = vscode_settings.get("[powershell]", {})
+        self.assertEqual(ps_settings.get("files.encoding"), "utf8bom")
+        self.assertEqual(ps_settings.get("files.eol"), "\r\n")
+        for lang in ("[bat]", "[vb]"):
+            self.assertEqual(vscode_settings.get(lang, {}).get("files.eol"), "\r\n")
+
+        editorconfig = (PROJECT_ROOT / ".editorconfig").read_text(encoding="utf-8")
+        self.assertRegex(
+            editorconfig,
+            r"(?ms)^\[(?:\*\.ps1)\]\s*(?:[^\[]*?\bcharset\s*=\s*utf-8-bom\b)",
+        )
+        self.assertRegex(
+            editorconfig,
+            r"(?ms)^\[(?:\*\.ps1)\]\s*(?:[^\[]*?\bend_of_line\s*=\s*crlf\b)",
+        )
+
     def test_acl_all_scope_includes_private_log_child_not_backup_parent(self):
         source = ACL_SCRIPT.read_text(encoding="utf-8-sig")
         self.assertIn("$defaultLogs = @('C:\\Backup\\run-performance-logs')", source)

@@ -2,6 +2,16 @@
   "claudeCode.initialPermissionMode": "plan",
   "explorer.confirmDelete": false,
   "files.eol": "\n",
+  "[powershell]": {
+    "files.encoding": "utf8bom",
+    "files.eol": "\r\n"
+  },
+  "[bat]": {
+    "files.eol": "\r\n"
+  },
+  "[vb]": {
+    "files.eol": "\r\n"
+  },
   "files.exclude": {
     "**/__pycache__": true
   },
