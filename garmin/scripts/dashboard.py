@@ -12,9 +12,7 @@ import os
 
 import pandas as pd
 import streamlit as st
-from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
-
-from dashboard_context import honour_pending_page, set_page_context
+from dashboard_context import honour_pending_page, request_page, set_page_context
 from dashboard_data import (
     DATA_AVAILABILITY_GROUPS,
     db_path,
@@ -33,6 +31,7 @@ from dashboard_domain import (
     to_bangkok_timestamp,
 )
 from dashboard_freshness import load_freshness
+from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 
 AUTO_REFRESH_SEC = 60
 
@@ -59,77 +58,261 @@ DASHBOARD_CSS = """
 [data-testid="stMetricValue"] {
   font-family: 'IBM Plex Mono', 'IBM Plex Sans Thai', monospace;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: #0b1220;
+}
+[data-testid="stMetricValue"] div {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  line-height: 1.25 !important;
+}
+.rp-num {
+  font-family: 'IBM Plex Mono', 'IBM Plex Sans Thai', monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 [data-testid="stMetricLabel"],
 [data-testid="stMetricLabel"] div,
 [data-testid="stMetricLabel"] p {
-  color: #475569;
-  font-weight: 600;
+  color: #475467 !important;
+  font-weight: 600 !important;
+  font-size: 0.8rem !important;
+  letter-spacing: 0.005em !important;
   white-space: normal !important;
   overflow: visible !important;
   text-overflow: clip !important;
-  line-height: 1.3 !important;
+  line-height: 1.35 !important;
 }
 [data-testid="stMetricDelta"],
 [data-testid="stMetricDelta"] div,
 [data-testid="stMetricDelta"] p {
+  color: #667085 !important;
+  background: transparent !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  font-size: 0.76rem !important;
+  font-weight: 400 !important;
   white-space: normal !important;
   overflow: visible !important;
   text-overflow: clip !important;
   overflow-wrap: anywhere !important;
-  line-height: 1.35 !important;
+  line-height: 1.38 !important;
 }
 header[data-testid="stHeader"] {
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid #e2e8f0;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid #e4e7ec;
 }
 a[data-testid="stTopNavLink"] {
-  border-radius: 999px !important;
-  padding: 0.35rem 0.8rem !important;
-  transition: background-color 140ms ease, color 140ms ease;
+  border-radius: 0.5rem !important;
+  padding: 0.38rem 0.82rem !important;
+  font-weight: 500 !important;
+  color: #475467 !important;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 a[data-testid="stTopNavLink"]:hover {
-  background-color: #f1f5f9 !important;
+  background-color: #f2f4f7 !important;
+  color: #0b1220 !important;
 }
-a[data-testid="stTopNavLink"][aria-current="page"] {
-  background-color: #eff6ff !important;
-  color: #1d4ed8 !important;
+a[data-testid="stTopNavLink"][aria-current="page"],
+a[data-testid="stTopNavLink"][aria-current="page"] * {
+  background-color: #0b1220 !important;
+  color: #ffffff !important;
   font-weight: 600 !important;
-  box-shadow: inset 0 0 0 1px #bfdbfe;
 }
 [data-testid="stMainBlockContainer"] {
   max-width: 1440px;
 }
+[data-testid="stMain"] h1 {
+  letter-spacing: -0.02em;
+  padding-bottom: 0.25rem;
+}
+.rp-page-lead {
+  margin: -0.35rem 0 0.75rem;
+  font-size: 0.86rem;
+  color: #526075;
+  line-height: 1.45;
+}
+.rp-sec-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  margin: 1.15rem 0 0.4rem;
+  padding-bottom: 0.38rem;
+  border-bottom: 1px solid #e4e7ec;
+}
+.rp-sec-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #0b1220;
+  letter-spacing: -0.01em;
+}
+.rp-sec-sub {
+  font-size: 0.79rem;
+  color: #667085;
+}
+.rp-chart-head {
+  margin-bottom: 0.35rem;
+  padding-bottom: 0.45rem;
+  border-bottom: 1px solid #f2f4f7;
+}
+.rp-chart-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.rp-chart-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #0b1220;
+  letter-spacing: -0.01em;
+}
+.rp-chart-stat {
+  font-size: 0.75rem;
+  color: #344054;
+  background: #f8f9fb;
+  border: 1px solid #e4e7ec;
+  border-radius: 0.38rem;
+  padding: 0.1rem 0.5rem;
+}
+.rp-chart-guide {
+  font-size: 0.79rem;
+  color: #667085;
+  margin-top: 0.16rem;
+  line-height: 1.4;
+}
+.rp-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.15rem 0 0.3rem;
+}
+.rp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  background: #f9fafb;
+  border: 1px solid #e4e7ec;
+  border-radius: 0.4rem;
+  padding: 0.16rem 0.55rem;
+  font-size: 0.76rem;
+  color: #475467;
+  line-height: 1.35;
+}
+.rp-chip strong {
+  color: #0b1220;
+  font-weight: 600;
+}
+.rp-chip-blue {
+  background: #eff4ff;
+  border-color: #d1e0ff;
+  color: #155eef;
+}
+.rp-act-box {
+  background: #f9fafb;
+  border: 1px solid #eaecf0;
+  border-radius: 0.55rem;
+  padding: 0.5rem 0.7rem;
+  margin-top: 0.15rem;
+  max-height: 175px;
+  overflow-y: auto;
+}
+.rp-act-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.5rem;
+  padding: 0.28rem 0;
+  font-size: 0.8rem;
+  color: #1d2939;
+  border-bottom: 1px solid #eaecf0;
+}
+.rp-act-item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.rp-act-item:first-child {
+  padding-top: 0;
+}
+.rp-act-empty {
+  font-size: 0.79rem;
+  color: #667085;
+  padding: 0.12rem 0;
+}
+.rp-warn-tag {
+  background: #fffaeb;
+  color: #b54708;
+  border: 1px solid #fedf89;
+  border-radius: 0.35rem;
+  padding: 0.04rem 0.42rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
 @media screen {
   section[data-testid="stMain"] {
-    background-color: #f8fafc;
+    background-color: #f5f6f8;
   }
   [data-testid="stMain"] [data-testid="stMetric"],
   [class*="st-key-surface-"],
   [class*="st-key-team-card-"],
   [data-testid="stExpander"] {
     background-color: #ffffff;
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.02);
+    box-shadow: 0 1px 2px rgba(11, 18, 32, 0.04), 0 1px 3px rgba(11, 18, 32, 0.02);
   }
   [class*="st-key-sidebar-"] {
     background-color: #ffffff;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+    box-shadow: 0 1px 2px rgba(11, 18, 32, 0.03);
+  }
+  [class*="st-key-surface-"] [data-testid="stMetric"] {
+    background-color: #f9fafb !important;
+    border: 1px solid #eaecf0 !important;
+    border-radius: 0.55rem !important;
+    padding: 0.65rem 0.85rem !important;
+    box-shadow: none !important;
   }
   [class*="st-key-team-card-"] {
-    transition: box-shadow 160ms ease, border-color 160ms ease;
+    transition: box-shadow 140ms ease, border-color 140ms ease;
+  }
+  [class*="st-key-team-card-"][class*="-complete_day"] {
+    border-top: 2px solid #0d9488 !important;
+  }
+  [class*="st-key-team-card-"][class*="-partial_today"] {
+    border-top: 2px solid #155eef !important;
+  }
+  [class*="st-key-team-card-"][class*="-no_data"] {
+    border-top: 2px solid #d97706 !important;
   }
   [class*="st-key-team-card-"]:hover {
-    border-color: #cbd5e1 !important;
-    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06), 0 2px 4px rgba(15, 23, 42, 0.03);
+    border-color: #d0d5dd !important;
+    box-shadow: 0 6px 16px rgba(11, 18, 32, 0.06), 0 1px 3px rgba(11, 18, 32, 0.03);
   }
   [class*="st-key-team-card-"] [data-testid="stMetric"] {
-    background-color: #f8fafc;
-    border: 1px solid #eef2f6;
-    border-radius: 0.6rem;
-    padding: 0.6rem 0.75rem;
+    background-color: #f9fafb;
+    border: 1px solid #eaecf0;
+    border-radius: 0.55rem;
+    padding: 0.6rem 0.78rem;
     box-shadow: none;
+  }
+  [class*="st-key-team-card-"] [data-testid="stMetricValue"] {
+    font-size: 1.34rem !important;
+  }
+  [class*="st-key-sys-kpi-err-active"] [data-testid="stMetric"] {
+    border-left: 3px solid #dc2626 !important;
+    background-color: #fef3f2 !important;
+  }
+  [class*="st-key-sys-kpi-warn-active"] [data-testid="stMetric"] {
+    border-left: 3px solid #d97706 !important;
+    background-color: #fffaeb !important;
+  }
+  [class*="st-key-sys-kpi-ok"] [data-testid="stMetric"] {
+    border-left: 3px solid #0d9488 !important;
+    background-color: #f9fafb !important;
   }
 }
 [data-testid="stHorizontalBlock"]:has([class*="st-key-team-card-"]) > [data-testid="stColumn"] > div,
@@ -145,36 +328,52 @@ a[data-testid="stTopNavLink"][aria-current="page"] {
 }
 [class*="st-key-open-athlete-"] {
   margin-top: auto;
-  padding-top: 0.5rem;
-  border-top: 1px solid #f1f5f9;
+  padding-top: 0.55rem;
+  border-top: 1px solid #f2f4f7;
 }
 [class*="st-key-open-athlete-"] button {
   width: 100%;
-  justify-content: flex-start;
-  font-weight: 600;
-  color: #1d63dc;
+  justify-content: space-between;
+  font-weight: 600 !important;
+  color: #0b1220 !important;
+  background-color: #ffffff !important;
+  border: 1px solid #d0d5dd !important;
+  border-radius: 0.5rem !important;
+  padding: 0.42rem 0.8rem !important;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
-[class*="st-key-team-toolbar"] {
+[class*="st-key-open-athlete-"] button:hover {
+  background-color: #0b1220 !important;
+  border-color: #0b1220 !important;
+  color: #ffffff !important;
+}
+[class*="st-key-team-toolbar"],
+[class*="st-key-sess-nav"] {
   background-color: #ffffff;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #e4e7ec;
   border-radius: 0.75rem;
-  padding: 0.65rem 0.9rem;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+  padding: 0.65rem 0.95rem;
+  box-shadow: 0 1px 2px rgba(11, 18, 32, 0.03);
 }
 @media (max-width: 640px) {
   [data-testid="stMainBlockContainer"] {
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
+    padding-left: 0.85rem !important;
+    padding-right: 0.85rem !important;
   }
   [data-testid="stMain"] h1 {
-    font-size: 1.45rem !important;
+    font-size: 1.35rem !important;
     line-height: 1.25 !important;
+  }
+  a[data-testid="stTopNavLink"] {
+    padding: 0.3rem 0.6rem !important;
+    font-size: 0.82rem !important;
   }
 }
 @media print {
   [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
   [data-testid="stButton"], [data-testid="stDecoration"], header, footer { display: none !important; }
   * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  .rp-act-box { max-height: none !important; overflow: visible !important; }
   [data-testid="stMetric"], [class*="st-key-surface-"], [class*="st-key-team-card-"] { break-inside: avoid; }
   @page { size: A4 landscape; margin: 8mm; }
 }
@@ -220,22 +419,39 @@ if athletes_df.empty:
 
 PERIODS = {"7 วัน": 7, "30 วัน": 30, "90 วัน": 90, "ทั้งหมด": None, "กำหนดเอง": None}
 
+# ลงทะเบียน st.navigation ก่อนวาด sidebar เพื่อให้ sidebar รู้ว่าผู้ใช้อยู่หน้าไหน
+# แล้วแสดงคำแนะนำ/ปุ่มลัดได้ตรงกับบริบทหน้าปัจจุบัน (st.navigation รันไฟล์เฉพาะตอน page.run())
+page = st.navigation(
+    [
+        st.Page("app_pages/team.py", title="ทีม", icon=":material/groups:", default=True),
+        st.Page("app_pages/body.py", title="ร่างกาย", icon=":material/favorite:"),
+        st.Page("app_pages/training.py", title="การซ้อม", icon=":material/directions_run:"),
+        st.Page("app_pages/estimates.py", title="ค่าประเมิน Garmin",
+                icon=":material/insights:"),
+        st.Page("app_pages/session.py", title="เซสชัน", icon=":material/timer:"),
+        st.Page("app_pages/system.py", title="สถานะระบบ", icon=":material/monitor_heart:"),
+    ],
+    position="top",
+)
+team_wide_page = page.title in ("ทีม", "สถานะระบบ")
+
 with st.sidebar:
-    with st.container(horizontal=True, vertical_alignment="center"):
-        st.markdown("### Run Performance")
-        st.badge("Demo" if demo_mode else "Garmin",
-                 icon=":material/science:" if demo_mode else ":material/watch:",
-                 color="orange" if demo_mode else "blue")
-    fetched = to_bangkok_timestamp(load_latest_fetch())
-    st.caption(
-        f"วันนี้ {today.strftime('%d/%m/%Y')} · "
-        + ("ข้อมูล Demo ทั้งทีม " if demo_mode else "ดึงค่าหลักทั้งทีมล่าสุด ")
-        + (fetched.strftime("%d/%m %H:%M น.") if pd.notna(fetched) else "–")
-    )
-    if st.button("รีเฟรชข้อมูล", icon=":material/refresh:", width="stretch",
-                 help="ข้อมูลรีเฟรชเองทุก 60 วินาที กดเมื่ออยากเห็นทันทีหลังนาฬิกา sync"):
-        st.cache_data.clear()
-        st.rerun()
+    with st.container(border=True, key="sidebar-brand"):
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.markdown("### Run Performance")
+            st.badge("Demo" if demo_mode else "Garmin",
+                     icon=":material/science:" if demo_mode else ":material/watch:",
+                     color="orange" if demo_mode else "blue")
+        fetched = to_bangkok_timestamp(load_latest_fetch())
+        st.caption(
+            f"วันนี้ {today.strftime('%d/%m/%Y')} · "
+            + ("ข้อมูลจำลองทั้งทีม " if demo_mode else "ซิงก์ล่าสุด ")
+            + (fetched.strftime("%d/%m %H:%M น.") if pd.notna(fetched) else "–")
+        )
+        if st.button("รีเฟรชข้อมูลทันที", icon=":material/refresh:", width="stretch",
+                     help="หน้ารีเฟรชเองทุก 60 วินาที กดปุ่มนี้เมื่อเพิ่งซิงก์นาฬิกาเสร็จแล้วอยากเห็นทันที"):
+            st.cache_data.clear()
+            st.rerun()
 
     athlete_options = {int(row["athlete_id"]): row for row in athletes_df.to_dict("records")}
     duplicate_names = set(athletes_df.loc[
@@ -259,8 +475,9 @@ with st.sidebar:
         st.session_state.pop("selected_athlete", None)
 
     with st.container(border=True, key="sidebar-filters"):
+        st.markdown("**เลือกนักกีฬาและช่วงเวลา**")
         athlete_id = st.selectbox(
-            "นักกีฬา (หน้ารายคน)", options=list(athlete_options),
+            "นักกีฬา", options=list(athlete_options),
             format_func=athlete_labels.__getitem__, key="selected_athlete",
         )
         selected_name = athlete_labels[athlete_id]
@@ -289,10 +506,29 @@ with st.sidebar:
         else:
             start_date, end_date = today - datetime.timedelta(days=PERIODS[period] - 1), today
 
+        span_days = max(1, (end_date - start_date).days + 1)
+        st.caption(f"{start_date:%d/%m/%Y} – {end_date:%d/%m/%Y} ({span_days} วัน)")
+        if team_wide_page:
+            st.button(
+                f"เปิดหน้ารายคนของ {selected_name}",
+                icon=":material/arrow_forward:",
+                key="sidebar-open-selected",
+                on_click=request_page,
+                args=("app_pages/body.py",),
+                width="stretch",
+            )
+
     freshness = load_freshness(athlete_id, start_date, end_date, today)
     with st.container(border=True, key="sidebar-freshness"):
-        st.caption(f"**{selected_name}** · สุขภาพล่าสุด {freshness['latest_text']} · "
-                   f"ดึงค่าหลักล่าสุด {freshness['received_at']}")
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.markdown(f"**{selected_name}**")
+            if not freshness["has_history"]:
+                st.badge("ยังไม่มีประวัติ", color="gray", icon=":material/hourglass_empty:")
+            elif freshness["gaps"]:
+                st.badge(f"ว่าง {len(freshness['gaps'])} วัน", color="orange", icon=":material/event_busy:")
+            else:
+                st.badge("ข้อมูลต่อเนื่อง", color="green", icon=":material/check_circle:")
+        st.caption(f"สุขภาพล่าสุด {freshness['latest_text']} · ดึงล่าสุด {freshness['received_at']}")
         if freshness["gaps"]:
             st.caption(f"วันไม่มีข้อมูลสุขภาพในช่วงที่เลือก: {len(freshness['gaps'])} วัน · "
                        "ดูวันที่และขั้นตอนตรวจในหน้าสถานะระบบ")
@@ -327,7 +563,8 @@ with st.sidebar:
             st.caption("นาฬิกาที่พบใน 90 วัน: " + (", ".join(devices) if devices else "ยังไม่มีข้อมูล")
                        + " · ช่องที่ยังไม่เคยได้รับ = Garmin ไม่ได้ส่งมา ไม่ใช่ระบบขัดข้อง")
 
-    st.caption("หน้าทีมใช้วันที่ที่เลือกบนหน้านั้นแยกต่างหาก ไม่ขึ้นกับตัวกรองนักกีฬาหรือช่วงวันที่นี้")
+    if page.title == "ทีม":
+        st.caption(":material/info: หน้าทีมเลือกวันที่แยกบนตัวหน้าเองเพื่อดูทั้งทีมพร้อมกัน")
 
 wellness_df = load_wellness_data(athlete_id, start_date.isoformat(), end_date.isoformat())
 activity_df = load_activity_data(athlete_id, start_date.isoformat(), end_date.isoformat())
@@ -348,19 +585,6 @@ set_page_context(
     activity_df=activity_df,
 )
 
-# st.navigation รันเฉพาะไฟล์ของหน้าที่เปิดอยู่ หน้าอื่นไม่เสียเวลาสร้างกราฟ
-page = st.navigation(
-    [
-        st.Page("app_pages/team.py", title="ทีม", icon=":material/groups:", default=True),
-        st.Page("app_pages/body.py", title="ร่างกาย", icon=":material/favorite:"),
-        st.Page("app_pages/training.py", title="การซ้อม", icon=":material/directions_run:"),
-        st.Page("app_pages/estimates.py", title="ค่าประเมิน Garmin",
-                icon=":material/insights:"),
-        st.Page("app_pages/session.py", title="เซสชัน", icon=":material/timer:"),
-        st.Page("app_pages/system.py", title="สถานะระบบ", icon=":material/monitor_heart:"),
-    ],
-    position="top",
-)
 # ปุ่มบนการ์ดทีมฝากคำขอย้ายหน้าไว้ — คอลแบ็กของปุ่มสั่งย้ายหน้าเองไม่ได้ (ดู dashboard_context)
 honour_pending_page()
 # ต้องลงทะเบียน *ก่อน* page.run() — หน้าที่ไม่มีข้อมูลเรียก st.stop() ซึ่งหยุดทั้งสคริปต์

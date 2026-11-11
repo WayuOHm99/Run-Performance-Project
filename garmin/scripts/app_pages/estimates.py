@@ -7,9 +7,14 @@ VO2max, เวลาคาดการณ์แข่ง, Lactate Threshold, End
 
 import pandas as pd
 import streamlit as st
-
 from dashboard_charts import daily_line_frame_and_spec
-from dashboard_context import page_context
+from dashboard_context import (
+    chart_header,
+    page_context,
+    page_lead,
+    render_metric_grid,
+    section_heading,
+)
 from dashboard_data import (
     load_body_composition,
     load_personal_records,
@@ -25,16 +30,19 @@ from dashboard_domain import (
     fmt_sec,
     latest_field,
     personal_record_rows,
+    series_range_stat,
     value_of,
 )
 
 ctx = page_context()
 today = ctx.today
-CHART_HEIGHT = 220
+CHART_HEIGHT = 225
 
 st.title(f"ค่าประเมิน Garmin · {ctx.selected_name}")
-st.caption("ค่าประมาณจาก algorithm ของ Garmin ไม่ใช่ผลเทสจริง · "
-           "ค่าล่าสุดดึงจากประวัติทั้งหมด กราฟใช้ช่วงวันที่ที่เลือก")
+page_lead(
+    f"ค่าสมรรถนะและเวลาแข่งที่นาฬิกาประเมินจากข้อมูลซ้อมสะสม (ไม่ใช่ผลทดสอบในห้องแล็บ) · "
+    f"กราฟแนวโน้มช่วง {ctx.start_date:%d/%m/%Y} – {ctx.end_date:%d/%m/%Y}"
+)
 
 # ค่าล่าสุดต้องไม่หายเพียงเพราะอยู่นอกช่วงที่เลือก — Garmin อัปเดตบางค่าห่างเป็นเดือน
 history = load_wellness_data(ctx.athlete_id, "1900-01-01", today.isoformat())
@@ -64,54 +72,60 @@ for column, label, render in (
 
 if tiles:
     shown_any = True
-    cols_per_row = 3 if len(tiles) in (5, 6) else min(4, len(tiles))
-    for row_idx in range(0, len(tiles), cols_per_row):
-        chunk = tiles[row_idx:row_idx + cols_per_row]
-        cols = st.columns(len(chunk))
-        for col, (label, value, note) in zip(cols, chunk, strict=False):
-            with col:
-                st.metric(label, value, note, delta_color="off", delta_arrow="off",
-                          border=True, width="stretch")
+    section_heading("ค่าประเมินสมรรถนะล่าสุด", "แสดงค่าล่าสุดที่มีในประวัติพร้อมวันอัปเดต แม้ไม่ได้เปลี่ยนทุกวัน")
+    render_metric_grid(tiles, cols_per_row=4, border=True)
 
 predictions = load_race_predictions(ctx.athlete_id, "1900-01-01", today.isoformat())
 distances = (("time_5k_sec", "5K"), ("time_10k_sec", "10K"),
              ("time_half_sec", "Half"), ("time_full_sec", "Marathon"))
 if not predictions.empty:
     shown_any = True
-    st.subheader("เวลาคาดการณ์แข่ง (Garmin Race Predictor)", anchor=False)
+    section_heading("เวลาคาดการณ์แข่ง (Garmin Race Predictor)", "เวลาเข้าเส้นชัยที่ Garmin ประเมินต่อระยะทางจากประวัติซ้อม")
     pred_tiles = []
     for column, label in distances:
         snapshot = latest_field(predictions, column)
         if snapshot:
             pred_tiles.append((label, fmt_sec(snapshot["value"]), snapshot["date"].strftime("%d/%m/%Y")))
     if pred_tiles:
-        p_cols = st.columns(len(pred_tiles))
-        for col, (label, value, note) in zip(p_cols, pred_tiles, strict=False):
-            with col:
-                st.metric(label, value, note, delta_color="off", delta_arrow="off",
-                          border=True, width="stretch")
+        render_metric_grid(pred_tiles, cols_per_row=4, border=True)
 
+    pred_dates = _to_datetime(predictions["calendar_date"])
     in_range = predictions[
-        (predictions["calendar_date"] >= pd.Timestamp(ctx.start_date))
-        & (predictions["calendar_date"] <= pd.Timestamp(ctx.end_date))
+        (pred_dates >= pd.Timestamp(ctx.start_date))
+        & (pred_dates <= pd.Timestamp(ctx.end_date))
+    ].sort_values("calendar_date", kind="stable")
+
+    race_panels = [
+        (column, label)
+        for column, label in (("time_5k_sec", "5K"), ("time_10k_sec", "10K"))
+        if column in in_range and in_range[column].notna().sum() >= 2
     ]
-    if any(in_range[col].notna().sum() >= 2 for col in ("time_5k_sec", "time_10k_sec")):
+    if race_panels:
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
         chart["วันที่"] = chart["calendar_date"]
-        with st.container(border=True, key="surface-est-race-chart"):
-            st.markdown("**5K และ 10K ที่ Garmin คาดการณ์ในช่วงนี้**")
-            st.caption("หน่วยเป็นนาที · ค่าที่ต่ำลงคือ Garmin คาดว่าวิ่งได้เร็วขึ้น")
-            left, right = st.columns(2)
-            for column, label, holder in (("time_5k_sec", "5K", left),
-                                          ("time_10k_sec", "10K", right)):
-                if in_range[column].notna().sum() >= 2:
-                    mins = chart[["วันที่"]].assign(**{column: chart[column] / 60})
-                    frame, spec = daily_line_frame_and_spec(
-                        mins, [column], [label], y_label="นาที", height=CHART_HEIGHT,
-                    )
-                    holder.vega_lite_chart(frame, spec, width="stretch")
-                else:
-                    holder.caption(f"ยังไม่มีข้อมูล {label} พอวาดกราฟในช่วงนี้")
+        cols = st.columns(2) if len(race_panels) == 2 else [st.container()]
+        for col_holder, (column, label) in zip(cols, race_panels, strict=False):
+            card = col_holder.container(border=True, key=f"surface-est-{label.lower()}")
+            stat_text = series_range_stat(chart[column], formatter=fmt_sec)
+            chart_header(
+                card,
+                f"แนวโน้มเวลา {label} ที่คาดการณ์",
+                "แกนตั้ง = เวลา (นาที:วินาที) · เส้นกราฟลดลงแปลว่าคาดว่าวิ่งได้เร็วขึ้น",
+                stat_text,
+            )
+            secs = chart[["วันที่"]].assign(
+                **{
+                    column: pd.to_numeric(chart[column], errors="coerce"),
+                    "เวลาคาดการณ์": chart[column].map(
+                        lambda v: fmt_sec(v) if pd.notna(v) else None
+                    ),
+                }
+            )
+            frame, spec = daily_line_frame_and_spec(
+                secs, [column], [label],
+                y_label="นาที:วินาที", height=CHART_HEIGHT, formatted_col="เวลาคาดการณ์", y_mmss=True,
+            )
+            card.vega_lite_chart(frame, spec, width="stretch")
 
 if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
     history_dates = _to_datetime(history["calendar_date"])
@@ -123,7 +137,12 @@ if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
         chart["วันที่"] = chart["calendar_date"]
         with st.container(border=True, key="surface-est-vo2max"):
-            st.markdown("**VO2max รายวันในช่วงนี้**")
+            chart_header(
+                st,
+                "แนวโน้ม VO2max รายวัน",
+                "หน่วย ml/kg/min · ความสามารถการใช้ออกซิเจนสูงสุดที่นาฬิกาประเมินหลังวิ่ง · ยิ่งสูงยิ่งดี",
+                series_range_stat(chart["vo2max_trend"]),
+            )
             frame, spec = daily_line_frame_and_spec(
                 chart, ["vo2max_trend"], ["VO2max"], y_label="ml/kg/min", height=CHART_HEIGHT,
             )
@@ -132,28 +151,31 @@ if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
 records = load_personal_records(ctx.athlete_id)
 if not records.empty:
     shown_any = True
+    section_heading("สถิติส่วนตัวและองค์ประกอบร่างกาย", "ข้อมูลสะสมจากบัญชี Garmin Connect")
     with st.container(border=True, key="surface-est-pr"):
-        st.subheader("สถิติส่วนตัว (Garmin Personal Records)", anchor=False)
-        st.caption("Garmin หาเองจากทุกกิจกรรม รวมช่วงหนึ่งของการวิ่งที่ยาวกว่า · "
-                   "ถ้า GPS กระโดด ค่าที่ได้อาจเร็วเกินจริง แก้ได้ในแอป Garmin Connect")
+        chart_header(
+            st,
+            "สถิติส่วนตัว (Garmin Personal Records)",
+            "สถิติดีที่สุดที่ Garmin ตรวจพบจากทุกกิจกรรม · หากสัญญาณ GPS คลาดเคลื่อนสามารถแก้ไขได้ใน Garmin Connect",
+            f"{len(records)} รายการ",
+        )
         st.dataframe(pd.DataFrame(personal_record_rows(records)), hide_index=True, width="stretch")
 
 body = load_body_composition(ctx.athlete_id)
 if not body.empty and body[["weight_kg", "bmi", "body_fat_pct"]].notna().any().any():
+    if records.empty:
+        section_heading("องค์ประกอบร่างกาย", "ค่าล่าสุดที่เคยบันทึกในบัญชี Garmin Connect")
     shown_any = True
-    st.subheader("องค์ประกอบร่างกาย", anchor=False)
-    body_tiles = []
-    for column, label, unit in (("weight_kg", "น้ำหนัก", " kg"), ("bmi", "BMI", ""),
-                                ("body_fat_pct", "ไขมัน", "%")):
-        snapshot = latest_field(body, column)
-        if snapshot:
-            body_tiles.append((label, fmt_num(snapshot["value"], unit), snapshot["date"].strftime("%d/%m/%Y")))
-    if body_tiles:
-        b_cols = st.columns(len(body_tiles))
-        for col, (label, value, note) in zip(b_cols, body_tiles, strict=False):
-            with col:
-                st.metric(label, value, note, delta_color="off", delta_arrow="off",
-                          border=True, width="stretch")
+    with st.container(border=True, key="surface-est-body"):
+        chart_header(st, "องค์ประกอบร่างกายล่าสุด", "ค่าล่าสุดที่ซิงก์จากเครื่องชั่งหรือบันทึกในบัญชี Garmin")
+        body_tiles = []
+        for column, label, unit in (("weight_kg", "น้ำหนัก", " kg"), ("bmi", "BMI", ""),
+                                    ("body_fat_pct", "ไขมัน", "%")):
+            snapshot = latest_field(body, column)
+            if snapshot:
+                body_tiles.append((label, fmt_num(snapshot["value"], unit), snapshot["date"].strftime("%d/%m/%Y")))
+        if body_tiles:
+            render_metric_grid(body_tiles, cols_per_row=4, border=True)
 
 if not shown_any:
     st.info("Garmin ยังไม่เคยส่งค่าประเมินของนักกีฬาคนนี้มา", icon=":material/info:")

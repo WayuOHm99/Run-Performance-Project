@@ -3,39 +3,39 @@
 # แก้ด้วย print CSS ไม่ได้ (แก้พิกเซลใน canvas ไม่ได้) — พื้นขาวจึงพิมพ์สะอาดทั้งตารางและกราฟ
 [theme]
 base = "light"
-primaryColor = "#1d63dc"
-textColor = "#18181b"
+primaryColor = "#155eef"
+textColor = "#0b1220"
 
-# --- ระบบดีไซน์ Garmin-only (อัปเกรดโทน SaaS Slate/Zinc) ---
+# --- ระบบดีไซน์ Garmin-only (Executive Editorial Light) ---
 # ใช้ component ของ Streamlit ตรง ๆ คู่กับโทเคนธีมมาตรฐานของ Streamlit 1.67
 # ฟอนต์ตัวเดียวรองรับทั้งไทยและอังกฤษ ตัวเลขใน st.metric ถูกชี้เป็น mono ด้วย CSS ใน dashboard.py
 font = "IBM Plex Sans Thai"
 headingFont = "IBM Plex Sans Thai"
 codeFont = "IBM Plex Mono"
-headingFontSizes = ["1.75rem", "1.15rem", "1.0rem"]
+headingFontSizes = ["1.62rem", "1.06rem", "0.95rem"]
 headingFontWeights = [700, 600, 600]
 
-# การ์ดมนพอดี เส้นขอบคมสะอาด ลดช่องว่างด้านบนไม่ให้เสียพื้นที่จอแรก
+# การ์ดขอบคมพอดี เส้นขอบบางสะอาด พื้นหลังแยกชั้นนุ่มตา
 baseRadius = "0.75rem"
-buttonRadius = "0.55rem"
-paddingTop = "2.1rem"
-paddingBottom = "2.75rem"
-borderColor = "#e2e8f0"
+buttonRadius = "0.5rem"
+paddingTop = "1.6rem"
+paddingBottom = "2.5rem"
+borderColor = "#e4e7ec"
 backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f1f5f9"
-dataframeBorderColor = "#e2e8f0"
-dataframeHeaderBackgroundColor = "#f8fafc"
-dataframeHeaderTextColor = "#475569"
+secondaryBackgroundColor = "#f5f6f8"
+dataframeBorderColor = "#e4e7ec"
+dataframeHeaderBackgroundColor = "#f9fafb"
+dataframeHeaderTextColor = "#344054"
 
-# สีกราฟ: น้ำเงิน↔ส้มผ่านการตรวจตาบอดสีแล้ว (ΔE 24.7) — สองสีท้ายเลี่ยงเขียว/เหลืองซึ่งเป็นสีสถานะ
-chartCategoricalColors = ["#1d63dc", "#eb6834", "#0f3a7d", "#7cb2f4"]
+# สีกราฟ: แซฟไฟร์ ↔ คอปเปอร์ ↔ ทีล แยกเส้นชัดเจนและผ่านการตรวจตาบอดสี
+chartCategoricalColors = ["#155eef", "#d95d24", "#0d9488", "#0b2545"]
 # Streamlit บังคับ **10 ค่าพอดี** สำหรับ sequential/diverging (app_session.py: required_length=10)
 # ใส่ 7 ค่าแล้วมันจะ log error ทุกครั้งที่เปิดหน้าและถอยไปใช้สีเริ่มต้นแทน
-chartSequentialColors = ["#eff6ff", "#dbeafe", "#bfdbfe", "#93c5fd", "#60a5fa",
-                         "#3b82f6", "#1d63dc", "#1d4ed8", "#1e40af", "#0f3a7d"]
+chartSequentialColors = ["#eff4ff", "#d1e0ff", "#b2ccff", "#84adff", "#528bff",
+                         "#2970ff", "#155eef", "#004eeb", "#00359e", "#0b2545"]
 
-# ตัวเลขใน st.metric ขนาดกระชับสมดุลเมื่อวางหลายใบในการ์ดเดียว
-metricValueFontSize = "1.55rem"
+# ตัวเลขใน st.metric ขนาดกระชับสมดุลเมื่อวางหลายใบในแถวเดียว
+metricValueFontSize = "1.5rem"
 metricValueFontWeight = 600
 
 # ฟอนต์โหลดจาก Google Fonts โดยแยก subset ไทยกับละตินตามที่ Google ตัดมา
@@ -98,10 +98,10 @@ unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U
 
 # ต้องระบุ textColor ของ sidebar ตรงๆ — ป้องกัน console warning เมื่อกำหนดธีมเอง
 [theme.sidebar]
-backgroundColor = "#f1f5f9"
+backgroundColor = "#f8f9fb"
 secondaryBackgroundColor = "#ffffff"
-textColor = "#18181b"
-borderColor = "#cbd5e1"
+textColor = "#0b1220"
+borderColor = "#e4e7ec"
 showWidgetBorder = true
 
 # Health and activity data is private. Bind only to this computer unless an

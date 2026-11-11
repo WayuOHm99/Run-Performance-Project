@@ -24,6 +24,7 @@
   "git.confirmSync": true,
   "git.enableSmartCommit": false,
   "python.defaultInterpreterPath": "${workspaceFolder}/garmin/.venv/Scripts/python.exe",
+  "python.useEnvironmentsExtension": false,
   "search.exclude": {
     "**/__pycache__": true,
     "garmin/.venv": true,

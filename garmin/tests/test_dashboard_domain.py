@@ -15,7 +15,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dashboard_modules import HELPERS
-import dashboard_charts
+import dashboard_charts  # noqa: E402, I001
 
 
 class LatestPerFieldTests(unittest.TestCase):
@@ -446,6 +446,44 @@ class CachedChartSpecTests(unittest.TestCase):
         y_axis = single["layer"][0]["encoding"]["y"]["axis"]
         self.assertEqual(y_axis.get("format"), ",.2~f")
         self.assertGreaterEqual(single.get("padding", {}).get("left", 0), 8)
+
+    def test_line_specs_never_force_zero_baseline_via_area_and_clamp_near_zero_series(self):
+        # เคสจริง 11 พ.ย. 69: mark_area บังคับแกน Y เริ่มที่ 0 ทำให้ 5K (21:46–22:01) แบนติดเพดาน
+        # และข้อมูลใกล้ศูนย์อย่าง Body Battery Charged (0–85) มี padding ล่างจนแกนโผล่ -20
+        race = pd.DataFrame({
+            "วันที่": pd.to_datetime(["2026-11-10", "2026-11-11"]),
+            "time_5k_sec": [1306.0, 1321.0],
+        })
+        _, race_spec = dashboard_charts.daily_line_frame_and_spec(
+            race, ["time_5k_sec"], ["5K"], y_label="นาที:วินาที", y_mmss=True,
+        )
+        marks = [
+            layer["mark"]["type"] if isinstance(layer["mark"], dict) else layer["mark"]
+            for layer in race_spec["layer"]
+        ]
+        self.assertNotIn("area", marks)
+        self.assertIn("labelExpr", race_spec["layer"][0]["encoding"]["y"]["axis"])
+
+        near_zero = pd.DataFrame({
+            "วันที่": pd.to_datetime(["2026-11-10", "2026-11-11"]),
+            "bb_charged": [0.0, 78.0],
+            "bb_drained": [45.0, 62.0],
+        })
+        _, multi_spec = dashboard_charts.daily_line_frame_and_spec(
+            near_zero, ["bb_charged", "bb_drained"], ["ชาร์จเพิ่ม", "ใช้ไป"], y_label="คะแนน",
+        )
+        self.assertEqual(multi_spec["layer"][0]["encoding"]["y"]["scale"].get("domainMin"), 0)
+
+    def test_series_range_stat_reports_raw_latest_and_min_max_without_invented_formulas(self):
+        self.assertEqual(
+            HELPERS["series_range_stat"]([48.0, float("nan"), 44.0, 51.0], " bpm"),
+            "ล่าสุด 51 bpm · ช่วงนี้ 44–51 bpm",
+        )
+        self.assertEqual(
+            HELPERS["series_range_stat"]([51.0, 51.0]),
+            "ล่าสุด 51",
+        )
+        self.assertIsNone(HELPERS["series_range_stat"]([None, float("nan")]))
 
 
 if __name__ == "__main__":

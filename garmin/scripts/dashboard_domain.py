@@ -101,6 +101,23 @@ def fmt_recovery_time(minutes):
     return fmt_hours(float(minutes) * 60)
 
 
+def series_range_stat(values, unit="", decimals=None, formatter=None):
+    """สรุปค่าดิบล่าสุดและกรอบต่ำสุด–สูงสุดของข้อมูลชุดที่วาดบนกราฟ (ไม่มีสูตรเฉลี่ยหรือเทียบฐาน)"""
+    if values is None:
+        return None
+    series = pd.to_numeric(pd.Series(values), errors="coerce")
+    clean = [float(v) for v in series.dropna().tolist() if math.isfinite(float(v))]
+    if not clean:
+        return None
+    render = formatter or (lambda v: fmt_num(v, unit, decimals))
+    render_plain = formatter or (lambda v: fmt_num(v, "", decimals))
+    latest_text = render(clean[-1])
+    low, high = min(clean), max(clean)
+    if len(clean) == 1 or math.isclose(low, high, rel_tol=1e-9, abs_tol=1e-9):
+        return f"ล่าสุด {latest_text}"
+    return f"ล่าสุด {latest_text} · ช่วงนี้ {render_plain(low)}–{render(high)}"
+
+
 def garmin_label(value):
     """คำของ Garmin ให้อ่านง่ายโดยไม่แปลความหมายเอง
 

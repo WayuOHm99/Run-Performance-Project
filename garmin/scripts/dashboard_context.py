@@ -5,6 +5,7 @@ sidebar และดึงข้อมูลตามช่วงที่เล
 คนละไฟล์ จึงส่งค่าให้กันผ่านตัวแปรธรรมดาไม่ได้ ต้องผ่าน ``st.session_state``
 """
 
+import html
 from types import SimpleNamespace
 
 import streamlit as st
@@ -47,6 +48,59 @@ def focus_athlete(athlete_id):
     """
     st.session_state[ATHLETE_STATE_KEY] = athlete_id
     st.session_state[PENDING_PAGE_KEY] = ATHLETE_PAGE
+
+
+def request_page(page_path: str):
+    """ฝากคำขอย้ายหน้าจาก callback ของปุ่ม ให้ ``honour_pending_page()`` สลับหน้าจริงรอบถัดไป"""
+    st.session_state[PENDING_PAGE_KEY] = page_path
+
+
+def _esc(text: str) -> str:
+    return html.escape(str(text), quote=False)
+
+
+def page_lead(text: str):
+    """คำอธิบายสั้นใต้หัวเรื่องหลัก บอกขอบเขตและช่วงเวลาของหน้าในบรรทัดเดียว"""
+    st.markdown(f'<p class="rp-page-lead">{_esc(text)}</p>', unsafe_allow_html=True)
+
+
+def section_heading(title: str, subtitle: str | None = None):
+    """หัวข้อหมวดหมู่สไตล์ Editorial แยกกลุ่มข้อมูลชัดเจนโดยไม่ใช้สัญลักษณ์รกสายตา"""
+    sub_html = f'<span class="rp-sec-sub">{_esc(subtitle)}</span>' if subtitle else ""
+    st.markdown(
+        f'<div class="rp-sec-head"><span class="rp-sec-title">{_esc(title)}</span>{sub_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def chart_header(holder, title: str, guide: str | None = None, stat: str | None = None):
+    """หัวการ์ดกราฟมาตรฐาน: ชื่อเรื่อง + ค่าสรุปดิบมุมขวา + คำอธิบายวิธีอ่าน 1 บรรทัด"""
+    stat_html = f'<span class="rp-chart-stat rp-num">{_esc(stat)}</span>' if stat else ""
+    guide_html = f'<div class="rp-chart-guide">{_esc(guide)}</div>' if guide else ""
+    holder.markdown(
+        f'<div class="rp-chart-head">'
+        f'<div class="rp-chart-top"><span class="rp-chart-title">{_esc(title)}</span>{stat_html}</div>'
+        f'{guide_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_grid(items, *, cols_per_row: int = 4, border: bool = True, holder=None):
+    """วาง st.metric บนกริดความกว้างคงที่ ป้องกันการ์ดใบเดียวถูกยืดเต็มจอ 100%"""
+    target = holder if holder is not None else st
+    for row_idx in range(0, len(items), cols_per_row):
+        chunk = items[row_idx:row_idx + cols_per_row]
+        cols = target.columns(cols_per_row, gap="small")
+        for col, item in zip(cols, chunk, strict=False):
+            label, val_text = item[0], item[1]
+            note_text = item[2] if len(item) > 2 else None
+            help_text = item[3] if len(item) > 3 else None
+            with col:
+                st.metric(
+                    label, val_text, note_text,
+                    delta_color="off", delta_arrow="off",
+                    border=border, width="stretch", help=help_text,
+                )
 
 
 def honour_pending_page():

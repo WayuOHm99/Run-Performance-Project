@@ -8,12 +8,18 @@
 """
 
 import datetime
+import html
 
 import pandas as pd
 import streamlit as st
-
 from dashboard_charts import intraday_frame_and_spec
-from dashboard_context import focus_athlete, page_context
+from dashboard_context import (
+    chart_header,
+    focus_athlete,
+    page_context,
+    page_lead,
+    section_heading,
+)
 from dashboard_data import (
     athlete_has_training_readiness,
     load_intraday,
@@ -46,6 +52,21 @@ DAY_KEY = "team_day"
 FALLBACK_DAYS = 30  # ค่าครั้งก่อนที่ยอมย้อนไปหา เมื่อวันที่เลือกไม่มีค่านั้น
 OPTIONAL_ACTIVITY_COLS = ("HR เฉลี่ย", "HR สูงสุด", "Training Effect", "Training Load")
 
+INTRADAY_GUIDES = {
+    "heart_rate": (
+        "ชีพจรระหว่างวันเทียบทั้งทีม (Heart Rate)",
+        "หน่วย bpm บนแกนเวลา 00:00–24:00 น. · ช่วงยอดกราฟสูงมักตรงกับเวลาซ้อม · เส้นขาดคือช่วงไม่ได้ใส่นาฬิกา",
+    ),
+    "stress": (
+        "ความเครียดทางสรีรวิทยาระหว่างวัน (Stress)",
+        "คะแนน 0–100 · Garmin งดวัด Stress ขณะวิ่งหรือออกกำลังกาย เส้นกราฟจึงเว้นว่างช่วงซ้อมตามปกติ",
+    ),
+    "body_battery": (
+        "ระดับพลังงานระหว่างวัน (Body Battery)",
+        "คะแนน 5–100 · กราฟไต่ขึ้นช่วงนอนหลับพักฟื้น และค่อย ๆ ลดลงตามการใช้พลังงานระหว่างวัน",
+    ),
+}
+
 if DAY_KEY not in st.session_state or st.session_state[DAY_KEY] > today:
     st.session_state[DAY_KEY] = today
 
@@ -60,32 +81,46 @@ def go_today():
 
 
 st.title("ภาพรวมสุขภาพทีม")
+page_lead("สรุปสุขภาพเช้าและกิจกรรมซ้อมของทุกคนเฉพาะวันที่เลือก ไม่นำค่าคนละวันมาปนกันบนการ์ด")
 
 day_preview = st.session_state[DAY_KEY]
 day_activities = load_team_activities(day_preview.isoformat(), day_preview.isoformat())
 suspects = duplicate_suspects(day_activities)
 
-with st.container(key="team-toolbar"):
-    with st.container(horizontal=True, vertical_alignment="center"):
-        st.button("วันก่อนหน้า", icon=":material/chevron_left:", on_click=shift_day, args=(-1,),
-                  key="team-prev-day")
-        st.date_input("วันที่", key=DAY_KEY, max_value=today, format="DD/MM/YYYY",
-                      width=155, label_visibility="collapsed")
-        st.button("วันถัดไป", icon=":material/chevron_right:", on_click=shift_day, args=(1,),
-                  key="team-next-day", disabled=st.session_state[DAY_KEY] >= today)
-        st.button("วันนี้", icon=":material/today:", on_click=go_today, key="team-today",
-                  disabled=st.session_state[DAY_KEY] == today)
-        st.badge(
-            f"นักกีฬา {len(ctx.athletes_df)} คน · กิจกรรม {len(day_activities)} รายการ",
-            icon=":material/groups:",
-            color="gray",
-        )
+with (
+    st.container(key="team-toolbar"),
+    st.container(horizontal=True, vertical_alignment="center"),
+):
+    st.button("วันก่อนหน้า", icon=":material/chevron_left:", on_click=shift_day, args=(-1,),
+              key="team-prev-day")
+    st.date_input("วันที่", key=DAY_KEY, max_value=today, format="DD/MM/YYYY",
+                  width=155, label_visibility="collapsed")
+    st.button("วันถัดไป", icon=":material/chevron_right:", on_click=shift_day, args=(1,),
+              key="team-next-day", disabled=st.session_state[DAY_KEY] >= today)
+    st.button("วันนี้", icon=":material/today:", on_click=go_today, key="team-today",
+              disabled=st.session_state[DAY_KEY] == today)
+    day_offset = (today - st.session_state[DAY_KEY]).days
+    st.badge(
+        "วันนี้ (เวลาไทย)" if day_offset == 0 else f"ย้อนหลัง {day_offset} วัน",
+        icon=":material/calendar_today:",
+        color="blue" if day_offset == 0 else "gray",
+    )
+    st.badge(
+        f"นักกีฬา {len(ctx.athletes_df)} คน · กิจกรรม {len(day_activities)} รายการ",
+        icon=":material/groups:",
+        color="gray",
+    )
 
 day = st.session_state[DAY_KEY]
 day_word = "วันนี้" if day == today else "วันนั้น"
-st.caption(
-    f"ข้อมูลของวันที่ {day.strftime('%d/%m/%Y')} ตามปฏิทินของ Garmin (เวลาไทย) · "
-    f"Sleep/HRV คือคืนที่ตื่นเช้า{day_word} · ค่าที่ไม่มีของ{day_word}จะบอกค่าครั้งก่อนแยกพร้อมวันที่")
+section_heading(
+    f"สรุปรายคนประจำวันที่ {day.strftime('%d/%m/%Y')}",
+    f"Sleep และ HRV คือผลคืนที่ตื่นเช้า{day_word} · ช่องที่ยังไม่มีข้อมูลจะระบุค่าครั้งก่อนพร้อมวันกำกับ",
+)
+
+
+def _esc(value):
+    return html.escape(str(value), quote=False)
 
 
 def missing_note(wellness, column, unit=""):
@@ -110,20 +145,18 @@ def athlete_card(athlete, order):
             return (label, "–", missing_note(wellness, column, unit))
         return (label, fmt_num(value, unit, digits), note)
 
-    with st.container(border=True, key=f"team-card-{order}"):
+    with st.container(border=True, key=f"team-card-{order}-{status_key}"):
         with st.container(horizontal=True, vertical_alignment="center"):
             st.subheader(name, anchor=False)
             st.badge(status_text,
-                     icon={"complete_day": ":material/check:",
+                     icon={"complete_day": ":material/check_circle:",
                            "partial_today": ":material/schedule:"}.get(
                                status_key, ":material/cloud_off:"),
                      color={"complete_day": "green", "partial_today": "blue"}.get(
                          status_key, "orange"))
-        # ไม่โชว์ชื่ออุปกรณ์บนการ์ด — ทะเบียนอุปกรณ์ของ Garmin ไม่บอกว่าตัวไหนเป็นนาฬิกาหลัก
-        # รายชื่ออุปกรณ์ทั้งหมดยังดูได้ใน "ข้อมูลที่ Garmin ส่งมา" บน sidebar
         fetched = to_bangkok_timestamp(value_of(row, "fetched_at"))
         if pd.notna(fetched):
-            st.caption(f"แถวนี้ดึงจาก Garmin ล่าสุด {fetched:%d/%m %H:%M} น.")
+            st.caption(f"ซิงก์ล่าสุด {fetched:%d/%m · %H:%M} น.")
 
         high, low = value_of(row, "body_battery_high"), value_of(row, "body_battery_low")
         card_tiles = [
@@ -154,39 +187,65 @@ def athlete_card(athlete, order):
                     st.metric(label, val_text, note_text,
                               delta_color="off", delta_arrow="off", width="stretch")
 
-        garmin_words = []
+        chips = []
         if value_of(row, "training_status") is not None:
-            garmin_words.append(f"Training Status **{garmin_label(row['training_status'])}**")
+            chips.append(
+                f'<span class="rp-chip rp-chip-blue">Training Status '
+                f'<strong>{_esc(garmin_label(row["training_status"]))}</strong></span>'
+            )
         if value_of(row, "recovery_time_min") is not None:
-            garmin_words.append(f"Recovery Time **{fmt_recovery_time(row['recovery_time_min'])}**")
+            chips.append(
+                f'<span class="rp-chip">Recovery '
+                f'<strong>{_esc(fmt_recovery_time(row["recovery_time_min"]))}</strong></span>'
+            )
         if value_of(row, "steps") is not None:
-            garmin_words.append(f"ก้าว **{row['steps']:,.0f}**")
-        if garmin_words:
-            st.markdown(" · ".join(garmin_words))
+            chips.append(
+                f'<span class="rp-chip">ก้าว '
+                f'<strong class="rp-num">{row["steps"]:,.0f}</strong></span>'
+            )
+        if chips:
+            st.markdown(f'<div class="rp-chip-row">{"".join(chips)}</div>', unsafe_allow_html=True)
 
         mine = day_activities[day_activities["athlete_id"] == aid] if not day_activities.empty \
             else day_activities
         if mine.empty:
-            st.caption(f":material/directions_run: ไม่มีกิจกรรมใน{day_word}")
+            st.markdown(
+                f'<div class="rp-act-box"><div class="rp-act-empty">'
+                f'ไม่มีกิจกรรมซ้อมใน{day_word}</div></div>',
+                unsafe_allow_html=True,
+            )
         else:
             mine = mine.assign(_when=_to_datetime(mine["start_time_local"])).sort_values(
                 "_when", na_position="last"
             )
-        for _, activity in mine.iterrows():
-            distance = activity.get("distance_m")
-            when = activity.get("_when")
-            parts = [
-                when.strftime("%H:%M") if pd.notna(when) else None,
-                activity_title(activity),
-                f"{distance / 1000:.2f} km" if pd.notna(distance) and distance > 0 else None,
-                fmt_sec(activity.get("duration_sec")),
-                (fmt_pace(activity.get("avg_pace_min_per_km")) + " /km")
-                if pd.notna(distance) and distance > 0 else None,
-                f"HR {activity['avg_hr']:.0f}" if pd.notna(activity.get("avg_hr")) else None,
-                "⚠ อาจซ้ำ" if int(activity["activity_id"]) in suspects else None,
-            ]
-            st.markdown(":material/directions_run: "
-                        + " · ".join(part for part in parts if part and part != "–"))
+            act_rows = []
+            for _, activity in mine.iterrows():
+                distance = activity.get("distance_m")
+                when = activity.get("_when")
+                has_dist = pd.notna(distance) and distance > 0
+                meta_parts = [
+                    f'<span class="rp-num">{distance / 1000:.2f} km</span>' if has_dist else None,
+                    f'<span class="rp-num">{_esc(fmt_sec(activity.get("duration_sec")))}</span>',
+                    f'<span class="rp-num">{_esc(fmt_pace(activity.get("avg_pace_min_per_km")))} /km</span>'
+                    if has_dist else None,
+                    f'<span class="rp-num">HR {activity["avg_hr"]:.0f}</span>'
+                    if pd.notna(activity.get("avg_hr")) else None,
+                ]
+                meta_clean = " · ".join(p for p in meta_parts if p and ">–<" not in p)
+                time_badge = (
+                    f'<span class="rp-num" style="color:#667085">{when.strftime("%H:%M")}</span>'
+                    if pd.notna(when) else ""
+                )
+                dup_badge = (
+                    '<span class="rp-warn-tag">⚠ อาจซ้ำ</span>'
+                    if int(activity["activity_id"]) in suspects else ""
+                )
+                act_rows.append(
+                    f'<div class="rp-act-item">{time_badge}'
+                    f'<strong>{_esc(activity_title(activity))}</strong>'
+                    f'<span style="color:#475467">{meta_clean}</span>{dup_badge}</div>'
+                )
+            st.markdown(f'<div class="rp-act-box">{"".join(act_rows)}</div>', unsafe_allow_html=True)
 
         st.button(f"ดูข้อมูลของ {name}", key=f"open-athlete-{order}",
                   on_click=focus_athlete, args=(aid,), icon=":material/arrow_forward:",
@@ -201,11 +260,12 @@ for row_start in range(0, len(athletes), 3):
         with column:
             athlete_card(athlete, order)
 
+section_heading("แนวโน้มระหว่างวันและตารางกิจกรรมรวม", f"ข้อมูลประจำวันที่ {day.strftime('%d/%m/%Y')}")
+
 with st.container(border=True, key="surface-team-intraday"):
-    st.subheader("เทียบระหว่างวันทั้งทีม", anchor=False)
     intraday = load_intraday(day)
     if intraday.empty:
-        st.caption(f"ยังไม่มีข้อมูลระหว่างวันของ{day_word}")
+        chart_header(st, "เทียบระหว่างวันทั้งทีม", f"ยังไม่มีข้อมูลระหว่างวันของ{day_word}")
     else:
         labels = {key: label for key, (label, _) in INTRADAY_METRICS.items()}
         chosen = st.segmented_control("ค่า", options=list(labels), format_func=labels.get,
@@ -213,17 +273,27 @@ with st.container(border=True, key="surface-team-intraday"):
                                       label_visibility="collapsed")
         names = ctx.athlete_labels
         series = intraday_series(intraday, chosen)
+        title_text, guide_text = INTRADAY_GUIDES[chosen]
+        unit_text = INTRADAY_METRICS[chosen][1]
+        unit_suffix = f" {unit_text}" if unit_text else ""
         if series["ค่า"].notna().any():
+            valid_vals = series["ค่า"].dropna()
+            stat_text = f"ต่ำสุด–สูงสุดทั้งทีม {fmt_num(valid_vals.min())}{'–' + fmt_num(valid_vals.max(), unit_suffix)}"
+            chart_header(st, title_text, guide_text, stat_text)
             in_frame, in_spec = intraday_frame_and_spec(
-                series, day, y_title=INTRADAY_METRICS[chosen][1], names=names, height=240,
+                series, day, y_title=unit_text, names=names, height=240,
             )
             st.vega_lite_chart(in_frame, in_spec, width="stretch")
-            st.caption("แกนเวลาเดียวกัน 00:00–24:00 · เส้นขาด = ช่วงที่ไม่มีข้อมูลจากนาฬิกา")
         else:
-            st.caption(f"ไม่มีข้อมูล {labels[chosen]} ระหว่างวันของ{day_word}")
+            chart_header(st, title_text, f"ไม่มีข้อมูล {labels[chosen]} ระหว่างวันของ{day_word}")
 
 with st.container(border=True, key="surface-team-activities"):
-    st.subheader(f"กิจกรรมของทีมใน{day_word}", anchor=False)
+    chart_header(
+        st,
+        f"กิจกรรมของทีมใน{day_word}",
+        "แสดงทุกกิจกรรมที่ซิงก์แล้วของวันที่เลือก เรียงจากเวลาเริ่มล่าสุด",
+        f"{len(day_activities)} รายการ" if not day_activities.empty else None,
+    )
     if day_activities.empty:
         st.caption(f"ไม่มีกิจกรรมที่ Garmin บันทึกใน{day_word}")
     else:
