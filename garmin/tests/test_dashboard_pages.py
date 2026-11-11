@@ -366,6 +366,37 @@ class EstimatesPageTests(unittest.TestCase):
         self.assertIn("Strength 24", metrics["Hill Score"][1])
         self.assertIn("Endurance 39", metrics["Hill Score"][1])
 
+    def test_unnamed_personal_records_are_tucked_into_secondary_expander(self):
+        def seed_prs(conn):
+            seed_team(conn)
+            conn.executemany(
+                "INSERT INTO fact_personal_record "
+                "(athlete_id, record_type_id, record_label, value, achieved_date) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (1, 3, "วิ่ง 5 กม. (วินาที)", 1334.9, "2026-09-15"),
+                    (1, 15, None, 6.0, "2026-07-18"),
+                ],
+            )
+
+        main, _ = render_page(ESTIMATES_PAGE, seed_prs)
+        frames = main.get("dataframe")
+        self.assertEqual(len(frames), 2)
+        primary_df = frames[0].value
+        secondary_df = frames[1].value
+        self.assertEqual(list(primary_df["รายการ"]), ["วิ่ง 5 กม. (วินาที)"])
+        self.assertEqual(
+            list(secondary_df["รายการ"]),
+            ["รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส 15)"],
+        )
+        expanders = main.get("expander")
+        matching = [exp for exp in expanders if "รายการอื่นที่ Garmin ไม่ส่งชื่อรหัส" in exp.label]
+        self.assertEqual(
+            len(matching), 1,
+            msg=f"Expected secondary PR expander, got: {[e.label for e in expanders]}",
+        )
+        self.assertFalse(matching[0].proto.expanded)
+
 
 class TrainingPageTests(unittest.TestCase):
     def test_totals_are_plain_sums_of_garmin_activities(self):

@@ -560,6 +560,35 @@ class DatetimeNormalizationTests(IsolatedHealthDirMixin, unittest.TestCase):
         reconcile = [f for f in findings if f.check.startswith("unfinished_run:reconcile")]
         self.assertEqual(reconcile, [], "naive คู่กันเหมือนเดิม (ตีความโซนเดียวกัน) ต้องยังทำงานถูกเหมือนก่อนแก้")
 
+    def test_json_report_generated_at_includes_numeric_timezone_offset(self):
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            hr._print_json_report([])
+        payload = json.loads(buf.getvalue())
+        raw = payload["generated_at"]
+        self.assertIsNotNone(datetime.fromisoformat(raw).tzinfo, raw)
+        self.assertFalse(raw.endswith("Z"), raw)
+
+    def test_browser_smoke_omits_posix_tz_on_windows_crt(self):
+        import sys
+
+        tests_dir = str(Path(__file__).resolve().parent)
+        if tests_dir not in sys.path:
+            sys.path.insert(0, tests_dir)
+        import browser_smoke
+
+        win_env = browser_smoke.build_streamlit_env(
+            "/tmp/smoke", os_name="nt", base_env={"PATH": "C:\\Windows", "TZ": "Asia/Bangkok"}
+        )
+        posix_env = browser_smoke.build_streamlit_env(
+            "/tmp/smoke", os_name="posix", base_env={"PATH": "/usr/bin"}
+        )
+        self.assertNotIn("TZ", win_env)
+        self.assertEqual(posix_env.get("TZ"), "Asia/Bangkok")
+
     def test_unparseable_marker_reports_finding_not_crash(self):
         self.write_raw_marker("sync_backup_run_start.txt", "not-a-real-timestamp")
         try:

@@ -1982,7 +1982,7 @@ def write_status(slug, ok, reason="ok", error=None,
         "wellness_days": wellness_days,
         "warnings": warnings or [],
         "endpoint_failures": _unique_endpoint_failures(endpoint_failures),
-        "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     tmp = STATUS_DIR / f"{slug}.json.tmp"
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")

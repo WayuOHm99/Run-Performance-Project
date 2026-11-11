@@ -274,8 +274,9 @@ def rotate_daily(daily_dir: Path, snapshot_path: Path) -> None:
 def write_status(run_at: datetime, ok: bool, reason: str, warnings: list) -> bool:
     """รูปแบบเดียวกับที่ fetch_all.py เขียน — dashboard/notify_sync อ่านไฟล์เดียวกันได้เลย
     (slug ใช้ชื่อสายแทนชื่อนักกีฬา เพราะสายนี้ไม่ได้แยกรายคน)"""
+    aware_run_at = run_at.astimezone()
     payload = json.dumps({
-        "run_at": run_at.isoformat(timespec="seconds"),
+        "run_at": aware_run_at.isoformat(timespec="seconds"),
         "days": 0,
         "lane": "backup",
         "mode": "robocopy + sqlite snapshot",
@@ -304,7 +305,7 @@ def main() -> int:
     # ping "เริ่มงาน" จุดเดียวต่อรอบ ก่อนทำงานจริงใด ๆ — best-effort ล้วน ไม่กระทบ flow ต่อไป
     notify_healthcheck("start")
 
-    run_at = datetime.now()
+    run_at = datetime.now().astimezone()
     dest_dir = Path(args.dest)
     warnings = []
 

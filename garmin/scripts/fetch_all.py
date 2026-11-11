@@ -251,8 +251,9 @@ def pending_slots(lane: str, slots: list[dtime], now: datetime,
         # ไม่เคยรัน/ไฟล์เสีย → ถือว่าค้างทั้งหมด ให้รันเลย
         return candidates or [now]
     if last_run.tzinfo is not None and now.tzinfo is None:
-        # Lane files normally use local naive time.  If a migrated/corrupted
-        # file carries an offset, compare it in this host's local wall clock.
+        # Lane files now emit numeric +HH:MM offsets (legacy files may be local
+        # naive).  Normalize aware timestamps to this host's local wall clock
+        # when comparing against a naive `now`.
         last_run = last_run.astimezone().replace(tzinfo=None)
     elif last_run.tzinfo is None and now.tzinfo is not None:
         last_run = last_run.replace(tzinfo=now.tzinfo)
@@ -428,7 +429,8 @@ def main():
                 sys.exit(75)
 
         # truncate microseconds เพราะไฟล์สถานะบันทึก finished_at ความละเอียดวินาที
-        run_started = datetime.now().replace(microsecond=0)
+        # แนบ numeric offset (+HH:MM) เสมอ กันโปรเซสลูกบน Windows ที่ติด TZ=Asia/Bangkok ตีความคลาด 7 ชม.
+        run_started = datetime.now().astimezone().replace(microsecond=0)
         workers = min(args.max_workers, len(athletes))
         athlete_timeout = ATHLETE_TIMEOUT_SEC.get(lane, DEFAULT_ATHLETE_TIMEOUT_SEC)
         by_slug = {}

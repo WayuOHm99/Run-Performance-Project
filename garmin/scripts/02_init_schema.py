@@ -364,8 +364,10 @@ def init_schema(db_path: Path | None = None):
             "CREATE INDEX IF NOT EXISTS idx_activity_active_start "
             "ON fact_activity(start_time_local) WHERE deleted_at IS NULL"
         )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date ON fact_daily_wellness(athlete_id, calendar_date)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date ON fact_wellness_intraday(athlete_id, calendar_date)")
+        # ลบดัชนีซ้ำซ้อนบนฐานเดิม: fact_daily_wellness มี PK (athlete_id, calendar_date) อยู่แล้ว
+        # และ (athlete_id, calendar_date) บน intraday ถูกครอบด้วย prefix ของ idx_intraday_athlete_date_ts
+        cur.execute("DROP INDEX IF EXISTS idx_wellness_athlete_date")
+        cur.execute("DROP INDEX IF EXISTS idx_intraday_athlete_date")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date_ts "
             "ON fact_wellness_intraday(athlete_id, calendar_date, ts_utc)"

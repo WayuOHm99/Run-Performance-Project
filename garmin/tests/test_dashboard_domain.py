@@ -271,6 +271,25 @@ class PersonalRecordTests(unittest.TestCase):
         self.assertEqual([row["สถิติ"] for row in HELPERS["personal_record_rows"](records)],
                          ["22:28", "21.22 km", "33,888 ก้าว"])
 
+    def test_split_personal_records_separates_named_from_unnamed_types(self):
+        records = pd.DataFrame([
+            {"record_type_id": 3, "record_label": "วิ่ง 5 กม. (วินาที)",
+             "value": 1347.63, "achieved_date": "2026-08-15"},
+            {"record_type_id": 15, "record_label": None,
+             "value": 6.0, "achieved_date": "2026-07-18"},
+            {"record_type_id": 16, "record_label": "",
+             "value": 3.0, "achieved_date": "2026-11-10"},
+        ])
+        named, unnamed = HELPERS["split_personal_records"](records)
+        self.assertEqual([r["รายการ"] for r in named], ["วิ่ง 5 กม. (วินาที)"])
+        self.assertEqual(
+            [r["รายการ"] for r in unnamed],
+            [
+                "รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส 15)",
+                "รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส 16)",
+            ],
+        )
+
 
 class IntradaySeriesTests(unittest.TestCase):
     def test_a_long_gap_breaks_the_line_instead_of_bridging_it(self):

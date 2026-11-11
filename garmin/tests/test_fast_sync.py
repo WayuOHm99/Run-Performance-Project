@@ -2029,5 +2029,40 @@ class SkipFlagsAndSplitZeroTests(unittest.TestCase):
         self.assertEqual(backfill._f_to_c(68.0), 20.0)
 
 
+class OffsetAwareStatusTimestampTests(IsolatedDataDirMixin, unittest.TestCase):
+    """ไฟล์สถานะ sync ต้องแนบ numeric timezone offset (+HH:MM) เสมอ
+    กัน Windows CRT ตีความ naive timestamp คลาด 7 ชม. เมื่อโปรเซสลูกติด TZ=Asia/Bangkok"""
+
+    def test_backfill_write_status_emits_numeric_timezone_offset(self):
+        import json
+
+        backfill.write_status("probe", ok=True, activities=2, wellness_days=1)
+        payload = json.loads((self.data_dir / "sync_status" / "probe.json").read_text(encoding="utf-8"))
+        raw = payload["finished_at"]
+        parsed = datetime.fromisoformat(raw)
+        self.assertIsNotNone(parsed.tzinfo, f"finished_at ต้องมี timezone offset: {raw}")
+        self.assertFalse(raw.endswith("Z"), f"ต้องใช้ numeric offset (+HH:MM) กัน pwsh Kind=Utc trap: {raw}")
+
+    def test_fetch_all_main_writes_numeric_timezone_offset_to_aggregate_and_lane(self):
+        import json
+
+        with mock.patch.object(fetch_all, "list_athletes", return_value=["probe"]), \
+             mock.patch.object(
+                 fetch_all, "run_athlete",
+                 return_value={"slug": "probe", "ok": True, "reason": "ok", "warnings": []},
+             ), \
+             mock.patch.object(sys, "argv", ["fetch_all.py", "--activities-only"]):
+            with self.assertRaises(SystemExit) as ctx:
+                fetch_all.main()
+        self.assertEqual(ctx.exception.code, 0)
+
+        for path in (self.data_dir / "sync_status.json", self.data_dir / "sync_lane" / "fast.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            raw = payload["run_at"]
+            parsed = datetime.fromisoformat(raw)
+            self.assertIsNotNone(parsed.tzinfo, f"{path.name} run_at ต้องมี timezone offset: {raw}")
+            self.assertFalse(raw.endswith("Z"), f"{path.name} ต้องใช้ numeric offset: {raw}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -92,10 +92,10 @@ if os.environ.get("GARMIN_BACKUP_DIR"):
 
 
 # ── Datetime normalization (แก้ 6 ส.ค. 69 — crash จริงบน Windows) ────────────────
-# ต้นเหตุ: marker เขียนโดย prep_log.ps1 ด้วย (Get-Date).ToString("o") ซึ่งเป็น
+# ต้นเหตุเดิม: marker เขียนโดย prep_log.ps1 ด้วย (Get-Date).ToString("o") ซึ่งเป็น
 # ISO 8601 "แบบมี timezone offset" (เช่น 2026-08-06T08:14:22.1234567+07:00) ส่วน
-# run_at ใน sync_lane/*.json เขียนโดย Python ด้วย datetime.now().isoformat() ซึ่ง
-# เป็น naive (ไม่มี offset) — เทียบ aware กับ naive ตรง ๆ ทำให้ TypeError ทันที
+# run_at ในไฟล์สถานะรุ่นเก่าอาจเป็น naive (ปัจจุบันผู้เขียนทุกตัวส่ง +HH:MM แล้ว
+# แต่ยังต้องรองรับไฟล์เก่าแบบ naive) — เทียบ aware กับ naive ตรง ๆ จะเกิด TypeError
 #
 # ทางแก้ที่ถูกต้อง: normalize ทุก datetime ให้เป็น "aware ใน UTC" ก่อนเทียบเสมอ
 # ผ่านจุดเดียว (_to_utc) ห้ามลบ tzinfo ทิ้ง (dt.replace(tzinfo=None)) เพราะจะได้
@@ -1109,7 +1109,7 @@ def _print_json_report(findings: list) -> None:
     n_err = sum(1 for f in findings if f.level == ERROR)
     n_warn = sum(1 for f in findings if f.level == WARNING)
     payload = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "findings": [f.to_dict() for f in findings],
         "summary": {
             "ok": len(findings) - n_err - n_warn,

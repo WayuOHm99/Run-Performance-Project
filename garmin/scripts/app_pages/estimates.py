@@ -29,8 +29,8 @@ from dashboard_domain import (
     fmt_pace,
     fmt_sec,
     latest_field,
-    personal_record_rows,
     series_range_stat,
+    split_personal_records,
     value_of,
 )
 
@@ -151,15 +151,25 @@ if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
 records = load_personal_records(ctx.athlete_id)
 if not records.empty:
     shown_any = True
+    named_prs, unnamed_prs = split_personal_records(records)
     section_heading("สถิติส่วนตัวและองค์ประกอบร่างกาย", "ข้อมูลสะสมจากบัญชี Garmin Connect")
     with st.container(border=True, key="surface-est-pr"):
+        count_badge = f"{len(named_prs)} รายการหลัก" if unnamed_prs and named_prs else f"{len(records)} รายการ"
         chart_header(
             st,
             "สถิติส่วนตัว (Garmin Personal Records)",
             "สถิติดีที่สุดที่ Garmin ตรวจพบจากทุกกิจกรรม · หากสัญญาณ GPS คลาดเคลื่อนสามารถแก้ไขได้ใน Garmin Connect",
-            f"{len(records)} รายการ",
+            count_badge,
         )
-        st.dataframe(pd.DataFrame(personal_record_rows(records)), hide_index=True, width="stretch")
+        if named_prs:
+            st.dataframe(pd.DataFrame(named_prs), hide_index=True, width="stretch")
+        if unnamed_prs:
+            with st.expander(
+                f"รายการอื่นที่ Garmin ไม่ส่งชื่อรหัส ({len(unnamed_prs)} รายการ)",
+                expanded=not bool(named_prs),
+            ):
+                st.caption("Garmin Connect API ส่งเฉพาะตัวเลขและรหัสชนิดโดยไม่แนบชื่อรายการ (prTypeLabelKey = null)")
+                st.dataframe(pd.DataFrame(unnamed_prs), hide_index=True, width="stretch")
 
 body = load_body_composition(ctx.athlete_id)
 if not body.empty and body[["weight_kg", "bmi", "body_fat_pct"]].notna().any().any():

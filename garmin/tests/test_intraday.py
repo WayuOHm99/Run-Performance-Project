@@ -407,6 +407,44 @@ class IntradayQueryPlanTests(IntradayBase):
         self.assertNotIn("SCAN f", details)
         self.assertIn("idx_activity_active_start", details)
 
+    def test_init_schema_drops_redundant_duplicate_and_prefix_indexes(self):
+        # Legacy DB with the two redundant indexes pre-existing:
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wellness_athlete_date "
+            "ON fact_daily_wellness(athlete_id, calendar_date)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intraday_athlete_date "
+            "ON fact_wellness_intraday(athlete_id, calendar_date)"
+        )
+        self.conn.commit()
+
+        schema.init_schema(self.tmp / "garmin.db")
+
+        indexes = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        self.assertNotIn("idx_wellness_athlete_date", indexes)
+        self.assertNotIn("idx_intraday_athlete_date", indexes)
+        for required in (
+            "idx_intraday_athlete_date_ts",
+            "idx_intraday_date_ts",
+            "idx_intraday_ts",
+        ):
+            self.assertIn(required, indexes)
+
+        wellness_plan = self._plan_details(
+            "SELECT * FROM fact_daily_wellness "
+            "WHERE athlete_id = ? AND calendar_date >= ? AND calendar_date <= ? "
+            "ORDER BY calendar_date ASC",
+            (1, "2026-01-01", "2026-12-31"),
+        )
+        self.assertNotIn("SCAN fact_daily_wellness", wellness_plan)
+        self.assertNotIn("TEMP B-TREE", wellness_plan)
+
 
 if __name__ == "__main__":
     unittest.main()

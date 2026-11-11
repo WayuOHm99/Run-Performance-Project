@@ -162,6 +162,22 @@ class DataDirIsolationTests(unittest.TestCase):
                 backup_db.use_data_dir(previous)
             self.assertFalse(written)
 
+    def test_write_status_normalizes_run_at_to_numeric_timezone_offset(self):
+        import json
+
+        with tempfile.TemporaryDirectory(prefix="garmin-backup-tz-") as temp:
+            previous = backup_db.use_data_dir(temp)
+            try:
+                written = backup_db.write_status(datetime.now(), True, "ok", [])
+                self.assertTrue(written)
+                payload = json.loads(backup_db.LANE_STATUS.read_text(encoding="utf-8"))
+            finally:
+                backup_db.use_data_dir(previous)
+        raw = payload["run_at"]
+        parsed = datetime.fromisoformat(raw)
+        self.assertIsNotNone(parsed.tzinfo, f"backup.json run_at ต้องมี timezone offset: {raw}")
+        self.assertFalse(raw.endswith("Z"), f"ต้องใช้ numeric offset (+HH:MM): {raw}")
+
 
 class _FakeResponse:
     """จำลอง context manager ที่ urllib.request.urlopen() คืนตอนสำเร็จ"""

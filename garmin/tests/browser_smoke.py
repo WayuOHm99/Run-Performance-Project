@@ -149,6 +149,19 @@ def exercise_browser(url, artifacts, chromium_path=None):
             browser.close()
 
 
+def build_streamlit_env(directory, *, os_name=os.name, base_env=None):
+    """Build subprocess env without poisoning Windows CRT with POSIX IANA TZ."""
+    env = dict(os.environ if base_env is None else base_env)
+    env["GARMIN_DATA_DIR"] = str(directory)
+    env["PYTHONUTF8"] = "1"
+    if os_name == "nt":
+        # Windows MSVCRT tzset() parses IANA 'Asia/Bangkok' (no digits) as UTC+0.
+        env.pop("TZ", None)
+    else:
+        env["TZ"] = "Asia/Bangkok"
+    return env
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chromium-path")
@@ -163,7 +176,7 @@ def main():
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
         url = f"http://127.0.0.1:{port}"
-        environment = dict(os.environ, GARMIN_DATA_DIR=directory, TZ="Asia/Bangkok", PYTHONUTF8="1")
+        environment = build_streamlit_env(directory)
         with (artifacts / "streamlit.log").open("w", encoding="utf-8") as log:
             process = subprocess.Popen(
                 [sys.executable, "-m", "streamlit", "run", "scripts/dashboard.py",
@@ -198,6 +211,7 @@ def check_demo(artifacts, chromium_path):
     stop_file.unlink(missing_ok=True)
     demo_env = dict(os.environ)
     if os.name == "nt":
+        demo_env.pop("TZ", None)
         demo_env["GARMIN_DEMO_STOP_FILE"] = str(stop_file)
     with (artifacts / "demo-streamlit.log").open("w", encoding="utf-8") as log:
         popen_kwargs = {}

@@ -461,8 +461,8 @@ def personal_record_label(record_type_id, record_label):
     Garmin คืน ``prTypeLabelKey`` เป็น null ทุกแถว (ยืนยันจาก payload จริง 18 ส.ค. 69)
     ชื่อจึงมาจาก PR_LABELS ใน 03_backfill.py ซึ่งครอบแค่ typeId 1-9, 12-14
     """
-    if isinstance(record_label, str) and record_label:
-        return record_label
+    if isinstance(record_label, str) and record_label.strip():
+        return record_label.strip()
     return f"รายการที่ Garmin ไม่ได้ระบุชื่อ (รหัส {record_type_id})"
 
 
@@ -490,6 +490,18 @@ def personal_record_rows(records):
             "ทำได้เมื่อ": str(achieved)[:10] if isinstance(achieved, str) and achieved else "–",
         })
     return rows
+
+
+def split_personal_records(records):
+    """แยกแถว PR ที่มีชื่อชัดเจนออกจากรหัสที่ Garmin API ไม่ได้ระบุชื่อ"""
+    if records is None or records.empty:
+        return [], []
+    has_label = records["record_label"].map(
+        lambda v: isinstance(v, str) and bool(v.strip())
+    )
+    named = personal_record_rows(records[has_label])
+    unnamed = personal_record_rows(records[~has_label])
+    return named, unnamed
 
 
 def activity_title(activity):
