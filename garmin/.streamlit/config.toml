@@ -3,32 +3,39 @@
 # แก้ด้วย print CSS ไม่ได้ (แก้พิกเซลใน canvas ไม่ได้) — พื้นขาวจึงพิมพ์สะอาดทั้งตารางและกราฟ
 [theme]
 base = "light"
-primaryColor = "#2a78d6"
-textColor = "#31333F"
+primaryColor = "#1d63dc"
+textColor = "#18181b"
 
-# --- ระบบดีไซน์รอบ Garmin-only (30 ก.ย. 69) ---
-# ใช้ component ของ Streamlit ตรง ๆ แทนการ์ด HTML ที่เขียนเอง — หน้าตามาจากธีมนี้ที่เดียว
+# --- ระบบดีไซน์ Garmin-only (อัปเกรดโทน SaaS Slate/Zinc) ---
+# ใช้ component ของ Streamlit ตรง ๆ คู่กับโทเคนธีมมาตรฐานของ Streamlit 1.67
 # ฟอนต์ตัวเดียวรองรับทั้งไทยและอังกฤษ ตัวเลขใน st.metric ถูกชี้เป็น mono ด้วย CSS ใน dashboard.py
 font = "IBM Plex Sans Thai"
 headingFont = "IBM Plex Sans Thai"
 codeFont = "IBM Plex Mono"
+headingFontSizes = ["1.75rem", "1.15rem", "1.0rem"]
+headingFontWeights = [700, 600, 600]
 
-# การ์ดมนเล็กน้อย เส้นขอบจาง พื้นรองเทาอมฟ้า — ให้ตัวเลขเป็นพระเอก ไม่ใช่กรอบ
+# การ์ดมนพอดี เส้นขอบคมสะอาด ลดช่องว่างด้านบนไม่ให้เสียพื้นที่จอแรก
 baseRadius = "0.75rem"
-borderColor = "#e5e7eb"
+buttonRadius = "0.55rem"
+paddingTop = "2.1rem"
+paddingBottom = "2.75rem"
+borderColor = "#e2e8f0"
 backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f4f6f9"
+secondaryBackgroundColor = "#f1f5f9"
+dataframeBorderColor = "#e2e8f0"
+dataframeHeaderBackgroundColor = "#f8fafc"
+dataframeHeaderTextColor = "#475569"
 
-# สีกราฟ: น้ำเงิน↔ส้มผ่านการตรวจตาบอดสีแล้ว (ΔE 24.7) — กราฟทุกใบเป็น st.line_chart /
-# st.bar_chart จึงรับสีจากที่นี่ที่เดียว สองสีท้ายเลี่ยงเขียว/เหลืองซึ่งเป็นสีสถานะ
-chartCategoricalColors = ["#2a78d6", "#eb6834", "#104281", "#86b6ef"]
+# สีกราฟ: น้ำเงิน↔ส้มผ่านการตรวจตาบอดสีแล้ว (ΔE 24.7) — สองสีท้ายเลี่ยงเขียว/เหลืองซึ่งเป็นสีสถานะ
+chartCategoricalColors = ["#1d63dc", "#eb6834", "#0f3a7d", "#7cb2f4"]
 # Streamlit บังคับ **10 ค่าพอดี** สำหรับ sequential/diverging (app_session.py: required_length=10)
 # ใส่ 7 ค่าแล้วมันจะ log error ทุกครั้งที่เปิดหน้าและถอยไปใช้สีเริ่มต้นแทน
-chartSequentialColors = ["#eaf2fd", "#cde2fb", "#aed0f7", "#9ec5f4", "#6da7ec",
-                         "#3987e5", "#2a78d6", "#1c5cab", "#164a8f", "#104281"]
+chartSequentialColors = ["#eff6ff", "#dbeafe", "#bfdbfe", "#93c5fd", "#60a5fa",
+                         "#3b82f6", "#1d63dc", "#1d4ed8", "#1e40af", "#0f3a7d"]
 
-# ตัวเลขใน st.metric ขนาดกลาง — ค่าเริ่มต้นใหญ่เกินเมื่อวางหลายใบในการ์ดเดียว
-metricValueFontSize = "1.6rem"
+# ตัวเลขใน st.metric ขนาดกระชับสมดุลเมื่อวางหลายใบในการ์ดเดียว
+metricValueFontSize = "1.55rem"
 metricValueFontWeight = 600
 
 # ฟอนต์โหลดจาก Google Fonts โดยแยก subset ไทยกับละตินตามที่ Google ตัดมา
@@ -89,12 +96,15 @@ weight = "600"
 style = "normal"
 unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
 
-# ต้องระบุ textColor ของ sidebar ตรงๆ — Streamlit 1.59 มีบั๊ก: ถ้าตั้งธีมเองแต่ไม่กำหนด
-# ค่านี้ frontend จะได้สตริงว่างแล้วสแปม console warning "Invalid color passed for textColor"
+# ต้องระบุ textColor ของ sidebar ตรงๆ — ป้องกัน console warning เมื่อกำหนดธีมเอง
 [theme.sidebar]
-textColor = "#31333F"
+backgroundColor = "#f1f5f9"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#18181b"
+borderColor = "#cbd5e1"
+showWidgetBorder = true
 
-# Health and activity data is private.  Bind only to this computer unless an
+# Health and activity data is private. Bind only to this computer unless an
 # authenticated reverse proxy is deliberately configured in front of Streamlit.
 # ซ่อนปุ่ม Deploy และเมนูนักพัฒนา — แอปนี้เปิดดูในเครื่องอย่างเดียว
 [client]

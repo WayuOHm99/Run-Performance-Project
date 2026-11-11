@@ -8,6 +8,7 @@ lap ทุกรอบแสดงตามจริง รวม lap ระย�
 import pandas as pd
 import streamlit as st
 
+from dashboard_charts import session_lap_hr_spec, session_zone_bar_spec
 from dashboard_context import page_context
 from dashboard_data import load_splits
 from dashboard_domain import (
@@ -24,8 +25,11 @@ from dashboard_domain import (
 ctx = page_context()
 activities = ctx.activity_df
 CHART_HEIGHT = 220
+ZONE_COLORS = ["#dbeafe", "#93c5fd", "#3b82f6", "#1d4ed8", "#0f3a7d"]
 
 st.title(f"เซสชัน · {ctx.selected_name}")
+st.caption(f"ช่วงข้อมูล {ctx.start_date.strftime('%d/%m/%Y')} – {ctx.end_date.strftime('%d/%m/%Y')} · "
+           "แสดงทุกช่องตามที่นาฬิกาส่งมาในแต่ละเซสชัน")
 
 if activities.empty:
     st.info("ยังไม่มีกิจกรรมในช่วงนี้", icon=":material/info:")
@@ -41,8 +45,10 @@ for _, row in candidates.iterrows():
         activity_title(row),
         f"{distance / 1000:.2f} km" if pd.notna(distance) and distance > 0 else None,
     ]))
-chosen = st.selectbox("กิจกรรม", options=list(labels), format_func=labels.get,
-                      key="session_activity")
+
+with st.container(border=True, key="surface-sess-picker"):
+    chosen = st.selectbox("เลือกกิจกรรม", options=list(labels), format_func=labels.get,
+                          key="session_activity")
 activity = candidates[candidates["activity_id"] == chosen].iloc[0]
 
 
@@ -68,7 +74,7 @@ end_stamina = value_of(activity, "end_stamina")
 start_lat = value_of(activity, "start_latitude")
 start_lon = value_of(activity, "start_longitude")
 groups = [
-    ("ภาพรวม", [
+    ("overview", "ภาพรวม", [
         ("ระยะ", f"{float(distance_m) / 1000:.2f} km" if has_distance else None),
         ("เวลา", fmt_sec(duration_sec) if duration_sec is not None else None),
         ("เวลาเคลื่อนที่", fmt_sec(moving_duration_sec)
@@ -87,7 +93,7 @@ groups = [
         ("นาทีหนักปานกลาง", value("moderate_intensity_min", " นาที")),
         ("นาทีหนักมาก", value("vigorous_intensity_min", " นาที")),
     ]),
-    ("Garmin ประเมินให้เซสชันนี้", [
+    ("garmin-eval", "Garmin ประเมินให้เซสชันนี้", [
         ("Aerobic TE", value("training_effect_aerobic", "", 1)),
         ("Anaerobic TE", value("training_effect_anaerobic", "", 1)),
         ("ผลการซ้อม", garmin_label(activity.get("training_effect_label")) or None),
@@ -101,7 +107,7 @@ groups = [
         ("Body Battery ที่ใช้", value("diff_body_battery")),
         ("เหงื่อ (ประมาณ)", value("sweat_loss_ml", " ml")),
     ]),
-    ("ฟอร์มการวิ่ง", [
+    ("dynamics", "ฟอร์มการวิ่ง", [
         ("Cadence เฉลี่ย", value("avg_cadence", " spm")),
         ("Cadence สูงสุด", value("max_cadence", " spm")),
         ("Stride Length", value("avg_stride_length_cm", " cm")),
@@ -112,7 +118,7 @@ groups = [
         ("Power สูงสุด", value("max_power", " W")),
         ("Normalized Power", value("normalized_power", " W")),
     ]),
-    ("เส้นทางและอากาศ", [
+    ("route-weather", "เส้นทางและอากาศ", [
         ("ไต่ขึ้น", value("elevation_gain_m", " m")),
         ("ลดระดับ", value("elevation_loss_m", " m")),
         ("จุดต่ำสุด", value("min_elevation_m", " m")),
@@ -128,79 +134,102 @@ groups = [
          else None),
     ]),
 ]
-for title, items in groups:
+
+for key_slug, title, items in groups:
     items = [(label, shown) for label, shown in items if shown]
     if not items:
         continue
-    st.markdown(f"**{title}**")
-    with st.container(horizontal=True):
-        for label, shown in items:
-            st.metric(label, shown, border=True, width=170)
+    with st.container(border=True, key=f"surface-sess-{key_slug}"):
+        st.markdown(f"**{title}**")
+        cols_per_row = min(4, max(2, len(items)))
+        for row_idx in range(0, len(items), cols_per_row):
+            chunk = items[row_idx:row_idx + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for col, (label, shown) in zip(cols, chunk, strict=False):
+                with col:
+                    st.metric(label, shown, border=True, width="stretch")
 
 zone_minutes = pd.DataFrame({
     "โซน": list(HR_ZONE_LABELS),
-    "นาที": [pd.to_numeric(activity.get(column), errors="coerce") / 60
+    "นาที": [(pd.to_numeric(activity.get(column), errors="coerce") / 60)
              for column in HR_ZONE_COLUMNS],
 })
+zone_minutes["นาที"] = zone_minutes["นาที"].round(1)
 splits = load_splits(int(chosen))
 
 left, right = st.columns([1, 2])
-with left, st.container(border=True):
+with left, st.container(border=True, key="surface-sess-zones"):
     st.markdown("**เวลาในโซน HR**")
+    st.caption("นาทีในแต่ละโซนของเซสชันนี้")
     if zone_minutes["นาที"].notna().any():
-        st.bar_chart(zone_minutes, x="โซน", y="นาที", x_label="", y_label="นาที",
-                     height=CHART_HEIGHT, sort=False)
+        st.vega_lite_chart(
+            zone_minutes,
+            session_zone_bar_spec(HR_ZONE_LABELS, ZONE_COLORS, height=CHART_HEIGHT),
+            width="stretch",
+        )
     else:
         st.caption("Garmin ไม่ได้ส่งเวลาในโซนของกิจกรรมนี้")
-with right, st.container(border=True):
+with right, st.container(border=True, key="surface-sess-lap-hr"):
     st.markdown("**HR ต่อ lap**")
+    st.caption("เปรียบเทียบ HR เฉลี่ยและสูงสุดในแต่ละรอบ")
     if not splits.empty and splits["avg_hr"].notna().any():
-        lap_nums = pd.to_numeric(splits["split_num"], errors="coerce").astype("Int64")
-        hr = splits.assign(Lap=lap_nums.astype(str))
-        st.line_chart(hr.rename(columns={"avg_hr": "HR เฉลี่ย", "max_hr": "HR สูงสุด"}),
-                      x="Lap", y=["HR เฉลี่ย", "HR สูงสุด"], x_label="lap",
-                      y_label="bpm", height=CHART_HEIGHT)
+        ordered_splits = splits.assign(
+            _lap_int=pd.to_numeric(splits["split_num"], errors="coerce")
+        ).sort_values("_lap_int", kind="stable")
+        lap_labels = ordered_splits["_lap_int"].astype("Int64").astype(str)
+        hr_long = pd.DataFrame({
+            "Lap": lap_labels,
+            "HR เฉลี่ย": pd.to_numeric(ordered_splits.get("avg_hr"), errors="coerce"),
+            "HR สูงสุด": pd.to_numeric(ordered_splits.get("max_hr"), errors="coerce"),
+        }).melt(id_vars="Lap", value_vars=["HR เฉลี่ย", "HR สูงสุด"],
+                var_name="รายการ", value_name="bpm")
+        st.vega_lite_chart(
+            hr_long,
+            session_lap_hr_spec(height=CHART_HEIGHT),
+            width="stretch",
+        )
     else:
         st.caption("ไม่มีข้อมูล lap ของกิจกรรมนี้")
 
-st.subheader("Lap ทั้งหมด", anchor=False)
-if splits.empty:
-    st.caption("Garmin ไม่ได้ส่งข้อมูล lap ของกิจกรรมนี้ (หรือยังไม่ถึงรอบ full sync 08:00/21:00)")
-else:
-    def _fmt_lap(series, fn):
-        if series is None:
-            return None
-        return series.map(
-            lambda v: None if v is None or pd.isna(v) else (
-                None if (out := fn(v)) in ("", "–") else out
+with st.container(border=True, key="surface-sess-laps"):
+    st.subheader("Lap ทั้งหมด", anchor=False)
+    if splits.empty:
+        st.caption("Garmin ไม่ได้ส่งข้อมูล lap ของกิจกรรมนี้ (หรือยังไม่ถึงรอบ full sync 08:00/21:00)")
+    else:
+        def _fmt_lap(series, fn):
+            if series is None:
+                return None
+            return series.map(
+                lambda v: None if v is None or pd.isna(v) else (
+                    None if (out := fn(v)) in ("", "–") else out
+                )
             )
-        )
 
-    table = pd.DataFrame({
-        "Lap": pd.to_numeric(splits["split_num"], errors="coerce").astype("Int64"),
-        "ระยะ (m)": splits["distance_m"].round(0),
-        "เวลา": _fmt_lap(splits.get("duration_sec"), fmt_sec),
-        "เพซ /km": _fmt_lap(splits.get("avg_pace_min_km"), fmt_pace),
-        "HR เฉลี่ย": splits.get("avg_hr"),
-        "HR สูงสุด": splits.get("max_hr"),
-        "km/h": (pd.to_numeric(splits.get("avg_speed_mps"), errors="coerce") * 3.6).round(1),
-        "Cadence": splits.get("avg_cadence"),
-        "Cadence สูงสุด": splits.get("max_cadence"),
-        "Power": splits.get("avg_power"),
-        "Power สูงสุด": splits.get("max_power"),
-        "NP": splits.get("normalized_power"),
-        "Stride (cm)": splits.get("avg_stride_length_cm"),
-        "GCT (ms)": splits.get("ground_contact_time_ms"),
-        "VO (cm)": splits.get("vertical_oscillation_cm"),
-        "V.Ratio (%)": splits.get("vertical_ratio"),
-        "ไต่ (m)": splits.get("elevation_gain_m"),
-        "ลด (m)": splits.get("elevation_loss_m"),
-        "ชนิด": _fmt_lap(splits.get("intensity_type"), garmin_label)
-                if "intensity_type" in splits else None,
-    })
-    st.dataframe(table.dropna(axis=1, how="all"), hide_index=True, width="stretch",
-                 column_config={"ระยะ (m)": st.column_config.NumberColumn(format="%d"),
-                                "HR เฉลี่ย": st.column_config.NumberColumn(format="%d"),
-                                "HR สูงสุด": st.column_config.NumberColumn(format="%d"),
-                                "Cadence": st.column_config.NumberColumn(format="%d"),
-                                "Cadence สูงสุด": st.column_config.NumberColumn(format="%d")})
+        table = pd.DataFrame({
+            "Lap": pd.to_numeric(splits["split_num"], errors="coerce").astype("Int64"),
+            "ระยะ (m)": splits["distance_m"].round(0),
+            "เวลา": _fmt_lap(splits.get("duration_sec"), fmt_sec),
+            "เพซ /km": _fmt_lap(splits.get("avg_pace_min_km"), fmt_pace),
+            "HR เฉลี่ย": splits.get("avg_hr"),
+            "HR สูงสุด": splits.get("max_hr"),
+            "km/h": (pd.to_numeric(splits.get("avg_speed_mps"), errors="coerce") * 3.6).round(1),
+            "Cadence": splits.get("avg_cadence"),
+            "Cadence สูงสุด": splits.get("max_cadence"),
+            "Power": splits.get("avg_power"),
+            "Power สูงสุด": splits.get("max_power"),
+            "NP": splits.get("normalized_power"),
+            "Stride (cm)": splits.get("avg_stride_length_cm"),
+            "GCT (ms)": splits.get("ground_contact_time_ms"),
+            "VO (cm)": splits.get("vertical_oscillation_cm"),
+            "V.Ratio (%)": splits.get("vertical_ratio"),
+            "ไต่ (m)": splits.get("elevation_gain_m"),
+            "ลด (m)": splits.get("elevation_loss_m"),
+            "ชนิด": _fmt_lap(splits.get("intensity_type"), garmin_label)
+                    if "intensity_type" in splits else None,
+        })
+        st.dataframe(table.dropna(axis=1, how="all"), hide_index=True, width="stretch",
+                     column_config={"ระยะ (m)": st.column_config.NumberColumn(format="%d"),
+                                    "HR เฉลี่ย": st.column_config.NumberColumn(format="%d"),
+                                    "HR สูงสุด": st.column_config.NumberColumn(format="%d"),
+                                    "Cadence": st.column_config.NumberColumn(format="%d"),
+                                    "Cadence สูงสุด": st.column_config.NumberColumn(format="%d")})

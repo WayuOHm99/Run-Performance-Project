@@ -34,7 +34,7 @@ wellness = ctx.wellness_df
 CHART_HEIGHT = 220
 
 st.title(f"ร่างกาย · {ctx.selected_name}")
-st.caption(f"{ctx.start_date.strftime('%d/%m/%Y')} – {ctx.end_date.strftime('%d/%m/%Y')} · "
+st.caption(f"ช่วงข้อมูล {ctx.start_date.strftime('%d/%m/%Y')} – {ctx.end_date.strftime('%d/%m/%Y')} · "
            "ค่าทั้งหมดจาก Garmin ตามที่ส่งมา")
 
 if wellness.empty or not wellness.drop(columns=["athlete_id", "calendar_date", "fetched_at"],
@@ -53,6 +53,7 @@ def has(*columns):
 
 
 def spark(column):
+    """คืนลำดับค่าดิบสำหรับเส้นย่อบนการ์ดเมื่อมีข้อมูลอย่างน้อย 2 วัน"""
     if column not in wellness:
         return None
     values = pd.to_numeric(wellness[column], errors="coerce").dropna().tolist()
@@ -75,34 +76,39 @@ battery_note = " · ".join(filter(None, [
     field_when(battery, today),
 ]))
 
-with st.container(horizontal=True):
-    tiles = [
-        ("Sleep score", sleep, fmt_num(sleep["value"]) if sleep else "–",
-         field_when(sleep, today), "sleep_score"),
-        ("HRV คืนล่าสุด", hrv, fmt_num(hrv["value"], " ms") if hrv else "–",
-         " · ".join(filter(None, [garmin_label(hrv["row"].get("hrv_status")) if hrv else "",
-                                  field_when(hrv, today)])), "hrv_last_night"),
-        ("RHR", rhr, fmt_num(rhr["value"], " bpm") if rhr else "–",
-         field_when(rhr, today), "resting_hr"),
-        ("Body Battery ล่าสุด", battery, fmt_num(battery["value"]) if battery else "–",
-         battery_note, "bb_most_recent"),
-        ("Stress เฉลี่ย", stress, fmt_num(stress["value"]) if stress else "–",
-         field_when(stress, today), "stress_avg"),
-    ]
-    if recovery:
-        tiles.append((
-            "Recovery Time", recovery, fmt_recovery_time(recovery["value"]),
-            field_when(recovery, today), "recovery_time_min",
-        ))
-    if readiness:
-        tiles.append((
-            "Training Readiness", readiness, fmt_num(readiness["value"]),
-            " · ".join(filter(None, [garmin_label(readiness["row"].get("readiness_level")),
-                                     readiness_when(readiness, today)])),
-            "training_readiness"))
-    for label, snapshot, value, note, column in tiles:
-        st.metric(label, value, note, delta_color="off", delta_arrow="off",
-                  border=True, chart_data=spark(column) if snapshot else None)
+tiles = [
+    ("Sleep score", sleep, fmt_num(sleep["value"]) if sleep else "–",
+     field_when(sleep, today), "sleep_score"),
+    ("HRV คืนล่าสุด", hrv, fmt_num(hrv["value"], " ms") if hrv else "–",
+     " · ".join(filter(None, [garmin_label(hrv["row"].get("hrv_status")) if hrv else "",
+                              field_when(hrv, today)])), "hrv_last_night"),
+    ("RHR", rhr, fmt_num(rhr["value"], " bpm") if rhr else "–",
+     field_when(rhr, today), "resting_hr"),
+    ("Body Battery ล่าสุด", battery, fmt_num(battery["value"]) if battery else "–",
+     battery_note, "bb_most_recent"),
+    ("Stress เฉลี่ย", stress, fmt_num(stress["value"]) if stress else "–",
+     field_when(stress, today), "stress_avg"),
+]
+if recovery:
+    tiles.append((
+        "Recovery Time", recovery, fmt_recovery_time(recovery["value"]),
+        field_when(recovery, today), "recovery_time_min",
+    ))
+if readiness:
+    tiles.append((
+        "Training Readiness", readiness, fmt_num(readiness["value"]),
+        " · ".join(filter(None, [garmin_label(readiness["row"].get("readiness_level")),
+                                 readiness_when(readiness, today)])),
+        "training_readiness"))
+
+cols_per_row = 3 if len(tiles) in (5, 6) else 4
+for row_idx in range(0, len(tiles), cols_per_row):
+    chunk = tiles[row_idx:row_idx + cols_per_row]
+    cols = st.columns(len(chunk))
+    for col, (label, snapshot, value, note, column) in zip(cols, chunk, strict=False):
+        with col:
+            st.metric(label, value, note, delta_color="off", delta_arrow="off",
+                      border=True, chart_data=spark(column) if snapshot else None, width="stretch")
 
 if readiness:
     r_row = readiness["row"]
@@ -126,13 +132,15 @@ if readiness:
             if short_fb or long_fb:
                 st.caption(" · ".join(filter(None, [short_fb, long_fb, readiness_when(readiness, today)])))
             if factor_items:
-                with st.container(horizontal=True):
-                    for f_label, f_val, f_note in factor_items:
-                        st.metric(f_label, f_val, f_note, delta_color="off", delta_arrow="off", border=True)
+                f_cols = st.columns(min(4, len(factor_items)))
+                for idx, (f_label, f_val, f_note) in enumerate(factor_items):
+                    with f_cols[idx % len(f_cols)]:
+                        st.metric(f_label, f_val, f_note, delta_color="off", delta_arrow="off",
+                                  border=True, width="stretch")
 
 
-def chart_card(title, caption=None):
-    card = st.container(border=True)
+def chart_card(key_suffix, title, caption=None):
+    card = st.container(border=True, key=f"surface-body-{key_suffix}")
     card.markdown(f"**{title}**")
     if caption:
         card.caption(caption)
@@ -147,24 +155,24 @@ def line(card, columns, labels, y_label):
 left, right = st.columns(2)
 with left:
     if has("sleep_score"):
-        line(chart_card("คะแนนการนอน", "Garmin Sleep Score รายคืน"),
+        line(chart_card("sleep", "คะแนนการนอน", "Garmin Sleep Score รายคืน"),
              ["sleep_score"], ["Sleep score"], "คะแนน")
     if has("hrv_last_night", "hrv_weekly_avg"):
-        line(chart_card("HRV", "คืนล่าสุด และค่าเฉลี่ย 7 วันที่ Garmin คำนวณเอง"),
+        line(chart_card("hrv", "HRV", "คืนล่าสุด และค่าเฉลี่ย 7 วันที่ Garmin คำนวณเอง"),
              ["hrv_last_night", "hrv_weekly_avg"], ["คืนล่าสุด", "เฉลี่ย 7 วัน (Garmin)"], "ms")
     if has("body_battery_high", "body_battery_low"):
-        line(chart_card("Body Battery", "สูงสุดและต่ำสุดของแต่ละวัน"),
+        line(chart_card("bb-range", "Body Battery", "สูงสุดและต่ำสุดของแต่ละวัน"),
              ["body_battery_high", "body_battery_low"], ["สูงสุด", "ต่ำสุด"], "")
     if has("bb_charged", "bb_drained"):
-        line(chart_card("Body Battery ที่ได้/ใช้ไป", "ชาร์จเข้าและใช้ไปของแต่ละวันตามที่ Garmin นับ"),
+        line(chart_card("bb-flow", "Body Battery ที่ได้/ใช้ไป", "ชาร์จเข้าและใช้ไปของแต่ละวันตามที่ Garmin นับ"),
              ["bb_charged", "bb_drained"], ["ชาร์จ", "ใช้ไป"], "")
     if has("avg_sleep_respiration", "avg_waking_respiration"):
-        line(chart_card("การหายใจ", "ครั้งต่อนาที ตอนหลับและตอนตื่น"),
+        line(chart_card("resp", "การหายใจ", "ครั้งต่อนาที ตอนหลับและตอนตื่น"),
              ["avg_sleep_respiration", "avg_waking_respiration"], ["ตอนหลับ", "ตอนตื่น"],
              "ครั้ง/นาที")
 with right:
     if has("deep_sleep_sec", "light_sleep_sec", "rem_sleep_sec", "awake_sec"):
-        card = chart_card("ระยะการนอน", "ชั่วโมงในแต่ละระยะที่ Garmin แยกให้")
+        card = chart_card("sleep-stage", "ระยะการนอน", "ชั่วโมงในแต่ละระยะที่ Garmin แยกให้")
         stages = daily[["วันที่"]].copy()
         for column, label in (("deep_sleep_sec", "Deep"), ("light_sleep_sec", "Light"),
                               ("rem_sleep_sec", "REM"), ("awake_sec", "ตื่น")):
@@ -173,36 +181,39 @@ with right:
         stage_frame, stage_spec = sleep_stage_bar_frame_and_spec(
             stages,
             labels=("Deep", "REM", "Light", "ตื่น"),
-            colors=("#104281", "#3987e5", "#aed0f7", "#eb6834"),
+            colors=("#0f3a7d", "#3b82f6", "#bfdbfe", "#eb6834"),
             y_label="ชั่วโมง",
             height=CHART_HEIGHT,
         )
         card.vega_lite_chart(stage_frame, stage_spec, width="stretch")
     if has("resting_hr"):
-        line(chart_card("Resting HR"), ["resting_hr"], ["RHR"], "bpm")
+        line(chart_card("rhr", "Resting HR", "อัตราการเต้นหัวใจขณะพักรายวัน"),
+             ["resting_hr"], ["RHR"], "bpm")
     if has("stress_avg", "max_stress"):
-        line(chart_card("Stress", "ค่าเฉลี่ยและสูงสุดของวัน"),
+        line(chart_card("stress", "Stress", "ค่าเฉลี่ยและสูงสุดของวัน"),
              ["stress_avg", "max_stress"], ["เฉลี่ย", "สูงสุด"], "")
     if has("training_readiness"):
-        line(chart_card("Training Readiness"), ["training_readiness"], ["Readiness"], "คะแนน")
+        line(chart_card("readiness", "Training Readiness", "คะแนนความพร้อมจาก Garmin รายวัน"),
+             ["training_readiness"], ["Readiness"], "คะแนน")
 
-st.subheader("ระหว่างวัน", anchor=False)
-if "body_intraday_day" in st.session_state and st.session_state["body_intraday_day"] > today:
-    st.session_state["body_intraday_day"] = today
-intraday_day = st.date_input("วันที่", value=today, max_value=today, format="DD/MM/YYYY",
-                             key="body_intraday_day", width=170)
-intraday_word = "วันนี้" if intraday_day == today else "วันนั้น"
-points = load_intraday(intraday_day, [ctx.athlete_id])
-if points.empty:
-    st.caption(f"ยังไม่มีข้อมูลระหว่างวันของ{intraday_word} — ระบบเริ่มเก็บ HR/Stress/Body Battery รายจุด"
-               "ตั้งแต่ 30 ก.ย. 69 และเก็บย้อนหลัง 180 วัน")
-else:
-    st.caption("จุดละ 2–3 นาทีตามที่นาฬิกาส่งมา · เส้นขาด = ช่วงที่ไม่มีข้อมูล "
-               "(ไม่ได้ใส่นาฬิกา / Stress วัดไม่ได้ระหว่างออกกำลังกาย)")
-    for metric, (label, unit) in INTRADAY_METRICS.items():
-        series = intraday_series(points, metric)
-        if series["ค่า"].notna().any():
-            with st.container(border=True):
+with st.container(border=True, key="surface-body-intraday-section"):
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.subheader("ระหว่างวัน", anchor=False)
+        if "body_intraday_day" in st.session_state and st.session_state["body_intraday_day"] > today:
+            st.session_state["body_intraday_day"] = today
+        intraday_day = st.date_input("วันที่", value=today, max_value=today, format="DD/MM/YYYY",
+                                     key="body_intraday_day", width=155, label_visibility="collapsed")
+    intraday_word = "วันนี้" if intraday_day == today else "วันนั้น"
+    points = load_intraday(intraday_day, [ctx.athlete_id])
+    if points.empty:
+        st.caption(f"ยังไม่มีข้อมูลระหว่างวันของ{intraday_word} — ระบบเริ่มเก็บ HR/Stress/Body Battery รายจุด"
+                   "ตั้งแต่ 30 ก.ย. 69 และเก็บย้อนหลัง 180 วัน")
+    else:
+        st.caption("จุดละ 2–3 นาทีตามที่นาฬิกาส่งมา · เส้นขาด = ช่วงที่ไม่มีข้อมูล "
+                   "(ไม่ได้ใส่นาฬิกา / Stress วัดไม่ได้ระหว่างออกกำลังกาย)")
+        for metric, (label, unit) in INTRADAY_METRICS.items():
+            series = intraday_series(points, metric)
+            if series["ค่า"].notna().any():
                 st.markdown(f"**{label}**")
                 in_frame, in_spec = intraday_frame_and_spec(
                     series, intraday_day, y_title=unit, names={ctx.athlete_id: ctx.selected_name},

@@ -165,6 +165,24 @@ class NotificationPolicyTests(unittest.TestCase):
         self.assertNotIn("old:network", keys)
         self.assertIn("fresh:network", keys)
 
+    def test_write_records_retries_transient_permission_error_on_replace(self):
+        from unittest import mock
+
+        real_replace = Path.replace
+        calls = []
+
+        def flaky_replace(src, dst):
+            calls.append(dst)
+            if len(calls) < 3:
+                raise PermissionError(13, "Permission denied")
+            return real_replace(src, dst)
+
+        with mock.patch.object(Path, "replace", autospec=True, side_effect=flaky_replace):
+            result = self.update([self.condition("flaky:av")])
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([item["key"] for item in result["alerts"]], ["flaky:av"])
+
 
 if __name__ == "__main__":
     unittest.main()

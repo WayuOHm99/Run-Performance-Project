@@ -61,11 +61,17 @@ for column, label, render in (
                 note_parts.append(f"Endurance {fmt_num(endurance)}")
         note_parts.append(field_when(snapshot, today))
         tiles.append((label, render(snapshot["value"]), " · ".join(note_parts)))
+
 if tiles:
     shown_any = True
-    with st.container(horizontal=True):
-        for label, value, note in tiles:
-            st.metric(label, value, note, delta_color="off", delta_arrow="off", border=True)
+    cols_per_row = 3 if len(tiles) in (5, 6) else min(4, len(tiles))
+    for row_idx in range(0, len(tiles), cols_per_row):
+        chunk = tiles[row_idx:row_idx + cols_per_row]
+        cols = st.columns(len(chunk))
+        for col, (label, value, note) in zip(cols, chunk, strict=False):
+            with col:
+                st.metric(label, value, note, delta_color="off", delta_arrow="off",
+                          border=True, width="stretch")
 
 predictions = load_race_predictions(ctx.athlete_id, "1900-01-01", today.isoformat())
 distances = (("time_5k_sec", "5K"), ("time_10k_sec", "10K"),
@@ -73,13 +79,18 @@ distances = (("time_5k_sec", "5K"), ("time_10k_sec", "10K"),
 if not predictions.empty:
     shown_any = True
     st.subheader("เวลาคาดการณ์แข่ง (Garmin Race Predictor)", anchor=False)
-    with st.container(horizontal=True):
-        for column, label in distances:
-            snapshot = latest_field(predictions, column)
-            if snapshot:
-                st.metric(label, fmt_sec(snapshot["value"]),
-                          snapshot["date"].strftime("%d/%m/%Y"),
-                          delta_color="off", delta_arrow="off", border=True)
+    pred_tiles = []
+    for column, label in distances:
+        snapshot = latest_field(predictions, column)
+        if snapshot:
+            pred_tiles.append((label, fmt_sec(snapshot["value"]), snapshot["date"].strftime("%d/%m/%Y")))
+    if pred_tiles:
+        p_cols = st.columns(len(pred_tiles))
+        for col, (label, value, note) in zip(p_cols, pred_tiles, strict=False):
+            with col:
+                st.metric(label, value, note, delta_color="off", delta_arrow="off",
+                          border=True, width="stretch")
+
     in_range = predictions[
         (predictions["calendar_date"] >= pd.Timestamp(ctx.start_date))
         & (predictions["calendar_date"] <= pd.Timestamp(ctx.end_date))
@@ -87,7 +98,7 @@ if not predictions.empty:
     if any(in_range[col].notna().sum() >= 2 for col in ("time_5k_sec", "time_10k_sec")):
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
         chart["วันที่"] = chart["calendar_date"]
-        with st.container(border=True):
+        with st.container(border=True, key="surface-est-race-chart"):
             st.markdown("**5K และ 10K ที่ Garmin คาดการณ์ในช่วงนี้**")
             st.caption("หน่วยเป็นนาที · ค่าที่ต่ำลงคือ Garmin คาดว่าวิ่งได้เร็วขึ้น")
             left, right = st.columns(2)
@@ -111,7 +122,7 @@ if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
     if in_range["vo2max_trend"].notna().sum() >= 2:
         chart = calendar_aligned_frame(in_range, "calendar_date", ctx.start_date, ctx.end_date)
         chart["วันที่"] = chart["calendar_date"]
-        with st.container(border=True):
+        with st.container(border=True, key="surface-est-vo2max"):
             st.markdown("**VO2max รายวันในช่วงนี้**")
             frame, spec = daily_line_frame_and_spec(
                 chart, ["vo2max_trend"], ["VO2max"], y_label="ml/kg/min", height=CHART_HEIGHT,
@@ -121,25 +132,28 @@ if "vo2max_trend" in history and history["vo2max_trend"].notna().any():
 records = load_personal_records(ctx.athlete_id)
 if not records.empty:
     shown_any = True
-    st.subheader("สถิติส่วนตัว (Garmin Personal Records)", anchor=False)
-    st.caption("Garmin หาเองจากทุกกิจกรรม รวมช่วงหนึ่งของการวิ่งที่ยาวกว่า · "
-               "ถ้า GPS กระโดด ค่าที่ได้อาจเร็วเกินจริง แก้ได้ในแอป Garmin Connect")
-    st.dataframe(pd.DataFrame(personal_record_rows(records)), hide_index=True, width="stretch")
+    with st.container(border=True, key="surface-est-pr"):
+        st.subheader("สถิติส่วนตัว (Garmin Personal Records)", anchor=False)
+        st.caption("Garmin หาเองจากทุกกิจกรรม รวมช่วงหนึ่งของการวิ่งที่ยาวกว่า · "
+                   "ถ้า GPS กระโดด ค่าที่ได้อาจเร็วเกินจริง แก้ได้ในแอป Garmin Connect")
+        st.dataframe(pd.DataFrame(personal_record_rows(records)), hide_index=True, width="stretch")
 
 body = load_body_composition(ctx.athlete_id)
 if not body.empty and body[["weight_kg", "bmi", "body_fat_pct"]].notna().any().any():
     shown_any = True
     st.subheader("องค์ประกอบร่างกาย", anchor=False)
-    # ค่าล่าสุด "รายช่อง" พร้อมวันที่ของช่องนั้น — แถวล่าสุดอาจมีแค่น้ำหนักไม่มีไขมัน
-    # การหยิบแถวเดียวจะซ่อนค่าไขมันครั้งก่อนที่ยังเป็นค่าล่าสุดจริงของมัน
-    with st.container(horizontal=True):
-        for column, label, unit in (("weight_kg", "น้ำหนัก", " kg"), ("bmi", "BMI", ""),
-                                    ("body_fat_pct", "ไขมัน", "%")):
-            snapshot = latest_field(body, column)
-            if snapshot:
-                st.metric(label, fmt_num(snapshot["value"], unit),
-                          snapshot["date"].strftime("%d/%m/%Y"),
-                          delta_color="off", delta_arrow="off", border=True)
+    body_tiles = []
+    for column, label, unit in (("weight_kg", "น้ำหนัก", " kg"), ("bmi", "BMI", ""),
+                                ("body_fat_pct", "ไขมัน", "%")):
+        snapshot = latest_field(body, column)
+        if snapshot:
+            body_tiles.append((label, fmt_num(snapshot["value"], unit), snapshot["date"].strftime("%d/%m/%Y")))
+    if body_tiles:
+        b_cols = st.columns(len(body_tiles))
+        for col, (label, value, note) in zip(b_cols, body_tiles, strict=False):
+            with col:
+                st.metric(label, value, note, delta_color="off", delta_arrow="off",
+                          border=True, width="stretch")
 
 if not shown_any:
     st.info("Garmin ยังไม่เคยส่งค่าประเมินของนักกีฬาคนนี้มา", icon=":material/info:")

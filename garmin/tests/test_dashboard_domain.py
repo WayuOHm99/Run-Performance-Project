@@ -409,6 +409,44 @@ class CachedChartSpecTests(unittest.TestCase):
         self.assertIn("รายการ", spec_text)
         self.assertIn("ค่า", spec_text)
 
+    def test_daily_line_points_are_visible_so_isolated_days_between_gaps_still_appear(self):
+        raw = pd.DataFrame({
+            "วันที่": pd.to_datetime(["2026-08-07", "2026-08-08", "2026-08-09"]),
+            "rhr": [float("nan"), 48.0, float("nan")],
+        })
+        _, spec = dashboard_charts.daily_line_frame_and_spec(raw, ["rhr"], ["RHR"], y_label="bpm")
+        point_layer = spec["layer"][1]
+        mark = point_layer["mark"]
+        opacity = mark.get("opacity", 1.0) if isinstance(mark, dict) else 1.0
+        self.assertGreater(opacity, 0.0)
+
+    def test_bar_and_lap_specs_use_horizontal_labels_and_fresh_copies(self):
+        weekly = dashboard_charts.weekly_bar_spec(y_col="ระยะวิ่ง (km)", y_title="km")
+        self.assertEqual(weekly["encoding"]["x"]["axis"]["labelAngle"], 0)
+        weekly["encoding"].clear()
+        self.assertIn("x", dashboard_charts.weekly_bar_spec(y_col="ระยะวิ่ง (km)", y_title="km")["encoding"])
+
+        zones = dashboard_charts.zone_bar_spec(("Z1", "Z2"), ("#cde2fb", "#1c5cab"))
+        self.assertEqual(zones["encoding"]["x"]["axis"]["labelAngle"], 0)
+
+        session_zones = dashboard_charts.session_zone_bar_spec(("Z1", "Z2"), ("#cde2fb", "#1c5cab"))
+        self.assertEqual(session_zones["encoding"]["x"]["axis"]["labelAngle"], 0)
+
+        laps = dashboard_charts.session_lap_hr_spec()
+        self.assertEqual(laps["layer"][0]["encoding"]["x"]["axis"]["labelAngle"], 0)
+
+    def test_line_specs_trim_trailing_zeros_on_constant_series_and_pad_thai_axis_titles(self):
+        raw = pd.DataFrame({
+            "วันที่": pd.to_datetime(["2026-08-07", "2026-08-08"]),
+            "pred_5k": [25.0, 25.0],
+        })
+        _, single = dashboard_charts.daily_line_frame_and_spec(
+            raw, ["pred_5k"], ["5K"], y_label="นาที",
+        )
+        y_axis = single["layer"][0]["encoding"]["y"]["axis"]
+        self.assertEqual(y_axis.get("format"), ",.2~f")
+        self.assertGreaterEqual(single.get("padding", {}).get("left", 0), 8)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,8 @@ from dashboard_freshness import load_freshness, read_sync_summary
 ctx = page_context()
 
 st.title("สถานะระบบ")
-st.subheader("ความสดและวันที่ไม่มีข้อมูล", anchor=False)
+st.caption("มุมมองตรวจสอบการทำงานหลังบ้านแบบอ่านอย่างเดียว — แยกจากข้อมูลสุขภาพของนักกีฬา")
+
 coverage = []
 sync_rows = []
 for athlete in ctx.athletes_df.to_dict("records"):
@@ -34,20 +35,20 @@ for athlete in ctx.athletes_df.to_dict("records"):
     sync_rows.append({"นักกีฬา": name, "ผล": sync["result"],
                       "จบรอบล่าสุด (เวลาเครื่องซิงก์/เวลาไทยเมื่อมีโซน)": sync["finished"],
                       "ควรทำต่อ": sync["action"]})
-st.caption(f"ตรวจช่วง {ctx.start_date:%d/%m/%Y}–{ctx.end_date:%d/%m/%Y} ของทุกคน · "
-           "ไม่นับวันนี้ที่ยังไม่จบและวันก่อนมีข้อมูลครั้งแรก · มีค่าอย่างน้อยหนึ่งช่องในหน้าร่างกายถือว่ามีข้อมูล")
-st.dataframe(pd.DataFrame(coverage), hide_index=True, width="stretch")
-st.caption("วันว่างไม่ได้ยืนยันว่าซิงก์ล้ม และวันที่มีก็ไม่ได้หมายถึงครบทุกช่อง · "
-           "วันที่ไม่วิ่งไม่ถือเป็นกิจกรรมขาด · ตรวจวันเดียวกันใน Garmin Connect และการใส่/ซิงก์นาฬิกาก่อน")
-with st.expander("ควรเริ่มตรวจอย่างไร"):
-    st.markdown("1. ตรวจวันเดียวกันใน Garmin Connect และให้นาฬิกาซิงก์กับแอป\n"
-                "2. ดูผลซิงก์รายคนด้านล่าง: token ต้องขอใหม่บนเครื่องใช้งาน; "
-                "เน็ต/ช่องข้อมูลที่ล้มให้รอรอบถัดไป\n"
-                "3. ถ้า Garmin Connect มีข้อมูลแต่หน้ายังว่าง ให้กดรีเฟรชข้อมูล "
-                "แล้วตรวจ log บนเครื่องใช้งานตามคู่มือ ไม่ส่งรหัสผ่านหรือ token")
 
-st.caption("ตรวจงาน sync, Scheduled Task, backup, ฐานข้อมูล และพื้นที่ดิสก์แบบอ่านอย่างเดียว · "
-           "เครื่องที่หลับหรือปิดอยู่ทำงานเหล่านี้ไม่ได้ เมื่อเปิดกลับมาจะตามเก็บรอบที่พลาดเอง")
+with st.container(border=True, key="surface-sys-coverage"):
+    st.subheader("ความสดและวันที่ไม่มีข้อมูล", anchor=False)
+    st.caption(f"ตรวจช่วง {ctx.start_date:%d/%m/%Y}–{ctx.end_date:%d/%m/%Y} ของทุกคน · "
+               "ไม่นับวันนี้ที่ยังไม่จบและวันก่อนมีข้อมูลครั้งแรก · มีค่าอย่างน้อยหนึ่งช่องในหน้าร่างกายถือว่ามีข้อมูล")
+    st.dataframe(pd.DataFrame(coverage), hide_index=True, width="stretch")
+    st.caption("วันว่างไม่ได้ยืนยันว่าซิงก์ล้ม และวันที่มีก็ไม่ได้หมายถึงครบทุกช่อง · "
+               "วันที่ไม่วิ่งไม่ถือเป็นกิจกรรมขาด · ตรวจวันเดียวกันใน Garmin Connect และการใส่/ซิงก์นาฬิกาก่อน")
+    with st.expander("ควรเริ่มตรวจอย่างไร", icon=":material/help:"):
+        st.markdown("1. ตรวจวันเดียวกันใน Garmin Connect และให้นาฬิกาซิงก์กับแอป\n"
+                    "2. ดูผลซิงก์รายคนด้านล่าง: token ต้องขอใหม่บนเครื่องใช้งาน; "
+                    "เน็ต/ช่องข้อมูลที่ล้มให้รอรอบถัดไป\n"
+                    "3. ถ้า Garmin Connect มีข้อมูลแต่หน้ายังว่าง ให้กดรีเฟรชข้อมูล "
+                    "แล้วตรวจ log บนเครื่องใช้งานตามคู่มือ ไม่ส่งรหัสผ่านหรือ token")
 
 LEVEL_TEXT = {"ERROR": "ต้องแก้", "WARNING": "ควรดู", "OK": "ปกติ"}
 LEVEL_ORDER = {"ERROR": 0, "WARNING": 1, "OK": 2}
@@ -65,31 +66,39 @@ def load_findings(current_data_dir: str):
         health_report.use_data_dir(previous)
 
 
-findings, failure = ([], None) if ctx.demo_mode else load_findings(str(data_dir()))
-if ctx.demo_mode:
-    st.info("Demo ไม่ตรวจ Scheduled Task, token, backup หรือ heartbeat ของเครื่องจริง · "
-            "ใช้สำหรับทดลองหน้าจอเท่านั้น")
-elif failure:
-    st.error(f"ตัวตรวจสถานะทำงานไม่สำเร็จ ({failure}) — ลองรัน "
-             "`garmin\\.venv\\Scripts\\python.exe scripts\\health_report.py` เพื่อดูรายละเอียด",
-             icon=":material/error:")
-else:
-    counts = {level: sum(f["level"] == level for f in findings) for level in LEVEL_TEXT}
-    with st.container(horizontal=True):
-        st.metric("ต้องแก้", counts["ERROR"], border=True)
-        st.metric("ควรดู", counts["WARNING"], border=True)
-        st.metric("ปกติ", counts["OK"], border=True)
-    if findings:
-        table = pd.DataFrame(sorted(findings, key=lambda f: (LEVEL_ORDER.get(f["level"], 3), f["check"])))
-        table = table.assign(ระดับ=table["level"].map(LEVEL_TEXT).fillna(table["level"]))
-        st.dataframe(
-            table[["ระดับ", "check", "message"]].rename(columns={"check": "รายการ", "message": "รายละเอียด"}),
-            hide_index=True, width="stretch",
-        )
+with st.container(border=True, key="surface-sys-health"):
+    st.subheader("ผลตรวจสุขภาพระบบอัตโนมัติ", anchor=False)
+    st.caption("ตรวจงาน sync, Scheduled Task, backup, ฐานข้อมูล และพื้นที่ดิสก์แบบอ่านอย่างเดียว · "
+               "เครื่องที่หลับหรือปิดอยู่ทำงานเหล่านี้ไม่ได้ เมื่อเปิดกลับมาจะตามเก็บรอบที่พลาดเอง")
+    findings, failure = ([], None) if ctx.demo_mode else load_findings(str(data_dir()))
+    if ctx.demo_mode:
+        st.info("Demo ไม่ตรวจ Scheduled Task, token, backup หรือ heartbeat ของเครื่องจริง · "
+                "ใช้สำหรับทดลองหน้าจอเท่านั้น", icon=":material/info:")
+    elif failure:
+        st.error(f"ตัวตรวจสถานะทำงานไม่สำเร็จ ({failure}) — ลองรัน "
+                 "`garmin\\.venv\\Scripts\\python.exe scripts\\health_report.py` เพื่อดูรายละเอียด",
+                 icon=":material/error:")
     else:
-        st.caption("ไม่มีรายการตรวจสถานะ")
+        counts = {level: sum(f["level"] == level for f in findings) for level in LEVEL_TEXT}
+        c_err, c_warn, c_ok = st.columns(3)
+        with c_err:
+            st.metric("ต้องแก้", counts["ERROR"], border=True, width="stretch")
+        with c_warn:
+            st.metric("ควรดู", counts["WARNING"], border=True, width="stretch")
+        with c_ok:
+            st.metric("ปกติ", counts["OK"], border=True, width="stretch")
+        if findings:
+            table = pd.DataFrame(sorted(findings, key=lambda f: (LEVEL_ORDER.get(f["level"], 3), f["check"])))
+            table = table.assign(ระดับ=table["level"].map(LEVEL_TEXT).fillna(table["level"]))
+            st.dataframe(
+                table[["ระดับ", "check", "message"]].rename(columns={"check": "รายการ", "message": "รายละเอียด"}),
+                hide_index=True, width="stretch",
+            )
+        else:
+            st.caption("ไม่มีรายการตรวจสถานะ")
 
-st.subheader("sync ล่าสุดรายคน", anchor=False)
-st.dataframe(pd.DataFrame(sync_rows), hide_index=True, width="stretch")
-st.caption("สำเร็จบางส่วน = มีช่องข้อมูลที่ Garmin ตอบไม่สำเร็จในรอบนั้น รอบถัดไปจะลองใหม่เอง · "
-           "แจ้งเตือนจริงส่งผ่าน Windows toast และ GitHub heartbeat ตามเดิม")
+with st.container(border=True, key="surface-sys-sync"):
+    st.subheader("sync ล่าสุดรายคน", anchor=False)
+    st.dataframe(pd.DataFrame(sync_rows), hide_index=True, width="stretch")
+    st.caption("สำเร็จบางส่วน = มีช่องข้อมูลที่ Garmin ตอบไม่สำเร็จในรอบนั้น รอบถัดไปจะลองใหม่เอง · "
+               "แจ้งเตือนจริงส่งผ่าน Windows toast และ GitHub heartbeat ตามเดิม")

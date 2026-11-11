@@ -386,6 +386,13 @@ class TrainingPageTests(unittest.TestCase):
         ]
         self.assertEqual(round_warnings, [])
 
+    def test_activity_table_hides_optional_columns_when_every_row_is_empty(self):
+        main, _ = render_page(TRAINING_PAGE, seed_team)
+        shown = main.get("dataframe")[-1].value
+        self.assertNotIn("Training Effect", shown.columns)
+        self.assertNotIn("Training Load", shown.columns)
+        self.assertIn("ระยะ (km)", shown.columns)
+
 
 class BodyPageTests(unittest.TestCase):
     def test_athlete_whose_watch_stopped_still_sees_their_last_values(self):

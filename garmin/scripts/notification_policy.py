@@ -93,7 +93,14 @@ def _write_records(path, records):
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
         )
-        temporary.replace(path)
+        for attempt in range(20):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.025)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -103,11 +110,8 @@ def _state_lock(path, timeout_seconds=10):
     """Serialize the complete read/update/replace transaction across tasks."""
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_path, "a+b")
-    handle.seek(0, os.SEEK_END)
-    if handle.tell() == 0:
-        handle.write(b"0")
-        handle.flush()
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    handle = os.fdopen(fd, "r+b")
 
     deadline = time.monotonic() + timeout_seconds
     acquired = False
